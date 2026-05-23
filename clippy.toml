@@ -1,0 +1,5 @@
+# Clippy thresholds — match the complexity discipline tower/dossier use
+# (gocyclo 15, funlen 80, nestif 4) adapted for Rust.
+cognitive-complexity-threshold = 20
+too-many-lines-threshold = 100
+too-many-arguments-threshold = 6

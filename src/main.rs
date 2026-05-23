@@ -1,0 +1,138 @@
+//! `rooms` — disposable Firecracker microVMs with specified deps.
+//!
+//! Substrate for spawning a clean microVM, running a command in it, collecting
+//! artifacts, and tearing it down. See `docs/features/rooms-v0/spec.md`.
+//!
+//! v0 scaffold: the CLI surface is wired; subcommand bodies are stubs that
+//! exit with a non-zero status until the POC fills them in.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use tracing::{info, warn};
+
+/// rooms — disposable Firecracker microVMs with specified deps.
+#[derive(Parser, Debug)]
+#[command(name = "rooms", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Create a new room from an image, with a repo bundled in.
+    Create {
+        /// Path to the rootfs image (ext4).
+        #[arg(long)]
+        image: PathBuf,
+        /// Path to the source repo to bundle into the room.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Execute a command inside a room.
+    Exec {
+        /// Room id (from `rooms create`).
+        room_id: String,
+        /// Command + args to run inside the room (after `--`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        argv: Vec<String>,
+    },
+    /// Collect artifacts from a room to a host directory.
+    Collect {
+        /// Room id.
+        room_id: String,
+        /// Host directory to copy /workspace/out into.
+        #[arg(long)]
+        to: PathBuf,
+    },
+    /// Destroy a room: kill firecracker, release resources, remove work dir.
+    Destroy {
+        /// Room id.
+        room_id: String,
+        /// Skip cleanup; leave the room alive for inspection.
+        #[arg(long)]
+        keep: bool,
+    },
+    /// Run a task end-to-end: create + exec + collect + destroy.
+    Run {
+        /// Source repo to bundle in.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Path to the task spec markdown.
+        #[arg(long)]
+        task: PathBuf,
+        /// Rootfs image; defaults to the configured node-dev image.
+        #[arg(long)]
+        image: Option<PathBuf>,
+    },
+    /// Check the host environment (KVM, Firecracker, image, etc.).
+    Doctor,
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+
+    let cli = Cli::parse();
+    match dispatch(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            warn!(error = %err, "command failed");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn dispatch(cli: Cli) -> Result<()> {
+    match cli.command {
+        Command::Create { image, repo } => {
+            info!(?image, ?repo, "rooms create");
+            anyhow::bail!("create: not yet implemented (POC in flight)")
+        }
+        Command::Exec { room_id, argv } => {
+            info!(%room_id, ?argv, "rooms exec");
+            anyhow::bail!("exec: not yet implemented (POC in flight)")
+        }
+        Command::Collect { room_id, to } => {
+            info!(%room_id, ?to, "rooms collect");
+            anyhow::bail!("collect: not yet implemented (POC in flight)")
+        }
+        Command::Destroy { room_id, keep } => {
+            info!(%room_id, keep, "rooms destroy");
+            anyhow::bail!("destroy: not yet implemented (POC in flight)")
+        }
+        Command::Run { repo, task, image } => {
+            info!(?repo, ?task, ?image, "rooms run");
+            anyhow::bail!("run: not yet implemented (POC in flight)")
+        }
+        Command::Doctor => {
+            info!("rooms doctor");
+            anyhow::bail!("doctor: not yet implemented (POC in flight)")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        reason = "test module: panicky lints are noise in tests"
+    )]
+
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        // clap's `debug_assert` validates the derived CLI shape at runtime.
+        Cli::command().debug_assert();
+    }
+}

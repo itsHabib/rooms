@@ -1,0 +1,49 @@
+# rooms
+
+Disposable Firecracker microVMs with specified deps — the substrate that turns "run a command in a clean isolated env with a real repo" into one CLI invocation. First consumer is an LLM agent; the substrate doesn't know that.
+
+> **Status: v0 scaffold.** POC in flight. See [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md) for the current design, [`docs/features/01-productionization/driver.md`](docs/features/01-productionization/driver.md) for the post-POC work plan.
+
+A full README (vision, quickstart, CLI walkthrough, architecture) lands as part of [task #8 `docs-vision-and-readme`](docs/features/docs-vision-and-readme/spec.md). This is the holding stub.
+
+## Develop
+
+```sh
+make check        # fmt-check + clippy --all-targets -- -D warnings + test
+make fmt          # apply rustfmt
+make lint         # clippy strict (no fix)
+make test         # cargo test
+make build        # debug build
+make release      # release build
+```
+
+## Prereqs
+
+`rooms` is Linux + KVM only. v0 host setup: an Ubuntu Server VM under Hyper-V with nested virtualization enabled (`rooms-host`).
+
+Bootstrap on Windows:
+
+```powershell
+.\scripts\provision-hyperv.ps1 -VMName rooms-host -IsoPath <path-to-ubuntu-server.iso>
+# walk through the Ubuntu installer, SSH in, then:
+```
+
+Inside the Ubuntu VM:
+
+```sh
+bash scripts/setup-rooms-host.sh
+```
+
+That installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`.
+
+## Where things live
+
+- [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md) — v0 design (read first).
+- [`docs/features/01-productionization/driver.md`](docs/features/01-productionization/driver.md) — post-POC work plan (consumed by `/work-driver`).
+- [`docs/features/<task>/spec.md`](docs/features/) — one spec per productionization task.
+- [`scripts/`](scripts/) — host setup + (eventually) rootfs builder.
+- [`src/`](src/) — Rust source (clap CLI + Firecracker control + rootfs + transport + runner + artifacts).
+
+## License
+
+MIT.
