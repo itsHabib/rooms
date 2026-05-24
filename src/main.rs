@@ -24,7 +24,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run a task end-to-end in a fresh microVM.
+    /// Boot a microVM in a fresh room. POC scope: boot + shutdown only.
+    /// `--command` / `--task` / repo transport / agent runner land in later
+    /// milestones (m3 = SSH access, m4 = curl Anthropic from inside, then
+    /// the cursor-sdk-runner task).
     Run {
         /// Path to the rootfs image (ext4).
         #[arg(long)]

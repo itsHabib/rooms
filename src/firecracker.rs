@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 /// Network configuration for a microVM.
@@ -58,7 +58,14 @@ impl BootedVm {
     pub async fn shutdown(mut self) -> Result<()> {
         // SIGKILL is fine for the POC; SIGTERM-then-SIGKILL with grace is
         // a task #2 concern.
-        let _ = self.child.kill().await;
+        if let Err(e) = self.child.kill().await {
+            // Don't bail — process may have already exited (expected) or
+            // failed to die for a non-fatal reason. Log so the operator
+            // can investigate stray firecrackers, then proceed with file
+            // cleanup. (Reviewer PR #1 round 2: prior `let _ = kill()`
+            // hid real failures.)
+            warn!(error = %e, "failed to kill firecracker child; continuing cleanup");
+        }
         if self.socket.exists() {
             tokio::fs::remove_file(&self.socket).await.ok();
         }
