@@ -34,11 +34,7 @@ impl BootedVm {
 
     /// Returns true if the firecracker process is still running.
     pub(crate) fn is_alive(&mut self) -> Result<bool> {
-        Ok(self
-            .child
-            .try_wait()
-            .context("try_wait failed")?
-            .is_none())
+        Ok(self.child.try_wait().context("try_wait failed")?.is_none())
     }
 }
 
