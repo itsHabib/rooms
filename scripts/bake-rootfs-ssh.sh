@@ -47,7 +47,7 @@ trap 'cleanup; trap - EXIT; exit 143' TERM  # 128 + SIGTERM(15)
 # 1. Validate prereqs (runtime only — shellcheck is lint-time, gated separately
 # by `make check` / CI, not enforced here)
 MISSING=()
-for cmd in sudo mount mountpoint losetup ssh-keygen sed grep tee e2fsck awk; do
+for cmd in sudo mount mountpoint losetup ssh ssh-keygen sed grep tee e2fsck awk; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
@@ -147,6 +147,7 @@ set_directive() {
 set_directive PermitRootLogin yes
 set_directive PubkeyAuthentication yes
 set_directive PasswordAuthentication no
+set_directive AcceptEnv ANTHROPIC_API_KEY
 
 # 8. Sync + unmount + fsck
 sync
@@ -164,3 +165,4 @@ log "done."
 log "    pubkey baked into:  $ROOTFS"
 log "    private key:        $KEY_PATH"
 log "    verify after boot:  ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null root@172.16.0.2 'uname -a'"
+log "    env passthrough:    set ANTHROPIC_API_KEY before invoking rooms (SendEnv plumbs it to the guest)"

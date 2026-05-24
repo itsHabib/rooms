@@ -22,8 +22,12 @@ make release      # release build
 ```sh
 rooms run --image ~/rooms/images/rootfs.ext4          # boot + auto-shutdown after 3s
 rooms run --image ~/rooms/images/rootfs.ext4 --keep   # boot until Ctrl-C
+rooms run --image ~/rooms/images/rootfs.ext4 \
+    --command 'curl -s https://example.com'           # boot, ssh in, run cmd, shut down
 rooms doctor                                          # host env check (stub)
 ```
+
+`--command` and `--keep` are mutually exclusive. The command runs in the guest's bash via SSH; stdout / stderr flow to the host's stdout / stderr and the guest's exit code becomes rooms's exit code. `ANTHROPIC_API_KEY` is forwarded into the guest via SSH's `SendEnv` if set in the operator's shell.
 
 ## Prereqs
 
