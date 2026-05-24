@@ -137,7 +137,7 @@ async fn post_boot(
             Ok(0)
         }
         (false, Some(cmd)) => {
-            runner::wait_for_ssh(&network.guest_ip, key, Duration::from_secs(60)).await?;
+            runner::wait_for_ssh(&network.guest_ip, key, Duration::from_mins(1)).await?;
             // tokio::select! between exec and ctrl_c so a Ctrl-C during the guest
             // command drops the exec future (kill_on_drop SIGKILLs the ssh child),
             // returns Ok(130), and run_room's vm.shutdown() runs cleanly. Without
