@@ -2,6 +2,11 @@
 *.swp
 .DS_Store
 
+# IDE noise
+.idea/
+.vscode/
+*.iml
+
 # Built rootfs images are NOT committed (per rootfs-builder spec ED-2);
 # script is the source of truth, artifact is local-only.
 /images/*.ext4
