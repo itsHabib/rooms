@@ -31,10 +31,11 @@ Bootstrap on Windows:
 Inside the Ubuntu VM:
 
 ```sh
-bash scripts/setup-rooms-host.sh
+bash scripts/setup-rooms-host.sh         # firecracker, kernel, rootfs, rust, node, claude-code
+bash scripts/setup-tap.sh                # TAP device + NAT + IP forwarding (one-time, needs sudo)
 ```
 
-That installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`.
+The first installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`. The second creates the `tap-fc0` interface that microVMs use for networking (POC: one shared TAP; per-room dynamic TAPs are task #2 hardening). Teardown via `bash scripts/teardown-tap.sh`.
 
 ## Where things live
 

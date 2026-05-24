@@ -11,6 +11,24 @@ use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use tracing::{debug, info};
 
+/// Network configuration for a microVM.
+///
+/// The TAP device named by `tap_name` must already exist on the host (the
+/// POC ships `scripts/setup-tap.sh` to create the conventional `tap-fc0`).
+/// The guest IP is plumbed via the Linux kernel's built-in IP autoconfig
+/// (boot_args `ip=...`), so no DHCP / systemd-networkd / `/etc/network`
+/// fiddling is needed inside the rootfs.
+pub struct NetworkConfig {
+    /// TAP device name on the host (e.g. `"tap-fc0"`).
+    pub tap_name: String,
+    /// IP address the guest's eth0 takes (e.g. `"172.16.0.2"`).
+    pub guest_ip: String,
+    /// Gateway IP — the host-side TAP IP (e.g. `"172.16.0.1"`).
+    pub gateway_ip: String,
+    /// Netmask in dotted form (e.g. `"255.255.255.0"`).
+    pub netmask: String,
+}
+
 /// A booted Firecracker microVM. Dropping the handle kills the process.
 pub struct BootedVm {
     child: Child,
@@ -38,11 +56,16 @@ impl BootedVm {
     }
 }
 
-/// Boot a Firecracker microVM with the given kernel + rootfs.
+/// Boot a Firecracker microVM with the given kernel + rootfs, optionally
+/// attaching a network interface.
 ///
-/// POC: minimal config — 1 vCPU, 256 MiB, no networking. Caller is responsible
-/// for invoking [`BootedVm::shutdown`] when done.
-pub async fn boot(kernel: &Path, rootfs: &Path) -> Result<BootedVm> {
+/// POC: minimal config — 1 vCPU, 256 MiB. Caller is responsible for invoking
+/// [`BootedVm::shutdown`] when done.
+pub async fn boot(
+    kernel: &Path,
+    rootfs: &Path,
+    network: Option<&NetworkConfig>,
+) -> Result<BootedVm> {
     let socket = PathBuf::from(format!("/tmp/fc-{}.sock", std::process::id()));
 
     // Clean any stale socket from a previous run.
@@ -60,12 +83,25 @@ pub async fn boot(kernel: &Path, rootfs: &Path) -> Result<BootedVm> {
 
     wait_for_socket(&socket, Duration::from_secs(5)).await?;
 
+    // Kernel cmdline: when networking is requested, append Linux's built-in IP
+    // autoconfig string (`ip=<client>::<gw>:<mask>::<dev>:<autoconf>`) so eth0
+    // comes up before userspace, with no DHCP needed in the rootfs.
+    let boot_args = network.map_or_else(
+        || String::from("console=ttyS0 reboot=k panic=1 pci=off"),
+        |net| {
+            format!(
+                "console=ttyS0 reboot=k panic=1 pci=off ip={}::{}:{}::eth0:off",
+                net.guest_ip, net.gateway_ip, net.netmask
+            )
+        },
+    );
+
     api_put(
         &socket,
         "/boot-source",
         &serde_json::json!({
             "kernel_image_path": kernel,
-            "boot_args": "console=ttyS0 reboot=k panic=1 pci=off",
+            "boot_args": boot_args,
         }),
     )
     .await
@@ -94,6 +130,21 @@ pub async fn boot(kernel: &Path, rootfs: &Path) -> Result<BootedVm> {
     )
     .await
     .context("PUT /machine-config")?;
+
+    if let Some(net) = network {
+        // Firecracker auto-generates the guest MAC if we don't supply one.
+        api_put(
+            &socket,
+            "/network-interfaces/eth0",
+            &serde_json::json!({
+                "iface_id": "eth0",
+                "host_dev_name": net.tap_name,
+            }),
+        )
+        .await
+        .context("PUT /network-interfaces/eth0")?;
+        info!(tap = %net.tap_name, guest_ip = %net.guest_ip, "network attached");
+    }
 
     api_put(
         &socket,

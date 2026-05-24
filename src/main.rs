@@ -32,6 +32,10 @@ enum Command {
         /// Path to the source repo to bundle into the room.
         #[arg(long)]
         repo: PathBuf,
+        /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
+        /// Useful for poking from another shell (`ping 172.16.0.2`, future `ssh ...`).
+        #[arg(long)]
+        keep: bool,
     },
     /// Execute a command inside a room.
     Exec {
@@ -95,8 +99,8 @@ async fn main() -> ExitCode {
 )]
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Create { image, repo } => {
-            info!(?image, ?repo, "rooms create");
+        Command::Create { image, repo, keep } => {
+            info!(?image, ?repo, keep, "rooms create");
             // POC: derive the kernel as a sibling of the rootfs image
             // (matches the layout setup-rooms-host.sh creates).
             let kernel = image
@@ -110,14 +114,35 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 "kernel not found at {}; expected sibling of --image",
                 kernel.display()
             );
-            let mut vm = firecracker::boot(&kernel, &image).await?;
-            // Give the guest a moment to boot before we tear it down.
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            anyhow::ensure!(
-                vm.is_alive()?,
-                "firecracker exited prematurely; check serial output"
-            );
-            info!("microVM is up; shutting down (POC: no exec yet)");
+            // POC: hardcoded single-room network. TAP must already exist
+            // (`bash scripts/setup-tap.sh`). Per-room dynamic TAPs are task #2.
+            let network = firecracker::NetworkConfig {
+                tap_name: "tap-fc0".to_owned(),
+                guest_ip: "172.16.0.2".to_owned(),
+                gateway_ip: "172.16.0.1".to_owned(),
+                netmask: "255.255.255.0".to_owned(),
+            };
+            let mut vm = firecracker::boot(&kernel, &image, Some(&network)).await?;
+
+            if keep {
+                info!(
+                    guest_ip = %network.guest_ip,
+                    "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
+                    network.guest_ip
+                );
+                tokio::signal::ctrl_c()
+                    .await
+                    .context("waiting for Ctrl-C")?;
+                info!("Ctrl-C received; shutting down");
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                anyhow::ensure!(
+                    vm.is_alive()?,
+                    "firecracker exited prematurely; check serial output"
+                );
+                info!("microVM is up; shutting down (POC: no exec yet)");
+            }
+
             vm.shutdown().await?;
             Ok(())
         }
