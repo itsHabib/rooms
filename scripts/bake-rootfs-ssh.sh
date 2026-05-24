@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Refuse to run as root: HOME-derived defaults (ROOTFS, KEY_PATH) would
+# point at /root instead of the operator's home when invoked via `sudo
+# bash bake-rootfs-ssh.sh`, baking the wrong pubkey. The script invokes
+# `sudo` internally for the ops that need it.
+if [[ "$EUID" -eq 0 ]]; then
+    printf '\033[1;31m[bake-rootfs-ssh]\033[0m do not run as root / under sudo. Run as your regular user; the script will sudo internally where needed.\n' >&2
+    exit 1
+fi
+
 ROOTFS="${1:-$HOME/rooms/images/rootfs.ext4}"
 KEY_PATH="${KEY_PATH:-$HOME/.ssh/id_rooms}"
 PUB_PATH="${KEY_PATH}.pub"
@@ -13,8 +22,9 @@ LOOP=""
 log()   { printf '\033[1;34m[bake-rootfs-ssh]\033[0m %s\n' "$*"; }
 fatal() { printf '\033[1;31m[bake-rootfs-ssh]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Cleanup body. Idempotent — safe to invoke from EXIT, INT, or TERM.
+# Does NOT exit; the caller is responsible for the final exit code.
 cleanup() {
-    local code=$?
     if [[ -n "$MNT" ]] && mountpoint -q "$MNT"; then
         sudo umount "$MNT" || log "warn: umount $MNT failed (may already be unmounted)"
     fi
@@ -25,9 +35,14 @@ cleanup() {
     if [[ -n "$MNT" && -d "$MNT" ]]; then
         rmdir "$MNT" 2>/dev/null || true
     fi
-    exit "$code"
 }
-trap cleanup EXIT INT TERM
+# Separate traps so signal exits preserve their conventional code (128 + signum).
+# Without this, $? inside the trap is whatever the last completed command
+# returned — often 0 during a sleep — so a Ctrl-C'd bake exits 0 and looks like
+# success to callers.
+trap 'rc=$?; cleanup; exit "$rc"' EXIT
+trap 'cleanup; trap - EXIT; exit 130' INT   # 128 + SIGINT(2)
+trap 'cleanup; trap - EXIT; exit 143' TERM  # 128 + SIGTERM(15)
 
 # 1. Validate prereqs (runtime only — shellcheck is lint-time, gated separately
 # by `make check` / CI, not enforced here)
@@ -48,7 +63,7 @@ fi
 if [[ ! -w "$ROOTFS" ]]; then
     fatal "rootfs not writable: $ROOTFS"
 fi
-if loop_attached=$(losetup -j "$ROOTFS" 2>/dev/null) && [[ -n "$loop_attached" ]]; then
+if loop_attached=$(sudo losetup -j "$ROOTFS" 2>/dev/null) && [[ -n "$loop_attached" ]]; then
     # losetup -j output: "/dev/loop0: [...] (file)" — name is everything
     # before the first colon, NOT $2 of the colon split (which is metadata).
     loop_name=$(printf '%s\n' "$loop_attached" | awk -F':' 'NR==1 {print $1}')

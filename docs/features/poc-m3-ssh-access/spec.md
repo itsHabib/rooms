@@ -11,7 +11,7 @@
 |---|---|---|---|
 | Production source (1×) | — | 0 | 0 |
 | Scripts (1×) | `scripts/bake-rootfs-ssh.sh` | ~100 | 100 |
-| Docs (0×) | `README.md` (bootstrap section), brief `scripts/README.md` mention | ~20 | 0 |
+| Docs (0×) | `README.md` (bootstrap section) | ~20 | 0 |
 | **Total weighted** | | | **~100** |
 
 Band: **amazing**. No Rust changes — entirely a bash helper + docs.
@@ -36,7 +36,7 @@ bash scripts/bake-rootfs-ssh.sh [<rootfs-path>]
 # Env override: KEY_PATH (default ~/.ssh/id_rooms), matches setup-tap.sh's pattern
 ```
 
-**Mandatory script header** (line-for-line — do not deviate):
+**Starting script header** (the committed `scripts/bake-rootfs-ssh.sh` is authoritative; this snippet was the v2 spec's draft and has since drifted as review surfaced refinements — separate INT/TERM traps to preserve signal codes, `sudo` on the losetup probe, EUID-0 refusal at the top, etc.). The hard requirements remain: `set -euo pipefail`, early `MNT=""` / `LOOP=""` declarations, idempotent cleanup, and explicit signal-aware exit codes.
 
 ```sh
 #!/usr/bin/env bash
