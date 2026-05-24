@@ -85,7 +85,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
             };
             let mut vm = firecracker::boot(&kernel, &image, Some(&network)).await?;
 
-            if keep {
+            // Capture the post-boot outcome separately so we ALWAYS run
+            // `vm.shutdown()` afterward — even on the ensure! failure path.
+            // Without this, an early bail leaked the room dir (reviewer PR #1
+            // round 3): `kill_on_drop` would reap the child but only
+            // shutdown() removes the per-room state dir.
+            let post_boot: Result<()> = if keep {
                 info!(
                     guest_ip = %network.guest_ip,
                     "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
@@ -93,19 +98,24 @@ async fn dispatch(cli: Cli) -> Result<()> {
                 );
                 tokio::signal::ctrl_c()
                     .await
-                    .context("waiting for Ctrl-C")?;
-                info!("Ctrl-C received; shutting down");
+                    .context("waiting for Ctrl-C")
             } else {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                anyhow::ensure!(
-                    vm.is_alive()?,
-                    "firecracker exited prematurely; check serial output"
-                );
-                info!("microVM is up; shutting down (POC: no exec yet)");
-            }
+                if vm.is_alive()? {
+                    info!("microVM is up; shutting down (POC: no exec yet)");
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "firecracker exited prematurely; check serial output"
+                    ))
+                }
+            };
 
-            vm.shutdown().await?;
-            Ok(())
+            // Always shut down; report any shutdown error after the post-boot outcome.
+            if let Err(e) = vm.shutdown().await {
+                warn!(error = %e, "shutdown reported an error after post-boot");
+            }
+            post_boot
         }
         Command::Doctor => {
             info!("rooms doctor");

@@ -108,7 +108,7 @@ pub async fn boot(
     network: Option<&NetworkConfig>,
 ) -> Result<BootedVm> {
     let room_id = RoomId::new();
-    let home = env::var("HOME").context("HOME env var must be set")?;
+    let home = env::var("HOME").context("failed to read HOME env var")?;
     let per_room_dir = PathBuf::from(home)
         .join(".local/state/rooms")
         .join(room_id.0.to_string().to_lowercase());
@@ -131,7 +131,7 @@ pub async fn boot(
         std::fs::DirBuilder::new().mode(0o700).create(&leaf)
     })
     .await
-    .context("spawn_blocking for dir create panicked")?
+    .context("spawn_blocking for dir create failed (panic or cancellation)")?
     .context("failed to create per-room state dir with mode 0700")?;
 
     // Construct the cleanup guard IMMEDIATELY after the dir exists so any
