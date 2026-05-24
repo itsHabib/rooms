@@ -16,7 +16,7 @@ use tracing::{debug, info};
 /// The TAP device named by `tap_name` must already exist on the host (the
 /// POC ships `scripts/setup-tap.sh` to create the conventional `tap-fc0`).
 /// The guest IP is plumbed via the Linux kernel's built-in IP autoconfig
-/// (boot_args `ip=...`), so no DHCP / systemd-networkd / `/etc/network`
+/// (`boot_args` `ip=...`), so no DHCP / systemd-networkd / `/etc/network`
 /// fiddling is needed inside the rootfs.
 pub struct NetworkConfig {
     /// TAP device name on the host (e.g. `"tap-fc0"`).
@@ -235,7 +235,11 @@ mod e2e_tests {
             "rootfs missing at {rootfs:?} — run scripts/setup-rooms-host.sh"
         );
 
-        let mut vm = boot(&kernel, &rootfs).await.expect("boot should succeed");
+        // e2e smoke test runs without networking — proves the no-net path
+        // still works after the NetworkConfig refactor.
+        let mut vm = boot(&kernel, &rootfs, None)
+            .await
+            .expect("boot should succeed");
 
         // Give the guest kernel + init a moment to come up.
         tokio::time::sleep(Duration::from_secs(3)).await;
