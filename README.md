@@ -32,10 +32,11 @@ Inside the Ubuntu VM:
 
 ```sh
 bash scripts/setup-rooms-host.sh         # firecracker, kernel, rootfs, rust, node, claude-code
+bash scripts/bake-rootfs-ssh.sh          # bake SSH pubkey into rootfs (one-time, needs sudo)
 bash scripts/setup-tap.sh                # TAP device + NAT + IP forwarding (one-time, needs sudo)
 ```
 
-The first installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`. The second creates the `tap-fc0` interface that microVMs use for networking (POC: one shared TAP; per-room dynamic TAPs are task #2 hardening). Teardown via `bash scripts/teardown-tap.sh`.
+The first installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`. The second loop-mounts the quickstart rootfs and bakes an ed25519 pubkey into `/root/.ssh/authorized_keys` so `ssh root@172.16.0.2` works after boot (generates `~/.ssh/id_rooms` on first run; shut down any running microVM first). The third creates the `tap-fc0` interface that microVMs use for networking (POC: one shared TAP; per-room dynamic TAPs are task #2 hardening). Teardown via `bash scripts/teardown-tap.sh`.
 
 ## Where things live
 
