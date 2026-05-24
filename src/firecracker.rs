@@ -311,6 +311,11 @@ mod tests {
             "unexpected error: {err}"
         );
 
+        // Remove the fake file before binding — UnixListener::bind refuses
+        // to overwrite an existing path.
+        tokio::fs::remove_file(&socket_path)
+            .await
+            .expect("remove fake socket file");
         let _listener = UnixListener::bind(&socket_path).expect("bind listener");
         wait_for_socket(&socket_path, Duration::from_millis(300))
             .await
