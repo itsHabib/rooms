@@ -11,9 +11,8 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use rooms::firecracker;
 use tracing::{info, warn};
-
-mod firecracker;
 
 /// rooms — disposable Firecracker microVMs with specified deps.
 #[derive(Parser, Debug)]
