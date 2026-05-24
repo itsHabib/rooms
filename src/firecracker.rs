@@ -243,8 +243,10 @@ async fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
     // Surface the last connect error so failures don't look like a generic
     // timeout (reviewer feedback PR #1 from Copilot: permission errors and
     // similar would otherwise be hidden).
-    let detail = last_err
-        .map_or_else(|| String::from("no connect attempts completed"), |e| format!("last error: {e}"));
+    let detail = last_err.map_or_else(
+        || String::from("no connect attempts completed"),
+        |e| format!("last error: {e}"),
+    );
     anyhow::bail!(
         "firecracker api socket at {} did not accept connections within {:?} ({detail})",
         socket.display(),
