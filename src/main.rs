@@ -13,6 +13,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
 
+mod firecracker;
+
 /// rooms — disposable Firecracker microVMs with specified deps.
 #[derive(Parser, Debug)]
 #[command(name = "rooms", version, about, long_about = None)]
