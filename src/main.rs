@@ -101,11 +101,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
             // (matches the layout setup-rooms-host.sh creates).
             let kernel = image
                 .parent()
-                .ok_or_else(|| anyhow::anyhow!("--image has no parent directory: {image:?}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--image has no parent directory: {}", image.display())
+                })?
                 .join("vmlinux.bin");
             anyhow::ensure!(
                 kernel.exists(),
-                "kernel not found at {kernel:?}; expected sibling of --image"
+                "kernel not found at {}; expected sibling of --image",
+                kernel.display()
             );
             let mut vm = firecracker::boot(&kernel, &image).await?;
             // Give the guest a moment to boot before we tear it down.
