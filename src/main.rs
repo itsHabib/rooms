@@ -88,6 +88,10 @@ async fn main() -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::unused_async,
+    reason = "scaffold: bodies become async once Firecracker control + async I/O are wired (task #2)"
+)]
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Create { image, repo } => {
