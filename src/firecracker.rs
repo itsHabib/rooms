@@ -91,6 +91,10 @@ impl Drop for RoomDirGuard {
 ///
 /// POC: minimal config — 1 vCPU, 256 MiB. Caller is responsible for invoking
 /// [`BootedVm::shutdown`] when done.
+#[allow(
+    clippy::too_many_lines,
+    reason = "POC: cohesive boot orchestrator. Splitting into prepare_dir / spawn / configure / start helpers belongs in task #2 (harden-firecracker-control) alongside the structured-error refactor."
+)]
 pub async fn boot(
     kernel: &Path,
     rootfs: &Path,
