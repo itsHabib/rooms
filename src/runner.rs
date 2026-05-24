@@ -12,8 +12,9 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-/// Probe the guest's sshd until it accepts a pubkey connection, or `timeout`
-/// elapses. Returns the last underlying error on timeout so failure modes
+/// Probe the guest's sshd until it accepts a pubkey connection, or `timeout` elapses.
+///
+/// Returns the last underlying error on timeout so failure modes
 /// (network down, key not baked, sshd never started) are debuggable from the
 /// surface error.
 pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) -> Result<()> {
@@ -63,9 +64,11 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
     }
 }
 
-/// Exec `command` in the guest as root via SSH. Wires the guest's stdin from
-/// /dev/null, and inherits stdout / stderr so guest output flows to the host's
-/// fds directly (operators can pipe `rooms run --command '...' | jq`).
+/// Exec `command` in the guest as root via SSH.
+///
+/// Wires the guest's stdin from /dev/null, and inherits stdout / stderr so guest
+/// output flows to the host's fds directly (operators can pipe
+/// `rooms run --command '...' | jq`).
 ///
 /// Returns the guest command's exit code clamped to `0..=255`:
 /// - guest exited normally with `ExitStatus.code() == Some(n)` → returns `n`
