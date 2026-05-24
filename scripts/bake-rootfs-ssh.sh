@@ -28,15 +28,16 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# 1. Validate prereqs
+# 1. Validate prereqs (runtime only — shellcheck is lint-time, gated separately
+# by `make check` / CI, not enforced here)
 MISSING=()
-for cmd in sudo mount mountpoint losetup ssh-keygen sed grep tee e2fsck shellcheck; do
+for cmd in sudo mount mountpoint losetup ssh-keygen sed grep tee e2fsck awk; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
 done
 if ((${#MISSING[@]} > 0)); then
-    fatal "missing required tools: ${MISSING[*]}; install with: sudo apt install util-linux openssh-client e2fsprogs shellcheck"
+    fatal "missing required tools: ${MISSING[*]}; install with: sudo apt install util-linux openssh-client e2fsprogs gawk"
 fi
 
 # 2. Argument validation
@@ -47,7 +48,9 @@ if [[ ! -w "$ROOTFS" ]]; then
     fatal "rootfs not writable: $ROOTFS"
 fi
 if loop_attached=$(losetup -j "$ROOTFS" 2>/dev/null) && [[ -n "$loop_attached" ]]; then
-    loop_name=$(printf '%s\n' "$loop_attached" | awk -F': ' 'NR==1 {print $2}' | awk '{print $1}')
+    # losetup -j output: "/dev/loop0: [...] (file)" — name is everything
+    # before the first colon, NOT $2 of the colon split (which is metadata).
+    loop_name=$(printf '%s\n' "$loop_attached" | awk -F':' 'NR==1 {print $1}')
     fatal "rootfs already attached to loop device ${loop_name:-unknown}; detach first: sudo losetup -d ${loop_name:-<device>}"
 fi
 
@@ -62,6 +65,14 @@ sleep 5
 if [[ -f "$KEY_PATH" && -f "$PUB_PATH" ]]; then
     log "reusing existing keypair at $KEY_PATH (created $(stat -c %y "$KEY_PATH"))"
 else
+    # Ensure parent dir exists — ssh-keygen errors out if it doesn't
+    # (common on fresh hosts that have never run ssh-keygen).
+    KEY_DIR="$(dirname "$KEY_PATH")"
+    if [[ ! -d "$KEY_DIR" ]]; then
+        log "creating $KEY_DIR"
+        mkdir -p "$KEY_DIR"
+        chmod 700 "$KEY_DIR"
+    fi
     log "generating ed25519 keypair at $KEY_PATH"
     ssh-keygen -t ed25519 -N "" -f "$KEY_PATH" -C "rooms-microvm" >/dev/null
 fi
