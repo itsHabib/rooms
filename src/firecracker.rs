@@ -143,11 +143,26 @@ pub async fn boot(
         dismiss: false,
     };
     let socket = per_room_dir.join("api.sock");
+    let log_path = per_room_dir.join("firecracker.log");
 
-    info!(socket = %socket.display(), "spawning firecracker");
+    // Route firecracker's own logs AND the guest serial console (kernel boot
+    // log via `console=ttyS0`) into a per-room log file, so `rooms run
+    // --command '...' | jq` doesn't see kernel boot output interleaved with
+    // the guest command's stdout. The log file is cleaned up with the room dir
+    // on shutdown; operators who need to debug a hung boot can `--keep` and
+    // tail the file.
+    let log_file = std::fs::File::create(&log_path)
+        .with_context(|| format!("create firecracker log file at {}", log_path.display()))?;
+    let log_file_stderr = log_file
+        .try_clone()
+        .context("clone firecracker log file handle for stderr")?;
+
+    info!(socket = %socket.display(), log = %log_path.display(), "spawning firecracker");
     let child = Command::new("firecracker")
         .arg("--api-sock")
         .arg(&socket)
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file_stderr))
         .kill_on_drop(true)
         .spawn()
         .context("failed to spawn firecracker; is it on PATH?")?;
