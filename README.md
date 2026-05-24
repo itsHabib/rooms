@@ -36,7 +36,15 @@ bash scripts/bake-rootfs-ssh.sh          # bake SSH pubkey into rootfs (one-time
 bash scripts/setup-tap.sh                # TAP device + NAT + IP forwarding (one-time, needs sudo)
 ```
 
-The first installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`. The second loop-mounts the quickstart rootfs and bakes an ed25519 pubkey into `/root/.ssh/authorized_keys` so `ssh root@172.16.0.2` works after boot (generates `~/.ssh/id_rooms` on first run; shut down any running microVM first). The third creates the `tap-fc0` interface that microVMs use for networking (POC: one shared TAP; per-room dynamic TAPs are task #2 hardening). Teardown via `bash scripts/teardown-tap.sh`.
+The first installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code CLI, and verifies `/dev/kvm`. The second loop-mounts the quickstart rootfs and bakes an ed25519 pubkey into `/root/.ssh/authorized_keys` so a booted microVM accepts pubkey SSH at `172.16.0.2` (generates `~/.ssh/id_rooms` on first run; shut down any running microVM first). Use the dedicated key explicitly when connecting:
+
+```sh
+ssh -i ~/.ssh/id_rooms -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=accept-new root@172.16.0.2
+```
+
+The `-i` flag is mandatory because the key isn't at the default `~/.ssh/id_*` paths OpenSSH tries automatically; `UserKnownHostsFile=/dev/null` avoids accumulating host-key entries (the microVM regenerates host keys each boot until task #6 ships a proper rootfs builder).
+
+The third creates the `tap-fc0` interface that microVMs use for networking (POC: one shared TAP; per-room dynamic TAPs are task #2 hardening). Teardown via `bash scripts/teardown-tap.sh`.
 
 ## Where things live
 

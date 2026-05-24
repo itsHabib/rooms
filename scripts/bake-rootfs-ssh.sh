@@ -18,7 +18,8 @@ cleanup() {
     if [[ -n "$MNT" ]] && mountpoint -q "$MNT"; then
         sudo umount "$MNT" || log "warn: umount $MNT failed (may already be unmounted)"
     fi
-    if [[ -n "$LOOP" ]] && losetup "$LOOP" >/dev/null 2>&1; then
+    # losetup probe needs sudo on Ubuntu (otherwise EPERM → skip → loop leak).
+    if [[ -n "$LOOP" ]] && sudo losetup "$LOOP" >/dev/null 2>&1; then
         sudo losetup -d "$LOOP" || log "warn: losetup -d $LOOP failed"
     fi
     if [[ -n "$MNT" && -d "$MNT" ]]; then
@@ -64,6 +65,15 @@ sleep 5
 # 4. Host-side SSH key
 if [[ -f "$KEY_PATH" && -f "$PUB_PATH" ]]; then
     log "reusing existing keypair at $KEY_PATH (created $(stat -c %y "$KEY_PATH"))"
+elif [[ -f "$KEY_PATH" && ! -f "$PUB_PATH" ]]; then
+    # Recovery: private key present but public key missing (e.g. .pub deleted
+    # or wasn't copied alongside the private). Regenerate the .pub from the
+    # private — ssh-keygen -y deterministically derives it. Avoids the
+    # overwrite-existing-private-key prompt that would otherwise EPERM in
+    # non-interactive runs.
+    log "private key at $KEY_PATH but public key missing; regenerating $PUB_PATH from private"
+    ssh-keygen -y -f "$KEY_PATH" > "$PUB_PATH"
+    chmod 644 "$PUB_PATH"
 else
     # Ensure parent dir exists — ssh-keygen errors out if it doesn't
     # (common on fresh hosts that have never run ssh-keygen).
@@ -126,6 +136,9 @@ set_directive PasswordAuthentication no
 # 8. Sync + unmount + fsck
 sync
 sudo umount "$MNT"
+# rmdir the tempdir BEFORE clearing MNT — once we clear MNT the EXIT trap
+# won't know to clean it up, so we'd leak the directory on the success path.
+rmdir "$MNT"
 MNT=""
 sudo e2fsck -fy "$LOOP"
 sudo losetup -d "$LOOP"

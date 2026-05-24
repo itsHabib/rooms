@@ -18,9 +18,9 @@ Band: **amazing**. No Rust changes — entirely a bash helper + docs.
 
 ## Goal
 
-Make `ssh root@172.16.0.2` work against a booted microVM.
+Make pubkey SSH to a booted microVM work (`ssh -i ~/.ssh/id_rooms root@172.16.0.2`).
 
-The quickstart bionic rootfs ships with sshd installed and auto-started (we saw `[ OK ] Started OpenBSD Secure Shell server` in m1's boot output), but no `authorized_keys` and root password login disabled — so SSH connections currently get `Permission denied`. This task bakes our pubkey into the rootfs so pubkey auth works.
+The quickstart bionic rootfs ships with sshd installed and auto-started (we saw `[ OK ] Started OpenBSD Secure Shell server` in m1's boot output), but no `authorized_keys` and root password login disabled — so SSH connections currently get `Permission denied`. This task bakes our pubkey into the rootfs so pubkey auth works. The key lives at the dedicated path `~/.ssh/id_rooms` (not OpenSSH's default `~/.ssh/id_*`), so all SSH invocations must pass `-i ~/.ssh/id_rooms` explicitly until task #6's proper rootfs builder + ssh-config wrapping lands.
 
 After this lands, the m4 milestone (curl Anthropic from inside) is trivial: `ssh root@172.16.0.2 "curl ..."`.
 
@@ -77,9 +77,9 @@ Behavior, step by step:
 ### 1. Validate prereqs
 
 Check that each of these is on PATH; `fatal` with the apt install command if any is missing:
-`sudo mount mountpoint losetup ssh-keygen sed grep tee e2fsck shellcheck`.
+`sudo mount mountpoint losetup ssh-keygen sed grep tee e2fsck awk`.
 
-(`shellcheck` is used by validation step 6; preferable to fail at run time than at PR time.)
+(`shellcheck` is a lint-time tool gated by `make check` / CI separately; not a runtime prereq of the bake script. Earlier draft hard-enforced it here and broke fresh-host bootstraps that hadn't installed it.)
 
 ### 2. Argument validation
 
@@ -304,8 +304,6 @@ If any step fails, do NOT open the PR; fix and re-validate from step 1.
 
 PR shape: one PR, ~120 weighted LOC. "amazing" band.
 
-**Branch:** `m3-ssh-access` (already created via `git worktree add -b m3-ssh-access .claude/worktrees/m3-ssh-access`).
+**Branch:** `m3-ssh-access`.
 
-**Workdir for `ship.ship`:** `C:\Users\MichaelHabib\pers\rooms\.claude\worktrees\m3-ssh-access`.
-
-**Spec path for `ship.ship`:** `docs/features/poc-m3-ssh-access/spec.md` (this file, relative to workdir).
+**Spec path for `ship.ship`:** `docs/features/poc-m3-ssh-access/spec.md`, relative to the worktree root.

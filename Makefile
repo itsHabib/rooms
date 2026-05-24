@@ -14,13 +14,16 @@ lint:
 	cargo clippy --all-targets --all-features -- -D warnings
 
 test:
-	cargo test --all-features
+	# NOT --all-features: the `e2e` feature is opt-in and requires
+	# Firecracker + kernel + rootfs on the host. Run e2e tests explicitly
+	# via `cargo test --features e2e` on the rooms-host VM.
+	cargo test
 
 build:
-	cargo build --all-features
+	cargo build
 
 release:
-	cargo build --release --all-features
+	cargo build --release
 
 clean:
 	cargo clean
