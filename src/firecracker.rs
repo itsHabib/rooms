@@ -4,7 +4,6 @@
 //! A proper HTTP-over-Unix-socket client lands in task #2 (`harden-firecracker-control`).
 
 use std::env;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -52,14 +51,14 @@ pub struct BootedVm {
 }
 
 impl BootedVm {
-    /// Best-effort: terminate the firecracker process and remove room state.
+    /// Truly best-effort: terminate the firecracker process and remove room
+    /// state. Continues cleanup even if `kill` fails — process may have
+    /// already exited, and we still want the socket file + per-room dir gone.
+    /// (Reviewer feedback on PR #1: earlier `?` on kill could leak the dir.)
     pub async fn shutdown(mut self) -> Result<()> {
         // SIGKILL is fine for the POC; SIGTERM-then-SIGKILL with grace is
         // a task #2 concern.
-        self.child
-            .kill()
-            .await
-            .context("failed to kill firecracker child")?;
+        let _ = self.child.kill().await;
         if self.socket.exists() {
             tokio::fs::remove_file(&self.socket).await.ok();
         }
@@ -102,12 +101,32 @@ pub async fn boot(
     let per_room_dir = PathBuf::from(home)
         .join(".local/state/rooms")
         .join(room_id.0.to_string().to_lowercase());
-    tokio::fs::create_dir_all(&per_room_dir)
-        .await
-        .context("failed to create per-room state dir")?;
-    tokio::fs::set_permissions(&per_room_dir, std::fs::Permissions::from_mode(0o700))
-        .await
-        .context("failed to set per-room state dir permissions")?;
+
+    // Ensure parent dir exists (not security-critical; ~/.local/state/rooms
+    // uses HOME's mode). Recursive create is safe here — no TOCTOU concern
+    // because the parent isn't the secret-holding leaf.
+    if let Some(parent) = per_room_dir.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("failed to create rooms parent dir")?;
+    }
+
+    // Atomically create the leaf dir WITH mode 0700 — no TOCTOU window
+    // between create + chmod (reviewer feedback PR #1 from Copilot). Uses
+    // spawn_blocking because std::fs::DirBuilder is sync.
+    let leaf = per_room_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(&leaf)
+    })
+    .await
+    .context("spawn_blocking for dir create panicked")?
+    .context("failed to create per-room state dir with mode 0700")?;
+
+    // Construct the cleanup guard IMMEDIATELY after the dir exists so any
+    // subsequent failure path is caught by Drop. (Reviewer feedback PR #1
+    // from Codex: earlier order constructed the guard after set_permissions,
+    // leaking the dir if set_permissions failed.)
     let mut guard = RoomDirGuard {
         path: per_room_dir.clone(),
         dismiss: false,
@@ -208,17 +227,26 @@ pub async fn boot(
 
 async fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
+    let mut last_err: Option<std::io::Error> = None;
     while start.elapsed() < timeout {
-        if tokio::net::UnixStream::connect(socket).await.is_ok() {
-            // Connection succeeded → Firecracker has listen()ed.
-            // Drop the stream immediately; next API call opens a fresh one.
-            debug!("api socket accepting connections");
-            return Ok(());
+        match tokio::net::UnixStream::connect(socket).await {
+            Ok(_) => {
+                // Connection succeeded → Firecracker has listen()ed.
+                // Drop the stream immediately; next API call opens a fresh one.
+                debug!("api socket accepting connections");
+                return Ok(());
+            }
+            Err(e) => last_err = Some(e),
         }
         sleep(Duration::from_millis(50)).await;
     }
+    // Surface the last connect error so failures don't look like a generic
+    // timeout (reviewer feedback PR #1 from Copilot: permission errors and
+    // similar would otherwise be hidden).
+    let detail = last_err
+        .map_or_else(|| String::from("no connect attempts completed"), |e| format!("last error: {e}"));
     anyhow::bail!(
-        "firecracker api socket at {} did not accept connections within {:?}",
+        "firecracker api socket at {} did not accept connections within {:?} ({detail})",
         socket.display(),
         timeout,
     )
