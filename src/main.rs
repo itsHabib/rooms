@@ -96,9 +96,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
                     "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
                     network.guest_ip
                 );
-                tokio::signal::ctrl_c()
-                    .await
-                    .context("waiting for Ctrl-C")
+                tokio::signal::ctrl_c().await.context("waiting for Ctrl-C")
             } else {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 if vm.is_alive()? {
