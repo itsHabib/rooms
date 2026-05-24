@@ -37,4 +37,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features
+      # Intentionally NOT --all-features: the `e2e` feature is opt-in and
+      # requires real Firecracker + kernel + rootfs on the host. CI runners
+      # don't have those; the gated e2e tests run on the rooms-host VM only.
+      - run: cargo test
