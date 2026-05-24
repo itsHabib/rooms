@@ -17,6 +17,14 @@ make build        # debug build
 make release      # release build
 ```
 
+## CLI (POC)
+
+```sh
+rooms run --image ~/rooms/images/rootfs.ext4          # boot + auto-shutdown after 3s
+rooms run --image ~/rooms/images/rootfs.ext4 --keep   # boot until Ctrl-C
+rooms doctor                                          # host env check (stub)
+```
+
 ## Prereqs
 
 `rooms` is Linux + KVM only. v0 host setup: an Ubuntu Server VM under Hyper-V with nested virtualization enabled (`rooms-host`).

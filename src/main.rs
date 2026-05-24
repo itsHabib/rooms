@@ -24,54 +24,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Create a new room from an image, with a repo bundled in.
-    Create {
+    /// Run a task end-to-end in a fresh microVM.
+    Run {
         /// Path to the rootfs image (ext4).
         #[arg(long)]
         image: PathBuf,
-        /// Path to the source repo to bundle into the room.
-        #[arg(long)]
-        repo: PathBuf,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
-        /// Useful for poking from another shell (`ping 172.16.0.2`, future `ssh ...`).
         #[arg(long)]
         keep: bool,
-    },
-    /// Execute a command inside a room.
-    Exec {
-        /// Room id (from `rooms create`).
-        room_id: String,
-        /// Command + args to run inside the room (after `--`).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        argv: Vec<String>,
-    },
-    /// Collect artifacts from a room to a host directory.
-    Collect {
-        /// Room id.
-        room_id: String,
-        /// Host directory to copy /workspace/out into.
-        #[arg(long)]
-        to: PathBuf,
-    },
-    /// Destroy a room: kill firecracker, release resources, remove work dir.
-    Destroy {
-        /// Room id.
-        room_id: String,
-        /// Skip cleanup; leave the room alive for inspection.
-        #[arg(long)]
-        keep: bool,
-    },
-    /// Run a task end-to-end: create + exec + collect + destroy.
-    Run {
-        /// Source repo to bundle in.
-        #[arg(long)]
-        repo: PathBuf,
-        /// Path to the task spec markdown.
-        #[arg(long)]
-        task: PathBuf,
-        /// Rootfs image; defaults to the configured node-dev image.
-        #[arg(long)]
-        image: Option<PathBuf>,
+        // Intentionally absent in this PR: --command, --task, --repo. Land in m3/m4
+        // and repo-transport milestones. DO NOT add them speculatively here.
     },
     /// Check the host environment (KVM, Firecracker, image, etc.).
     Doctor,
@@ -93,14 +55,10 @@ async fn main() -> ExitCode {
     }
 }
 
-#[allow(
-    clippy::unused_async,
-    reason = "scaffold: bodies become async once Firecracker control + async I/O are wired (task #2)"
-)]
 async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Create { image, repo, keep } => {
-            info!(?image, ?repo, keep, "rooms create");
+        Command::Run { image, keep } => {
+            info!(?image, keep, "rooms run");
             // POC: derive the kernel as a sibling of the rootfs image
             // (matches the layout setup-rooms-host.sh creates).
             let kernel = image
@@ -145,22 +103,6 @@ async fn dispatch(cli: Cli) -> Result<()> {
 
             vm.shutdown().await?;
             Ok(())
-        }
-        Command::Exec { room_id, argv } => {
-            info!(%room_id, ?argv, "rooms exec");
-            anyhow::bail!("exec: not yet implemented (POC in flight)")
-        }
-        Command::Collect { room_id, to } => {
-            info!(%room_id, ?to, "rooms collect");
-            anyhow::bail!("collect: not yet implemented (POC in flight)")
-        }
-        Command::Destroy { room_id, keep } => {
-            info!(%room_id, keep, "rooms destroy");
-            anyhow::bail!("destroy: not yet implemented (POC in flight)")
-        }
-        Command::Run { repo, task, image } => {
-            info!(?repo, ?task, ?image, "rooms run");
-            anyhow::bail!("run: not yet implemented (POC in flight)")
         }
         Command::Doctor => {
             info!("rooms doctor");

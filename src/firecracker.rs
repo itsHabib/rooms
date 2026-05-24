@@ -3,6 +3,8 @@
 //! POC: shells out to `firecracker` and `curl --unix-socket` for API calls.
 //! A proper HTTP-over-Unix-socket client lands in task #2 (`harden-firecracker-control`).
 
+use std::env;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -10,6 +12,7 @@ use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use tracing::{debug, info};
+use ulid::Ulid;
 
 /// Network configuration for a microVM.
 ///
@@ -29,14 +32,27 @@ pub struct NetworkConfig {
     pub netmask: String,
 }
 
+/// Unique identifier for a room's on-disk state directory.
+#[derive(Debug, Clone, Copy)]
+pub struct RoomId(Ulid);
+
+impl RoomId {
+    fn new() -> Self {
+        Self(Ulid::new())
+    }
+}
+
 /// A booted Firecracker microVM. Dropping the handle kills the process.
 pub struct BootedVm {
+    // Field order matters: `child` drops first so `kill_on_drop` fires before
+    // any cleanup that might reference `room_dir`.
     child: Child,
     socket: PathBuf,
+    room_dir: PathBuf,
 }
 
 impl BootedVm {
-    /// Best-effort: terminate the firecracker process and remove the API socket.
+    /// Best-effort: terminate the firecracker process and remove room state.
     pub async fn shutdown(mut self) -> Result<()> {
         // SIGKILL is fine for the POC; SIGTERM-then-SIGKILL with grace is
         // a task #2 concern.
@@ -47,12 +63,27 @@ impl BootedVm {
         if self.socket.exists() {
             tokio::fs::remove_file(&self.socket).await.ok();
         }
+        tokio::fs::remove_dir_all(&self.room_dir).await.ok();
         Ok(())
     }
 
     /// Returns true if the firecracker process is still running.
     pub fn is_alive(&mut self) -> Result<bool> {
         Ok(self.child.try_wait().context("try_wait failed")?.is_none())
+    }
+}
+
+struct RoomDirGuard {
+    path: PathBuf,
+    dismiss: bool,
+}
+
+impl Drop for RoomDirGuard {
+    fn drop(&mut self) {
+        if !self.dismiss {
+            // Drop is sync; async drop isn't stable — blocking cleanup is fine here.
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 
@@ -66,12 +97,22 @@ pub async fn boot(
     rootfs: &Path,
     network: Option<&NetworkConfig>,
 ) -> Result<BootedVm> {
-    let socket = PathBuf::from(format!("/tmp/fc-{}.sock", std::process::id()));
-
-    // Clean any stale socket from a previous run.
-    if socket.exists() {
-        let _ = tokio::fs::remove_file(&socket).await;
-    }
+    let room_id = RoomId::new();
+    let home = env::var("HOME").context("HOME env var must be set")?;
+    let per_room_dir = PathBuf::from(home)
+        .join(".local/state/rooms")
+        .join(room_id.0.to_string().to_lowercase());
+    tokio::fs::create_dir_all(&per_room_dir)
+        .await
+        .context("failed to create per-room state dir")?;
+    tokio::fs::set_permissions(&per_room_dir, std::fs::Permissions::from_mode(0o700))
+        .await
+        .context("failed to set per-room state dir permissions")?;
+    let mut guard = RoomDirGuard {
+        path: per_room_dir.clone(),
+        dismiss: false,
+    };
+    let socket = per_room_dir.join("api.sock");
 
     info!(socket = %socket.display(), "spawning firecracker");
     let child = Command::new("firecracker")
@@ -157,19 +198,30 @@ pub async fn boot(
     .context("PUT /actions (InstanceStart)")?;
 
     info!("microVM booted");
-    Ok(BootedVm { child, socket })
+    guard.dismiss = true;
+    Ok(BootedVm {
+        child,
+        socket,
+        room_dir: per_room_dir,
+    })
 }
 
 async fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if socket.exists() {
-            debug!("api socket appeared");
+        if tokio::net::UnixStream::connect(socket).await.is_ok() {
+            // Connection succeeded → Firecracker has listen()ed.
+            // Drop the stream immediately; next API call opens a fresh one.
+            debug!("api socket accepting connections");
             return Ok(());
         }
         sleep(Duration::from_millis(50)).await;
     }
-    anyhow::bail!("firecracker api socket did not appear within {timeout:?}");
+    anyhow::bail!(
+        "firecracker api socket at {} did not accept connections within {:?}",
+        socket.display(),
+        timeout,
+    )
 }
 
 async fn api_put(socket: &Path, endpoint: &str, body: &serde_json::Value) -> Result<()> {
@@ -200,6 +252,70 @@ async fn api_put(socket: &Path, endpoint: &str, body: &serde_json::Value) -> Res
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "test module: panicky lints are noise in tests"
+    )]
+
+    use std::time::Duration;
+
+    use super::{wait_for_socket, RoomDirGuard};
+    use tokio::net::UnixListener;
+
+    #[test]
+    fn room_dir_guard_cleans_up_on_drop_when_not_dismissed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        std::fs::write(path.join("marker"), b"x").expect("write marker");
+
+        drop(RoomDirGuard {
+            path: path.clone(),
+            dismiss: false,
+        });
+
+        assert!(!path.exists(), "guard should remove the directory");
+    }
+
+    #[test]
+    fn room_dir_guard_preserves_dir_when_dismissed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+
+        drop(RoomDirGuard {
+            path: path.clone(),
+            dismiss: true,
+        });
+
+        assert!(path.exists(), "dismissed guard should leave the directory");
+    }
+
+    #[tokio::test]
+    async fn wait_for_socket_requires_listener_not_just_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket_path = dir.path().join("fake.sock");
+        tokio::fs::File::create(&socket_path)
+            .await
+            .expect("create fake socket file");
+
+        let err = wait_for_socket(&socket_path, Duration::from_millis(300))
+            .await
+            .expect_err("file without listener should time out");
+        assert!(
+            err.to_string().contains("did not accept connections"),
+            "unexpected error: {err}"
+        );
+
+        let _listener = UnixListener::bind(&socket_path).expect("bind listener");
+        wait_for_socket(&socket_path, Duration::from_millis(300))
+            .await
+            .expect("listening socket should be ready");
+    }
 }
 
 #[cfg(all(test, feature = "e2e"))]
