@@ -6,7 +6,7 @@
     Creates a gen2 Hyper-V VM with nested virtualization enabled, attaches an
     Ubuntu Server ISO for interactive install, and prints the next steps.
 
-    Run as Administrator. Hyper-V must be enabled (Windows Features → Hyper-V).
+    Run as Administrator. Hyper-V must be enabled (Windows Features -> Hyper-V).
 
 .PARAMETER VMName
     Name of the VM. Default: rooms-host.
@@ -39,7 +39,7 @@
 .NOTES
     After the VM boots and Ubuntu is installed:
       1. Shut down the VM cleanly from inside Ubuntu (`sudo poweroff`).
-      2. The script already enabled nested virt — verify with:
+      2. The script already enabled nested virt -- verify with:
            Get-VMProcessor -VMName rooms-host | Format-List ExposeVirtualizationExtensions
       3. Restart the VM, SSH in, run scripts/setup-rooms-host.sh.
 #>
@@ -121,7 +121,7 @@ New-VM -Name $VMName `
     -SwitchName $SwitchName `
     -Path $VMRoot | Out-Null
 
-# Disable secure boot — Ubuntu Server installer works either way, but
+# Disable secure boot -- Ubuntu Server installer works either way, but
 # disabling avoids the "Microsoft UEFI CA" cert requirement.
 Set-VMFirmware -VMName $VMName -EnableSecureBoot Off
 
@@ -153,7 +153,7 @@ Get-VMNetworkAdapter -VMName $VMName | Set-VMNetworkAdapter -MacAddressSpoofing 
 # Sanity-check nested virt landed.
 $np = Get-VMProcessor -VMName $VMName
 if (-not $np.ExposeVirtualizationExtensions) {
-    throw "nested virtualization did NOT enable on '$VMName' — your CPU may not support it, or Hyper-V refused. Check Get-VMProcessor output."
+    throw "nested virtualization did NOT enable on '$VMName' -- your CPU may not support it, or Hyper-V refused. Check Get-VMProcessor output."
 }
 
 Write-Host ""
