@@ -149,6 +149,20 @@ set_directive PubkeyAuthentication yes
 set_directive PasswordAuthentication no
 set_directive AcceptEnv ANTHROPIC_API_KEY
 
+# 7b. Replace the quickstart rootfs's stale /etc/resolv.conf.
+# The bionic quickstart image was built on AWS EC2 and ships with a
+# `nameserver 172.31.0.2` entry that's unreachable from our Hyper-V host;
+# curl in the guest fails with "couldn't resolve host" until this is
+# overwritten with a real public resolver. Goes away when we control the
+# rootfs at build time.
+RESOLV="$MNT/etc/resolv.conf"
+log "writing /etc/resolv.conf (overriding AWS leftovers)"
+sudo tee "$RESOLV" >/dev/null <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+sudo chmod 644 "$RESOLV"
+
 # 8. Sync + unmount + fsck
 sync
 sudo umount "$MNT"
