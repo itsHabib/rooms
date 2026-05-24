@@ -12,14 +12,14 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 /// A booted Firecracker microVM. Dropping the handle kills the process.
-pub(crate) struct BootedVm {
+pub struct BootedVm {
     child: Child,
     socket: PathBuf,
 }
 
 impl BootedVm {
     /// Best-effort: terminate the firecracker process and remove the API socket.
-    pub(crate) async fn shutdown(mut self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<()> {
         // SIGKILL is fine for the POC; SIGTERM-then-SIGKILL with grace is
         // a task #2 concern.
         self.child
@@ -33,7 +33,7 @@ impl BootedVm {
     }
 
     /// Returns true if the firecracker process is still running.
-    pub(crate) fn is_alive(&mut self) -> Result<bool> {
+    pub fn is_alive(&mut self) -> Result<bool> {
         Ok(self.child.try_wait().context("try_wait failed")?.is_none())
     }
 }
@@ -42,7 +42,7 @@ impl BootedVm {
 ///
 /// POC: minimal config — 1 vCPU, 256 MiB, no networking. Caller is responsible
 /// for invoking [`BootedVm::shutdown`] when done.
-pub(crate) async fn boot(kernel: &Path, rootfs: &Path) -> Result<BootedVm> {
+pub async fn boot(kernel: &Path, rootfs: &Path) -> Result<BootedVm> {
     let socket = PathBuf::from(format!("/tmp/fc-{}.sock", std::process::id()));
 
     // Clean any stale socket from a previous run.

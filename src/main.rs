@@ -98,7 +98,26 @@ async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Create { image, repo } => {
             info!(?image, ?repo, "rooms create");
-            anyhow::bail!("create: not yet implemented (POC in flight)")
+            // POC: derive the kernel as a sibling of the rootfs image
+            // (matches the layout setup-rooms-host.sh creates).
+            let kernel = image
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("--image has no parent directory: {image:?}"))?
+                .join("vmlinux.bin");
+            anyhow::ensure!(
+                kernel.exists(),
+                "kernel not found at {kernel:?}; expected sibling of --image"
+            );
+            let mut vm = firecracker::boot(&kernel, &image).await?;
+            // Give the guest a moment to boot before we tear it down.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            anyhow::ensure!(
+                vm.is_alive()?,
+                "firecracker exited prematurely; check serial output"
+            );
+            info!("microVM is up; shutting down (POC: no exec yet)");
+            vm.shutdown().await?;
+            Ok(())
         }
         Command::Exec { room_id, argv } => {
             info!(%room_id, ?argv, "rooms exec");
