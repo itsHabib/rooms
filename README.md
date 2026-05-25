@@ -17,6 +17,8 @@ make build        # debug build
 make release      # release build
 ```
 
+CI matrix runs `make check` on Ubuntu; tagging `@claude` on a PR review triggers the Claude review workflow.
+
 ## CLI (POC)
 
 ```sh
