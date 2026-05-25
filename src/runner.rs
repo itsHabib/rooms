@@ -207,16 +207,20 @@ pub async fn exec_in_guest(
     command: &str,
 ) -> Result<GuestExecOutcome> {
     let started_at = Utc::now();
-    // Run the user command in a subshell `( ... )` rather than a group
-    // `{ ...; }`. With `{}`, a user command like `exit 42` or `set -e;
-    // false` terminates the wrapper shell itself, so `echo $?` never runs
-    // and SSH returns the wrapper's exit status — which used to be
-    // misclassified here as a transport failure. The subshell isolates
-    // `exit`, leaving the parent shell to print the exit code on the
-    // EXIT= marker line that `parse_remote_exit_code` reads.
+    // Run the user command through `bash -c <quoted>` instead of inlining
+    // it into the wrapper string. Inlining was vulnerable to shell-meta
+    // injection: `--command 'echo hi # note'` would comment out the
+    // wrapper's closing `)` and EXIT= trailer on the same line, breaking
+    // the marker contract. Single-quoting around the command (with
+    // standard `'\''` escaping for embedded singles) makes the whole
+    // user input a single argument to bash -c, so no syntax in it can
+    // reach the outer wrapper. `bash -c` also gives us subshell
+    // isolation, so a user `exit 42` aborts only the inner bash and the
+    // wrapper's `echo EXIT=$?` still prints.
+    let quoted_command = shell_single_quote(command);
     let remote = format!(
         "mkdir -p /workspace/out/logs && \
-         ( {command} ) > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
+         bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
          echo EXIT=$?"
     );
     let output = ssh_command(guest_ip, key_path, &remote)?
@@ -343,6 +347,25 @@ fn guest_command_argv(command: &str) -> Vec<String> {
     vec!["sh".to_owned(), "-c".to_owned(), command.to_owned()]
 }
 
+/// Wrap `s` in single quotes for safe inclusion as a bash argument.
+///
+/// Uses the standard `'\''` escape: end the current single-quoted string,
+/// insert a literal single quote, then start a new single-quoted string.
+/// Result is always a single argv token regardless of the input's content.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 fn parse_remote_exit_code(stdout: &[u8]) -> Result<i32> {
     let text = String::from_utf8_lossy(stdout);
     // Scan lines (last wins) for the `EXIT=<n>` marker. The wrapper
@@ -395,7 +418,19 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::wait_for_ssh;
+    use super::{shell_single_quote, wait_for_ssh};
+
+    #[test]
+    fn shell_single_quote_handles_meta_and_embedded_quotes() {
+        assert_eq!(shell_single_quote("echo hi"), "'echo hi'");
+        // The codex finding: `echo hi # note` previously broke the wrapper
+        // because `#` started a comment. With quoting it's just data.
+        assert_eq!(shell_single_quote("echo hi # note"), "'echo hi # note'");
+        // Embedded single quotes use the standard `'\''` escape.
+        assert_eq!(shell_single_quote("echo 'hello'"), r"'echo '\''hello'\'''");
+        // Closing-paren can't escape the wrapper either.
+        assert_eq!(shell_single_quote("echo ) rm -rf /"), "'echo ) rm -rf /'");
+    }
 
     #[tokio::test]
     async fn wait_for_ssh_times_out_when_no_sshd() {
