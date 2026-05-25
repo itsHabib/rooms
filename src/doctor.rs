@@ -229,7 +229,11 @@ fn check_tap_roundtrip() -> CheckResult {
     let name = "tap".to_owned();
     #[cfg(unix)]
     {
-        let tap = "rooms-doctor-probe";
+        // Use a PID-suffixed name so concurrent doctor runs (or a leftover
+        // probe from an interrupted prior run) don't collide and trip a
+        // false "File exists" failure.
+        let tap = format!("rooms-doctor-probe-{}", std::process::id());
+        let tap = tap.as_str();
         let add = Command::new("ip")
             .args(["tuntap", "add", "dev", tap, "mode", "tap"])
             .output();

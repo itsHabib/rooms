@@ -92,7 +92,16 @@ fn run_doctor_cmd(
     if json {
         let out = serde_json::to_string_pretty(&report)
             .map_err(|e| RoomsError::Internal(e.to_string()))?;
-        eprintln!("{out}");
+        // JSON report goes to stdout so `rooms doctor --json > report.json`
+        // captures clean machine-readable output; tracing logs continue to
+        // flow on stderr.
+        #[allow(
+            clippy::print_stdout,
+            reason = "machine-readable doctor output; stdout is the documented contract"
+        )]
+        {
+            println!("{out}");
+        }
     } else {
         for check in &report.checks {
             let status = if check.ok { "ok" } else { "FAIL" };
