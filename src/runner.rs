@@ -106,12 +106,13 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
     // buf_size; __u32 buf[]; }` from include/uapi/linux/random.h, credit
     // = len*8 bits, size = len bytes, payload = the 512 stdin bytes.
     //
-    // The python invocation hard-codes `python` (which on bionic resolves to
-    // 2.7) because `sys.stdin.read()` returns bytes on py2; under py3 it would
-    // return a text-decoded str and `struct.pack(..., data)` would raise. When
-    // the rootfs builder ships a python3-only image, the whole seed_entropy
-    // step disappears (the new kernel will have virtio-rng), so this py2 tie
-    // is intentional and short-lived.
+    // `getattr(sys.stdin, "buffer", sys.stdin).read()` reads bytes on both
+    // py2 and py3: on py2 the `buffer` attr doesn't exist so the fallback
+    // returns `sys.stdin` itself (whose `.read()` is bytes), on py3 the
+    // `buffer` attr is the binary stream backing the text wrapper. Without
+    // this, a py3 invocation would decode stdin as text and `struct.pack`
+    // would type-error. Today's bionic rootfs only has py2, but this keeps
+    // the workaround forward-compatible until rootfs-builder retires it.
     let mut child = Command::new("ssh")
         .args([
             "-i",
@@ -129,7 +130,7 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
             &format!("root@{guest_ip}"),
             "--",
             "python -c 'import sys, struct, fcntl\n\
-             data = sys.stdin.read()\n\
+             data = getattr(sys.stdin, \"buffer\", sys.stdin).read()\n\
              buf = struct.pack(\"ii%ds\" % len(data), len(data)*8, len(data), data)\n\
              fcntl.ioctl(open(\"/dev/random\", \"wb\"), 0x40085203, buf)'",
         ])
