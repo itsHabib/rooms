@@ -91,7 +91,12 @@ if [[ -e "$TMP_OUT" ]]; then
 fi
 
 log "allocating ${SIZE} sparse image at $TMP_OUT"
-fallocate -l "$SIZE" "$TMP_OUT"
+# `truncate -s` creates an unwritten (sparse) file; `fallocate -l` would
+# reserve the full capacity on disk immediately, so a 4G default rootfs
+# would consume 4G on the host regardless of guest contents and the
+# smoke test's `du --block-size=1` allocated-size guard would always
+# trip.
+truncate -s "$SIZE" "$TMP_OUT"
 
 log "formatting ext4"
 mkfs.ext4 -F -L rooms-rootfs "$TMP_OUT" >/dev/null

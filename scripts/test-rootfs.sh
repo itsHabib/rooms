@@ -140,10 +140,12 @@ if [[ "$PWAUTH" != "no" ]]; then
     fatal "passwordauthentication is '$PWAUTH' (expected 'no')"
 fi
 
-# Compare allocated on-disk bytes, not apparent size — the rootfs is created
-# at a fixed capacity (e.g. 4G), so `stat -c %s` always equals the requested
-# size and never trips the limit. `du --bytes` reports allocated blocks.
-SIZE_B="$(du --bytes "$ROOTFS" | awk '{print $1}')"
+# Compare allocated on-disk bytes, not apparent size. `du --bytes` is
+# actually an alias for `--apparent-size --block-size=1`, which would
+# report the full ext4 capacity (e.g. 4G) on a sparse image. Default
+# `du --block-size=1` reports allocated bytes (= roughly the rootfs
+# content size for a sparse + mkfs.ext4 image).
+SIZE_B="$(du --block-size=1 "$ROOTFS" | awk '{print $1}')"
 SIZE_H="$(du -h "$ROOTFS" | awk '{print $1}')"
 log "image size: $SIZE_H allocated (expect < 1.5G)"
 MAX_B=$((1536 * 1024 * 1024))
