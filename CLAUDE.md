@@ -63,6 +63,21 @@ Adapted from ship's workflow:
 - Repeat review cycle ~3× before reaching out.
 - Merge when ready.
 
+### Cloud runtime defaults
+
+When firing `mcp__ship__ship` with `runtime: "cloud"` against this repo, use:
+
+```js
+cloud: {
+  repos: [{ name: "rooms" }],
+  env: { type: "cloud" },
+  autoCreatePR: true,
+  // skipReviewerRequest omitted → reviewers always requested (per the workflow above)
+}
+```
+
+`autoCreatePR: true` means ship writes the PR body, so prefer local runtime when the PR needs heavy framing (architecture pivots, discovery logs). No `envVars` needed for normal substrate work; if a task actually needs a host secret inside the runner, surface it explicitly.
+
 ## PR sizing
 
 Same bands as dossier / ship:
