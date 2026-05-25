@@ -523,8 +523,7 @@ mod tests {
         use tokio::net::UnixListener;
         use tokio::process::Command;
 
-        use super::super::{wait_for_socket, RoomGuard};
-        use crate::config::RoomsConfig;
+        use super::super::wait_for_socket;
 
         #[tokio::test]
         async fn wait_for_socket_requires_listener_not_just_file() {
