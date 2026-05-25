@@ -14,7 +14,8 @@ batches:
   - id: 1
     label: ready now (no upstream deps)
     depends_on: []
-    status: pending
+    status: done
+    completed_at: 2026-05-25T04:24:00Z
     streams:
       - task_id: tsk_01KSBE3JAWA0THZXWV6KBSBKTT
         task_slug: ci-and-claude-workflow
@@ -22,7 +23,14 @@ batches:
         branch_name: prod-ci-and-claude-workflow
         runtime: cloud
         touches: [.github/workflows/ci.yml, .github/workflows/claude.yml, README.md]
-        status: pending
+        status: superseded
+        pr_number: 5
+        closed_at: 2026-05-25T03:20:00Z
+        note: |
+          Workflow YAMLs already existed on main from earlier POC work; the
+          PR's only contribution was a README CI paragraph that was made
+          redundant by docs-vision-and-readme's new `## CI` section. Closed
+          rather than merged.
       - task_id: tsk_01KSBE3RNJKH9HF7YP3HSW61X4
         task_slug: harden-firecracker-control
         spec_path: docs/features/harden-firecracker-control/spec.md
@@ -37,14 +45,26 @@ batches:
             src/rootfs.rs,
             tests/control_failures.rs,
           ]
-        status: pending
+        status: done
+        pr_number: 8
+        merge_commit: 46c96302
+        merged_at: 2026-05-25T04:21:00Z
+        note: |
+          Required a manual three-way merge against PR #7's runner-contract
+          changes (both touched lib.rs / main.rs / runner.rs). Took #7's
+          runner.rs (EXIT= marker + GuestExecOutcome) as canonical, layered
+          harden's net-new modules (config, doctor, error, transport) and
+          firecracker.rs/main.rs changes on top.
       - task_id: tsk_01KSBE3Z0WDF397EDMMP1N2FWX
         task_slug: runner-contract
         spec_path: docs/features/runner-contract/spec.md
         branch_name: prod-runner-contract
         runtime: cloud
         touches: [src/artifacts.rs, src/runner.rs, docs/runner-contract.md]
-        status: pending
+        status: done
+        pr_number: 7
+        merge_commit: 4a354e73
+        merged_at: 2026-05-25T04:17:00Z
       - task_id: tsk_01KSBE4PGS5THA41HF4EMWE8HW
         task_slug: rootfs-builder
         spec_path: docs/features/rootfs-builder/spec.md
@@ -59,14 +79,20 @@ batches:
             README.md,
             images/.gitignore,
           ]
-        status: pending
+        status: done
+        pr_number: 9
+        merge_commit: b55a92bb
+        merged_at: 2026-05-25T04:15:00Z
       - task_id: tsk_01KSBE572WQ1VJ3E471BVXX202
         task_slug: docs-vision-and-readme
         spec_path: docs/features/docs-vision-and-readme/spec.md
         branch_name: prod-docs-vision-and-readme
         runtime: cloud
         touches: [docs/vision.md, README.md, CLAUDE.md]
-        status: pending
+        status: done
+        pr_number: 6
+        merge_commit: 573c4e25
+        merged_at: 2026-05-25T04:11:00Z
 
   - id: 2
     label: after batch 1 (deps on runner-contract and rootfs-builder)
@@ -268,4 +294,6 @@ Or batch-by-batch, operator-paced:
 
 ## Status (updated by /work-driver as the manifest runs)
 
-Pending. No batches in flight.
+**Batch 1: done 2026-05-25** — 4 PRs merged (#6, #7, #8, #9); PR #5 closed as superseded by #6's README structure. 4 review cycles per PR. PR #8 required a manual three-way merge against PR #7's runner-contract restructure (both touched the same files in non-overlapping but intricately tangled regions).
+
+Batches 2 and 3: pending.
