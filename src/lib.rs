@@ -8,3 +8,4 @@
 //! See `docs/features/rooms-v0/spec.md`.
 
 pub mod firecracker;
+pub mod runner;

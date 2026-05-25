@@ -47,7 +47,7 @@ trap 'cleanup; trap - EXIT; exit 143' TERM  # 128 + SIGTERM(15)
 # 1. Validate prereqs (runtime only — shellcheck is lint-time, gated separately
 # by `make check` / CI, not enforced here)
 MISSING=()
-for cmd in sudo mount mountpoint losetup ssh-keygen sed grep tee e2fsck awk; do
+for cmd in sudo mount mountpoint losetup ssh ssh-keygen sed grep tee e2fsck awk; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         MISSING+=("$cmd")
     fi
@@ -148,6 +148,49 @@ set_directive PermitRootLogin yes
 set_directive PubkeyAuthentication yes
 set_directive PasswordAuthentication no
 
+# AcceptEnv is additive (sshd accepts multiple lines) and Ubuntu defaults
+# ship `AcceptEnv LANG LC_*` — using set_directive here would replace that
+# whole value with our one token and silently drop locale forwarding for
+# every SSH session. Instead, append a fresh `AcceptEnv ANTHROPIC_API_KEY`
+# line iff no existing AcceptEnv already grants that exact token. Cheap
+# idempotent grep avoids accumulating duplicate lines on re-runs.
+if sudo grep -qE "^AcceptEnv[[:space:]].*\bANTHROPIC_API_KEY\b" "$CONFIG"; then
+    log "AcceptEnv already grants ANTHROPIC_API_KEY"
+else
+    log "appending AcceptEnv ANTHROPIC_API_KEY (preserves existing AcceptEnv lines)"
+    echo "AcceptEnv ANTHROPIC_API_KEY" | sudo tee -a "$CONFIG" >/dev/null
+fi
+
+# 7b. Replace the quickstart rootfs's stale /etc/resolv.conf.
+# The bionic quickstart image was built on AWS EC2 and ships with a
+# `nameserver 172.31.0.2` entry that's unreachable from our Hyper-V host;
+# curl in the guest fails with "couldn't resolve host" until this is
+# overwritten with a real public resolver. Goes away when we control the
+# rootfs at build time.
+RESOLV="$MNT/etc/resolv.conf"
+log "writing /etc/resolv.conf (overriding AWS leftovers)"
+sudo tee "$RESOLV" >/dev/null <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+sudo chmod 644 "$RESOLV"
+
+# 7c. Install a CA bundle from the host.
+# The quickstart bionic rootfs is the "minimal" variant — `ca-certificates`
+# isn't installed, /etc/ssl/certs/ is empty, and openssl/curl hang on TLS
+# handshake with any HTTPS endpoint (no roots to validate against, no
+# fast-fail). Copy the host's bundle so HTTPS works end-to-end. Same
+# productionization replacement as the resolv.conf above.
+HOST_CA="/etc/ssl/certs/ca-certificates.crt"
+if [[ -f "$HOST_CA" ]]; then
+    log "copying CA bundle from host into rootfs"
+    sudo mkdir -p "$MNT/etc/ssl/certs"
+    sudo cp "$HOST_CA" "$MNT/etc/ssl/certs/ca-certificates.crt"
+    sudo chmod 644 "$MNT/etc/ssl/certs/ca-certificates.crt"
+else
+    log "warn: host CA bundle not at $HOST_CA — HTTPS from guest will hang on TLS"
+fi
+
 # 8. Sync + unmount + fsck
 sync
 sudo umount "$MNT"
@@ -164,3 +207,4 @@ log "done."
 log "    pubkey baked into:  $ROOTFS"
 log "    private key:        $KEY_PATH"
 log "    verify after boot:  ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null root@172.16.0.2 'uname -a'"
+log "    env passthrough:    set ANTHROPIC_API_KEY before invoking rooms (SendEnv plumbs it to the guest)"

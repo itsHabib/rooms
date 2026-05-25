@@ -143,25 +143,63 @@ pub async fn boot(
         dismiss: false,
     };
     let socket = per_room_dir.join("api.sock");
+    let log_path = per_room_dir.join("firecracker.log");
 
-    info!(socket = %socket.display(), "spawning firecracker");
+    // Route firecracker's own logs AND the guest serial console (kernel boot
+    // log via `console=ttyS0`) into a per-room log file, so `rooms run
+    // --command '...' | jq` doesn't see kernel boot output interleaved with
+    // the guest command's stdout. The log file is cleaned up with the room dir
+    // on shutdown; operators who need to debug a hung boot can `--keep` and
+    // tail the file. Use spawn_blocking — std::fs::File::create + try_clone are
+    // blocking syscalls; calling them on the Tokio runtime thread stalls the
+    // reactor under load (mirrors the DirBuilder pattern above).
+    let log_path_spawn = log_path.clone();
+    let (log_file, log_file_stderr) =
+        tokio::task::spawn_blocking(move || -> Result<(std::fs::File, std::fs::File)> {
+            let f = std::fs::File::create(&log_path_spawn).with_context(|| {
+                format!(
+                    "create firecracker log file at {}",
+                    log_path_spawn.display()
+                )
+            })?;
+            let f2 = f
+                .try_clone()
+                .context("clone firecracker log file handle for stderr")?;
+            Ok((f, f2))
+        })
+        .await
+        .context("spawn_blocking for log file create failed (panic or cancellation)")??;
+
+    info!(socket = %socket.display(), log = %log_path.display(), "spawning firecracker");
     let child = Command::new("firecracker")
         .arg("--api-sock")
         .arg(&socket)
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file_stderr))
         .kill_on_drop(true)
         .spawn()
         .context("failed to spawn firecracker; is it on PATH?")?;
 
     wait_for_socket(&socket, Duration::from_secs(5)).await?;
 
-    // Kernel cmdline: when networking is requested, append Linux's built-in IP
-    // autoconfig string (`ip=<client>::<gw>:<mask>::<dev>:<autoconf>`) so eth0
-    // comes up before userspace, with no DHCP needed in the rootfs.
+    // Kernel cmdline:
+    // - `console=ttyS0` routes kernel + getty output to the serial port (which
+    //   firecracker dumps to its stdout, which we redirect to firecracker.log).
+    // - `reboot=k panic=1 pci=off` are firecracker quickstart conventions.
+    // - When networking is requested, append Linux's built-in IP autoconfig
+    //   string (`ip=<client>::<gw>:<mask>::<dev>:<autoconf>`) so eth0 comes up
+    //   before userspace, with no DHCP needed in the rootfs.
+    // - `random.trust_cpu=on` tells the kernel to seed the CRNG from RDRAND
+    //   (the CPU's hardware RNG). Without this, the microVM has no entropy
+    //   source — no real keyboard/mouse/disk jitter — and openssl's TLS
+    //   handshake blocks indefinitely on `getrandom()`. RDRAND is always
+    //   available under KVM on modern host CPUs.
+    let base = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
     let boot_args = network.map_or_else(
-        || String::from("console=ttyS0 reboot=k panic=1 pci=off"),
+        || base.to_owned(),
         |net| {
             format!(
-                "console=ttyS0 reboot=k panic=1 pci=off ip={}::{}:{}::eth0:off",
+                "{base} ip={}::{}:{}::eth0:off",
                 net.guest_ip, net.gateway_ip, net.netmask
             )
         },
@@ -216,6 +254,16 @@ pub async fn boot(
         .context("PUT /network-interfaces/eth0")?;
         info!(tap = %net.tap_name, guest_ip = %net.guest_ip, "network attached");
     }
+
+    // Attach a virtio-rng device so the guest's CRNG initializes promptly.
+    // Without this, the microVM has no entropy source (no HW RNG, no
+    // keyboard/mouse jitter, no disk seek noise) and openssl's RAND_bytes
+    // blocks indefinitely during the TLS handshake — `curl https://...` hangs
+    // forever after TCP connect with no diagnostic output. Firecracker draws
+    // host entropy from /dev/urandom and feeds it to the guest's /dev/hwrng.
+    api_put(&socket, "/entropy", &serde_json::json!({}))
+        .await
+        .context("PUT /entropy")?;
 
     api_put(
         &socket,
