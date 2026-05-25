@@ -143,7 +143,6 @@ async fn post_boot(
             Ok(0)
         }
         (false, Some(cmd)) => {
-            let started_at = Utc::now();
             let guest_ip = network.guest_ip.clone();
             let cmd_for_cancel = cmd.clone();
             // Wrap the entire setup-and-exec sequence (probe sshd, seed CRNG,
@@ -163,11 +162,23 @@ async fn post_boot(
                 let outcome = runner::exec_in_guest(&network.guest_ip, key, &cmd).await?;
                 Ok::<u8, anyhow::Error>(u8::try_from(outcome.exit_code).unwrap_or(2))
             };
+            // started_at captures when rooms began attempting exec (SSH probe,
+            // entropy seed, then user command). Exec writes its own started_at
+            // into result.json on the success path; this outer one only
+            // surfaces in the cancel branch below, where the user command may
+            // never have begun.
+            let started_at = Utc::now();
             tokio::pin!(work);
             tokio::select! {
                 res = &mut work => res,
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl-c received during exec setup or run; aborting and shutting down");
+                    // Ensure the artifact dir + empty log files exist before
+                    // writing result.json so `rooms collect` validation still
+                    // passes for a cancelled run.
+                    if let Err(err) = runner::ensure_guest_artifact_skeleton(&guest_ip, key).await {
+                        warn!(error = %err, "failed to create cancelled-run artifact skeleton");
+                    }
                     let result = ResultJson::from_exec(
                         130,
                         RunStatus::Cancelled,
@@ -210,9 +221,9 @@ fn key_path() -> Result<PathBuf> {
 
 async fn collect_artifacts(from: PathBuf) -> Result<u8> {
     info!(from = %from.display(), "rooms collect");
-    let loaded = artifacts::RunnerArtifacts::load(&from)
-        .await
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
+    // `?` preserves ArtifactsError as the anyhow source; previous map_err
+    // stringified it and dropped the chain.
+    let loaded = artifacts::RunnerArtifacts::load(&from).await?;
     info!(
         status = ?loaded.result.status,
         exit_code = loaded.result.exit_code,

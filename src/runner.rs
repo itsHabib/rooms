@@ -188,12 +188,14 @@ pub struct GuestExecOutcome {
 /// `/workspace/out/result.json` per the runner contract. Guest output is not
 /// inherited on the host — use `rooms collect --from` after exec to inspect logs.
 ///
-/// Returns exec metadata including the guest command's exit code:
-/// - guest exited normally with `ExitStatus.code() == Some(n)` → `exit_code = n`
-/// - guest killed by signal: `128 + sig.unwrap_or(0)`
+/// Exit code: parsed from a trailing `echo $?` in the wrapped remote script
+/// rather than from SSH's process status, so genuine guest exit codes (including
+/// 255) round-trip without being conflated with SSH transport errors.
 ///
-/// SSH-internal errors surface as `Err`. The SSH-internal exit code 255 passes
-/// through as `Ok(255)` and is indistinguishable from "remote command exited 255".
+/// Returns `Err` only when SSH itself fails to invoke the wrapper — the spawned
+/// `ssh` process exited non-zero before `echo $?` could run, the wrapper output
+/// was unparseable, etc. For those cases we cannot trust an exit code from the
+/// guest, so the caller should treat it as a substrate-level transport failure.
 ///
 /// Forwards `ANTHROPIC_API_KEY` from the host process env via SSH's `SendEnv`
 /// option. The matching `AcceptEnv ANTHROPIC_API_KEY` lives in the rootfs's
@@ -244,6 +246,35 @@ pub async fn exec_in_guest(
         started_at,
         ended_at,
     })
+}
+
+/// Ensure the guest artifact dir + empty log files exist.
+///
+/// `exec_in_guest` creates these as a side effect of running the wrapped
+/// command, but on a Ctrl-C that fires before exec actually started they're
+/// missing — and `RunnerArtifacts::load` then bails with `MissingRequired`
+/// even though `result.json` has been written. Touching empty placeholders
+/// keeps the contract intact for cancelled runs.
+pub async fn ensure_guest_artifact_skeleton(guest_ip: &str, key_path: &Path) -> Result<()> {
+    let remote = "mkdir -p /workspace/out/logs \
+         && : > /workspace/out/logs/stdout.log \
+         && : > /workspace/out/logs/stderr.log";
+    let output = ssh_command(guest_ip, key_path, remote)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to spawn ssh; is openssh-client installed?")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "creating cancelled-run artifact skeleton failed (exit {}): {stderr}",
+            output.status
+        );
+    }
+    Ok(())
 }
 
 /// Write `result.json` into the guest artifact directory.

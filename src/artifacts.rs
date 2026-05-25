@@ -95,6 +95,7 @@ pub enum ArtifactsError {
     MissingRequired(String),
     UnsupportedSchemaVersion(u32),
     DanglingReference(String),
+    UnsafeReference(String),
     InvalidJson(String),
     Io { path: PathBuf, message: String },
 }
@@ -108,6 +109,9 @@ impl fmt::Display for ArtifactsError {
             }
             Self::DanglingReference(path) => {
                 write!(f, "result.json references missing file: {path}")
+            }
+            Self::UnsafeReference(path) => {
+                write!(f, "result.json reference escapes the artifact dir: {path}")
             }
             Self::InvalidJson(detail) => write!(f, "invalid result.json: {detail}"),
             Self::Io { path, message } => {
@@ -141,7 +145,10 @@ impl RunnerArtifacts {
 
         let summary = read_optional_text(out_dir, result.summary_path.as_deref()).await?;
         let patch = read_optional_text(out_dir, result.patch_path.as_deref()).await?;
-        let events = result.events_path.as_deref().map(|rel| out_dir.join(rel));
+        let events = match result.events_path.as_deref() {
+            Some(rel) => Some(safe_join(out_dir, rel)?),
+            None => None,
+        };
 
         Ok(Self {
             result,
@@ -177,7 +184,7 @@ fn validate_reference(out_dir: &Path, rel: Option<&str>) -> Result<(), Artifacts
     let Some(rel) = rel else {
         return Ok(());
     };
-    let path = out_dir.join(rel);
+    let path = safe_join(out_dir, rel)?;
     if path.is_file() {
         Ok(())
     } else {
@@ -192,11 +199,34 @@ async fn read_optional_text(
     let Some(rel) = rel else {
         return Ok(None);
     };
-    let path = out_dir.join(rel);
+    let path = safe_join(out_dir, rel)?;
     let contents = tokio::fs::read_to_string(&path)
         .await
         .map_err(|err| io_error(path, &err))?;
     Ok(Some(contents))
+}
+
+/// Join `rel` onto `out_dir` only if `rel` stays inside the artifact dir.
+///
+/// `result.json` path fields are documented as relative paths under `out/`.
+/// A runner that writes an absolute path (`/etc/passwd`) or one with `..`
+/// components could otherwise trick `rooms collect` into reading or
+/// validating files outside the room's artifact dir.
+fn safe_join(out_dir: &Path, rel: &str) -> Result<PathBuf, ArtifactsError> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return Err(ArtifactsError::UnsafeReference(rel.to_owned()));
+    }
+    for component in rel_path.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(ArtifactsError::UnsafeReference(rel.to_owned()));
+            }
+        }
+    }
+    Ok(out_dir.join(rel_path))
 }
 
 fn io_error(path: PathBuf, err: &std::io::Error) -> ArtifactsError {
@@ -371,5 +401,41 @@ mod tests {
             .await
             .expect("load with summary");
         assert_eq!(loaded.summary.as_deref(), Some("all good"));
+    }
+
+    #[tokio::test]
+    async fn parent_dir_reference_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let mut result = sample_result();
+        result.summary_path = Some("../escape.md".to_owned());
+        write_minimal_out(dir.path(), &result).await;
+
+        let err = RunnerArtifacts::load(dir.path())
+            .await
+            .expect_err("../ should be rejected");
+        assert_eq!(
+            err,
+            ArtifactsError::UnsafeReference("../escape.md".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn absolute_reference_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let mut result = sample_result();
+        // Use a platform-appropriate absolute path so the test runs on both
+        // Linux CI and the rooms-host Windows builder.
+        let abs = if cfg!(windows) {
+            "C:\\Windows\\System32\\drivers\\etc\\hosts".to_owned()
+        } else {
+            "/etc/passwd".to_owned()
+        };
+        result.summary_path = Some(abs.clone());
+        write_minimal_out(dir.path(), &result).await;
+
+        let err = RunnerArtifacts::load(dir.path())
+            .await
+            .expect_err("absolute path should be rejected");
+        assert_eq!(err, ArtifactsError::UnsafeReference(abs));
     }
 }
