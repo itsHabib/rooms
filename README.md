@@ -70,6 +70,20 @@ make build        # debug build
 
 Specs live at [`docs/features/<slug>/spec.md`](docs/features/). One spec per productionization task; read [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md) first.
 
+### Building the rootfs
+
+The v0 guest image is built on the rooms-host VM with debootstrap (not committed to git):
+
+```sh
+sudo ./scripts/build-rootfs.sh \
+  --suite noble \
+  --size 4G \
+  --out images/node-dev.ext4 \
+  --ssh-key ~/.ssh/id_rooms.pub
+```
+
+See [`scripts/README.md`](scripts/README.md) for prereqs, sha256 verification, and the `--extend` hook. If you have not built locally yet, `scripts/setup-rooms-host.sh` downloads the Firecracker quickstart bionic rootfs as a one-time POC fallback (`~/rooms/images/rootfs.ext4`).
+
 **PR conventions:** request Copilot review; comment `@codex review` and `@claude review` on the PR. See [`CLAUDE.md`](CLAUDE.md) for sizing bands and lint discipline.
 
 ## CI
