@@ -36,10 +36,13 @@ pub enum FirecrackerError {
     BinaryNotFound { path: PathBuf },
     #[error("firecracker api socket did not appear within {timeout_ms} ms")]
     ApiSocketNeverAppeared { timeout_ms: u64 },
-    #[error("firecracker api PUT {endpoint} failed (HTTP {status}): {body}")]
+    #[error("firecracker api PUT {endpoint} failed (curl exit {curl_exit_code}): {body}")]
     ApiCallFailed {
         endpoint: String,
-        status: u16,
+        /// `curl(1)` process exit code, not the guest HTTP status. With
+        /// `--fail-with-body`, any HTTP response >= 400 yields curl exit 22;
+        /// the actual HTTP status lives in `body`.
+        curl_exit_code: i32,
         body: String,
     },
     #[error("firecracker api PUT {endpoint} timed out after {timeout_ms} ms")]
@@ -108,17 +111,28 @@ pub enum RunnerError {
 }
 
 impl From<RunnerError> for FirecrackerError {
+    /// Convert a guest-side runner failure into the substrate's error type.
+    ///
+    /// Only `GuestUnreachable` keeps its semantic shape — that's a genuine
+    /// network/guest reachability signal. Everything else (probe, seed, exec,
+    /// key-path, IO) is a substrate setup or local error that collapsed into
+    /// `GuestUnreachable` previously; surface it as `Internal` instead so an
+    /// operator reading the log can tell "the room is dead" apart from
+    /// "rooms binary is broken on this host".
     fn from(err: RunnerError) -> Self {
         match err {
             RunnerError::GuestUnreachable { reason } => Self::GuestUnreachable { reason },
-            other => Self::GuestUnreachable {
-                reason: other.to_string(),
-            },
+            other => Self::Internal(format!("runner: {other}")),
         }
     }
 }
 
 impl From<TransportError> for FirecrackerError {
+    /// Convert a Firecracker-API transport failure into the substrate's
+    /// error type. Same shape as `From<RunnerError>` — only the explicit
+    /// `TimedOut` maps to `ApiCallTimedOut`; serialization / IO / process-spawn
+    /// failures are local-side bugs and surface as `Internal`, not as
+    /// `GuestUnreachable` (which would falsely implicate the guest VM).
     fn from(err: TransportError) -> Self {
         match err {
             TransportError::TimedOut {
@@ -128,9 +142,7 @@ impl From<TransportError> for FirecrackerError {
                 endpoint,
                 timeout_ms,
             },
-            other => Self::GuestUnreachable {
-                reason: other.to_string(),
-            },
+            other => Self::Internal(format!("transport: {other}")),
         }
     }
 }

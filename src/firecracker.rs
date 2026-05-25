@@ -15,7 +15,6 @@ use ulid::Ulid;
 
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
-use crate::rootfs::unmount_overlay;
 use crate::transport;
 
 /// Network configuration for a microVM.
@@ -42,7 +41,7 @@ pub struct RoomGuard {
     socket: PathBuf,
     child_pid: Option<u32>,
     tap_name: Option<String>,
-    overlay_mount: Option<PathBuf>,
+    tap_owned: bool,
     suppress_cleanup: bool,
     dismiss: bool,
     cleanup_grace: Duration,
@@ -55,7 +54,7 @@ impl RoomGuard {
             socket,
             child_pid: None,
             tap_name: None,
-            overlay_mount: None,
+            tap_owned: false,
             suppress_cleanup: false,
             dismiss: false,
             cleanup_grace: config.cleanup_grace,
@@ -66,8 +65,20 @@ impl RoomGuard {
         self.child_pid = child.id();
     }
 
+    /// Record the TAP this room uses. Does NOT take ownership — see
+    /// `set_tap_owned` for that. v0 always uses the shared host TAP
+    /// (`tap-fc0`), which is managed by `scripts/setup-tap.sh` and must
+    /// outlive any single room.
     fn set_tap(&mut self, tap_name: String) {
         self.tap_name = Some(tap_name);
+    }
+
+    /// Mark the recorded TAP as per-room (owned by this guard). Cleanup
+    /// will `ip tuntap del` the interface on drop. Not yet wired — per-room
+    /// TAPs land with the network rewrite that retires `tap-fc0`.
+    #[allow(dead_code, reason = "wired by future per-room-TAP work")]
+    pub fn set_tap_owned(&mut self, owned: bool) {
+        self.tap_owned = owned;
     }
 
     /// Prevent cleanup on drop (successful handoff to caller-managed shutdown).
@@ -95,9 +106,8 @@ impl RoomGuard {
         debug!(room_dir = %self.room_dir.display(), "RoomGuard cleanup");
         kill_child_gracefully(self.child_pid, self.cleanup_grace);
         self.child_pid = None;
-        release_tap(self.tap_name.as_deref());
-        if let Some(ref mount) = self.overlay_mount {
-            unmount_overlay(mount);
+        if self.tap_owned {
+            release_tap(self.tap_name.as_deref());
         }
         if self.socket.exists() {
             let _ = std::fs::remove_file(&self.socket);
@@ -277,8 +287,11 @@ fn spawn_firecracker(
         .stderr(std::process::Stdio::from(log_stderr))
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| FirecrackerError::BinaryNotFound {
-            path: binary.to_path_buf(),
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => FirecrackerError::BinaryNotFound {
+                path: binary.to_path_buf(),
+            },
+            _ => FirecrackerError::Io(err),
         })
 }
 
@@ -440,20 +453,36 @@ fn kill_child_gracefully(pid: Option<u32>, grace: Duration) {
     {
         use std::process::Command;
         use std::thread;
-        use std::time::Duration as StdDuration;
+        use std::time::{Duration as StdDuration, Instant};
 
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output();
-        thread::sleep(grace.min(StdDuration::from_secs(5)));
+
+        // Poll-with-early-exit instead of one blocking sleep(grace). Drop runs
+        // synchronously from the tokio runtime, so a full 5s sleep stalls the
+        // executor even if the process is already gone after the SIGTERM (the
+        // common case for firecracker).
+        let deadline = Instant::now() + grace.min(StdDuration::from_secs(5));
+        let pid_str = pid.to_string();
+        let poll = StdDuration::from_millis(100);
+        while Instant::now() < deadline {
+            let alive = Command::new("kill")
+                .args(["-0", &pid_str])
+                .output()
+                .is_ok_and(|out| out.status.success());
+            if !alive {
+                return;
+            }
+            thread::sleep(poll);
+        }
+
         if Command::new("kill")
-            .args(["-0", &pid.to_string()])
+            .args(["-0", &pid_str])
             .output()
             .is_ok_and(|out| out.status.success())
         {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .output();
+            let _ = Command::new("kill").args(["-KILL", &pid_str]).output();
         }
     }
     #[cfg(not(unix))]
