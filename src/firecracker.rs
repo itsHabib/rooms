@@ -248,13 +248,9 @@ pub async fn boot(
     // blocks indefinitely during the TLS handshake — `curl https://...` hangs
     // forever after TCP connect with no diagnostic output. Firecracker draws
     // host entropy from /dev/urandom and feeds it to the guest's /dev/hwrng.
-    api_put(
-        &socket,
-        "/entropy",
-        &serde_json::json!({}),
-    )
-    .await
-    .context("PUT /entropy")?;
+    api_put(&socket, "/entropy", &serde_json::json!({}))
+        .await
+        .context("PUT /entropy")?;
 
     api_put(
         &socket,
