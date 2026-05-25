@@ -2,9 +2,6 @@
 //!
 //! Substrate for spawning a clean microVM, running a command in it, collecting
 //! artifacts, and tearing it down. See `docs/features/rooms-v0/spec.md`.
-//!
-//! v0 scaffold: the CLI surface is wired; subcommand bodies are stubs that
-//! exit with a non-zero status until the POC fills them in.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -138,6 +135,11 @@ async fn post_boot(
         }
         (false, Some(cmd)) => {
             runner::wait_for_ssh(&network.guest_ip, key, Duration::from_mins(1)).await?;
+            // Seed the guest's CRNG before any `--command` runs. The bundled
+            // bionic kernel has no entropy source and openssl's TLS handshake
+            // would otherwise hang indefinitely on getrandom(). See
+            // runner::seed_entropy for the gory details.
+            runner::seed_entropy(&network.guest_ip, key).await?;
             // tokio::select! between exec and ctrl_c so a Ctrl-C during the guest
             // command drops the exec future (kill_on_drop SIGKILLs the ssh child),
             // returns Ok(130), and run_room's vm.shutdown() runs cleanly. Without

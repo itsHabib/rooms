@@ -8,6 +8,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, info};
@@ -62,6 +63,97 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
         debug!(guest_ip, stderr = %last_err, "sshd probe failed; retrying");
         sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// Seed 1024 bytes of host entropy into the guest's kernel CRNG via
+/// `RNDADDENTROPY` on `/dev/random`.
+///
+/// The bundled bionic kernel has no `virtio-rng` driver and ignores
+/// `random.trust_cpu` (added in 4.19), so the guest's CRNG never initializes
+/// from any internal source. `getrandom()` blocks indefinitely and every TLS
+/// handshake hangs silently after TCP connect. Without this seed, `rooms run
+/// --command 'curl https://...'` cannot reach any HTTPS endpoint.
+///
+/// Implementation: open `/dev/urandom` on the host, read 1024 bytes (the
+/// host's CRNG has plenty of entropy), pipe them through SSH stdin to a
+/// python one-liner that builds a `rand_pool_info` and calls the
+/// `RNDADDENTROPY` ioctl. 1024 bytes credits 8192 bits — well past the 384
+/// bits the kernel needs to transition `crng_init` to ready.
+///
+/// Goes away when the productionization rootfs builder ships a kernel with
+/// `CONFIG_HW_RANDOM_VIRTIO=y` and our `/entropy` device attaches as
+/// `/dev/hwrng`.
+pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
+    let key = key_path.to_str().context("key path not utf-8")?;
+    let mut host_random = tokio::fs::File::open("/dev/urandom")
+        .await
+        .context("open /dev/urandom on host (every Linux has this)")?;
+    let mut seed = vec![0_u8; 1024];
+    host_random
+        .read_exact(&mut seed)
+        .await
+        .context("read 1024 bytes from host /dev/urandom")?;
+    drop(host_random);
+
+    // The ioctl number 0x40085203 is RNDADDENTROPY on x86_64. The struct
+    // packed below is `struct rand_pool_info { int entropy_count; int
+    // buf_size; __u32 buf[]; }` from include/uapi/linux/random.h, credit
+    // = len*8 bits, size = len bytes, payload = the 1024 stdin bytes.
+    let mut child = Command::new("ssh")
+        .args([
+            "-i",
+            key,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            &format!("root@{guest_ip}"),
+            "--",
+            "python -c 'import sys, struct, fcntl\n\
+             data = sys.stdin.read()\n\
+             buf = struct.pack(\"ii%ds\" % len(data), len(data)*8, len(data), data)\n\
+             fcntl.ioctl(open(\"/dev/random\", \"wb\"), 0x40085203, buf)'",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn ssh for entropy seed")?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("entropy-seed ssh has no stdin (unexpected)")?;
+    stdin
+        .write_all(&seed)
+        .await
+        .context("write seed bytes to ssh stdin")?;
+    stdin
+        .shutdown()
+        .await
+        .context("close ssh stdin after seed")?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("wait on entropy-seed ssh")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "entropy seed via SSH failed (exit {}): {stderr}",
+            output.status
+        );
+    }
+    info!(guest_ip, "seeded 1024 bytes of host entropy into guest CRNG");
+    Ok(())
 }
 
 /// Exec `command` in the guest as root via SSH.
