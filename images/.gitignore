@@ -1,0 +1,3 @@
+# Built rootfs artifacts are local-only (rootfs-builder spec ED-2).
+*.ext4
+*.tmp

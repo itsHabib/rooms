@@ -171,6 +171,8 @@ make release      # release build
 
 `make check` is the single command CI runs and you run before push. E2e tests (`cargo test --features e2e`) require Firecracker + KVM on the rooms-host; CI intentionally skips them.
 
+Guest rootfs images are built with `scripts/build-rootfs.sh` on the rooms-host (see `scripts/README.md`); artifacts under `images/` are gitignored.
+
 ### Lint discipline
 
 Mirrors dossier's:
