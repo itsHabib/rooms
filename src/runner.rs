@@ -158,7 +158,7 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
             output.status
         );
     }
-    info!(guest_ip, "seeded 1024 bytes of host entropy into guest CRNG");
+    info!(guest_ip, "seeded 512 bytes of host entropy into guest CRNG");
     Ok(())
 }
 
