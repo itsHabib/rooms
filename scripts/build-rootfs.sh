@@ -103,15 +103,15 @@ log "mounting $LOOP -> $MNT"
 mount "$LOOP" "$MNT"
 
 log "debootstrap --variant=minbase $SUITE (this may take a few minutes)"
-debootstrap --variant=minbase "$SUITE" "$MNT" http://archive.ubuntu.com/ubuntu/
+debootstrap --variant=minbase "$SUITE" "$MNT" https://archive.ubuntu.com/ubuntu/
 
 pin_chroot_apt "$MNT"
 cp /etc/resolv.conf "$MNT/etc/resolv.conf"
 
 cat >"$MNT/etc/apt/sources.list" <<EOF
-deb http://archive.ubuntu.com/ubuntu/ ${SUITE} main universe
-deb http://archive.ubuntu.com/ubuntu/ ${SUITE}-updates main universe
-deb http://security.ubuntu.com/ubuntu/ ${SUITE}-security main universe
+deb https://archive.ubuntu.com/ubuntu/ ${SUITE} main universe
+deb https://archive.ubuntu.com/ubuntu/ ${SUITE}-updates main universe
+deb https://security.ubuntu.com/ubuntu/ ${SUITE}-security main universe
 EOF
 
 mount --bind /dev "$MNT/dev"

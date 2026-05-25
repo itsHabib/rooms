@@ -130,23 +130,22 @@ for cmd in 'which git' 'which node' 'which claude' 'id rooms'; do
     ssh_rooms "$cmd"
 done
 
-log "checking password auth is rejected"
-if ssh -i "$KEY_PATH" \
-    -o BatchMode=yes \
-    -o PreferredAuthentications=password \
-    -o PubkeyAuthentication=no \
-    -o ConnectTimeout=5 \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR \
-    "rooms@${GUEST_IP}" true >/dev/null 2>&1; then
-    fatal "password auth unexpectedly succeeded (expected pubkey-only)"
+log "checking sshd config disables password auth"
+# A BatchMode=yes ssh probe with PubkeyAuthentication=no would fail
+# unconditionally (ssh refuses to prompt non-interactively), so it can't
+# distinguish a hardened sshd from a default one. Inspect the running
+# config from inside the guest instead.
+PWAUTH="$(ssh_rooms "sudo sshd -T 2>/dev/null | awk '/^passwordauthentication/ {print \$2}'")"
+if [[ "$PWAUTH" != "no" ]]; then
+    fatal "passwordauthentication is '$PWAUTH' (expected 'no')"
 fi
 
+# Compare allocated on-disk bytes, not apparent size — the rootfs is created
+# at a fixed capacity (e.g. 4G), so `stat -c %s` always equals the requested
+# size and never trips the limit. `du --bytes` reports allocated blocks.
+SIZE_B="$(du --bytes "$ROOTFS" | awk '{print $1}')"
 SIZE_H="$(du -h "$ROOTFS" | awk '{print $1}')"
-log "image size: $SIZE_H (expect < 1.5G)"
-# du reports human-readable; compare bytes for the threshold.
-SIZE_B="$(stat -c '%s' "$ROOTFS")"
+log "image size: $SIZE_H allocated (expect < 1.5G)"
 MAX_B=$((1536 * 1024 * 1024))
 if (( SIZE_B >= MAX_B )); then
     fatal "image too large: ${SIZE_H} (limit 1.5G)"

@@ -51,7 +51,11 @@ diff -u a.txt b.txt
 
 ### Smoke test
 
-Requires Firecracker, `tap-fc0` (`scripts/setup-tap.sh`), and `vmlinux.bin` alongside the rootfs (from `scripts/setup-rooms-host.sh`):
+Requires:
+
+- Firecracker on PATH and `vmlinux.bin` next to the rootfs (`scripts/setup-rooms-host.sh`).
+- `tap-fc0` configured (`scripts/setup-tap.sh`).
+- Host commands the test invokes: `jq`, `ip`, `ssh`, `curl` — all on PATH. `setup-rooms-host.sh` installs them.
 
 ```sh
 ./scripts/test-rootfs.sh images/node-dev.ext4
