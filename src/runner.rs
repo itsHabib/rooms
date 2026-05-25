@@ -65,7 +65,7 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
     }
 }
 
-/// Seed 1024 bytes of host entropy into the guest's kernel CRNG via
+/// Seed 512 bytes of host entropy into the guest's kernel CRNG via
 /// `RNDADDENTROPY` on `/dev/random`.
 ///
 /// The bundled bionic kernel has no `virtio-rng` driver and ignores
@@ -74,11 +74,17 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
 /// handshake hangs silently after TCP connect. Without this seed, `rooms run
 /// --command 'curl https://...'` cannot reach any HTTPS endpoint.
 ///
-/// Implementation: open `/dev/urandom` on the host, read 1024 bytes (the
-/// host's CRNG has plenty of entropy), pipe them through SSH stdin to a
-/// python one-liner that builds a `rand_pool_info` and calls the
-/// `RNDADDENTROPY` ioctl. 1024 bytes credits 8192 bits — well past the 384
-/// bits the kernel needs to transition `crng_init` to ready.
+/// Implementation: read 512 bytes from the host's `/dev/urandom` (the host's
+/// CRNG has plenty of entropy), pipe through SSH stdin to a python one-liner
+/// that builds a `rand_pool_info` and calls the `RNDADDENTROPY` ioctl. 512
+/// bytes credits 4096 bits — well past the 384 bits the kernel needs to
+/// transition `crng_init` from `unseeded` to `ready`. Empirically lifts
+/// `entropy_avail` from ~30 to ~2200.
+///
+/// 512 (not 1024) because Python's `fcntl.ioctl` default `buf` size cap is
+/// 1024 bytes; the ioctl struct adds 8 bytes of header (entropy_count +
+/// buf_size), so 1024 of payload overshoots and `ioctl` raises `ValueError:
+/// ioctl string arg too long`. 512 + 8 = 520 stays safely under.
 ///
 /// Goes away when the productionization rootfs builder ships a kernel with
 /// `CONFIG_HW_RANDOM_VIRTIO=y` and our `/entropy` device attaches as
@@ -88,11 +94,11 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
     let mut host_random = tokio::fs::File::open("/dev/urandom")
         .await
         .context("open /dev/urandom on host (every Linux has this)")?;
-    let mut seed = vec![0_u8; 1024];
+    let mut seed = vec![0_u8; 512];
     host_random
         .read_exact(&mut seed)
         .await
-        .context("read 1024 bytes from host /dev/urandom")?;
+        .context("read 512 bytes from host /dev/urandom")?;
     drop(host_random);
 
     // The ioctl number 0x40085203 is RNDADDENTROPY on x86_64. The struct
