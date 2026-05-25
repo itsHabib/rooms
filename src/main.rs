@@ -8,8 +8,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
-use rooms::{firecracker, runner};
+use rooms::artifacts::{ResultJson, RunStatus};
+use rooms::{artifacts, firecracker, runner};
 use tracing::{info, warn};
 
 /// rooms — disposable Firecracker microVMs with specified deps.
@@ -36,6 +38,12 @@ enum Command {
         /// Mutually exclusive with `--keep`.
         #[arg(long, conflicts_with = "keep", value_parser = non_empty_command)]
         command: Option<String>,
+    },
+    /// Validate runner artifacts in a local `out/` directory.
+    Collect {
+        /// Path to the collected `out/` directory on the host.
+        #[arg(long)]
+        from: PathBuf,
     },
     /// Check the host environment (KVM, Firecracker, image, etc.).
     Doctor,
@@ -75,6 +83,7 @@ async fn dispatch(cli: Cli) -> Result<u8> {
             keep,
             command,
         } => run_room(image, keep, command).await,
+        Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor => {
             info!("rooms doctor");
             anyhow::bail!("doctor: not yet implemented (POC in flight)")
@@ -134,6 +143,8 @@ async fn post_boot(
             Ok(0)
         }
         (false, Some(cmd)) => {
+            let guest_ip = network.guest_ip.clone();
+            let cmd_for_cancel = cmd.clone();
             // Wrap the entire setup-and-exec sequence (probe sshd, seed CRNG,
             // exec) in one tokio::select! vs ctrl_c. Dropping `work` cascades
             // through each child future — kill_on_drop fires on every spawned
@@ -148,14 +159,36 @@ async fn post_boot(
             let work = async {
                 runner::wait_for_ssh(&network.guest_ip, key, Duration::from_secs(60)).await?;
                 runner::seed_entropy(&network.guest_ip, key).await?;
-                let code = runner::exec_in_guest(&network.guest_ip, key, &cmd).await?;
-                Ok::<u8, anyhow::Error>(u8::try_from(code).unwrap_or(2))
+                let outcome = runner::exec_in_guest(&network.guest_ip, key, &cmd).await?;
+                Ok::<u8, anyhow::Error>(u8::try_from(outcome.exit_code).unwrap_or(2))
             };
+            // started_at captures when rooms began attempting exec (SSH probe,
+            // entropy seed, then user command). Exec writes its own started_at
+            // into result.json on the success path; this outer one only
+            // surfaces in the cancel branch below, where the user command may
+            // never have begun.
+            let started_at = Utc::now();
             tokio::pin!(work);
             tokio::select! {
                 res = &mut work => res,
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl-c received during exec setup or run; aborting and shutting down");
+                    // Ensure the artifact dir + empty log files exist before
+                    // writing result.json so `rooms collect` validation still
+                    // passes for a cancelled run.
+                    if let Err(err) = runner::ensure_guest_artifact_skeleton(&guest_ip, key).await {
+                        warn!(error = %err, "failed to create cancelled-run artifact skeleton");
+                    }
+                    let result = ResultJson::from_exec(
+                        130,
+                        RunStatus::Cancelled,
+                        started_at,
+                        Utc::now(),
+                        vec!["sh".to_owned(), "-c".to_owned(), cmd_for_cancel],
+                    );
+                    if let Err(err) = runner::write_guest_result_json(&guest_ip, key, &result).await {
+                        warn!(error = %err, "failed to write cancelled result.json");
+                    }
                     Ok(130)
                 }
             }
@@ -184,6 +217,19 @@ fn key_path() -> Result<PathBuf> {
     let home = std::env::var("HOME")
         .context("HOME env var unset; rooms needs it to locate ~/.ssh/id_rooms")?;
     Ok(PathBuf::from(home).join(".ssh/id_rooms"))
+}
+
+async fn collect_artifacts(from: PathBuf) -> Result<u8> {
+    info!(from = %from.display(), "rooms collect");
+    // `?` preserves ArtifactsError as the anyhow source; previous map_err
+    // stringified it and dropped the chain.
+    let loaded = artifacts::RunnerArtifacts::load(&from).await?;
+    info!(
+        status = ?loaded.result.status,
+        exit_code = loaded.result.exit_code,
+        "artifacts validated"
+    );
+    Ok(0)
 }
 
 #[cfg(test)]
