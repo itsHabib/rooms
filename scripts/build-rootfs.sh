@@ -172,7 +172,7 @@ nameserver 1.1.1.1
 nameserver 8.8.8.8
 RESOLV
 
-find / -name '*.log' -delete 2>/dev/null || true
+find / -xdev -name '*.log' -delete 2>/dev/null || true
 : > /var/log/dpkg.log 2>/dev/null || true
 find /var/log/apt -type f -exec truncate -s 0 {} + 2>/dev/null || true
 apt-get clean
