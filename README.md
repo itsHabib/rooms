@@ -17,7 +17,7 @@ make build        # debug build
 make release      # release build
 ```
 
-CI matrix runs `make check` on Ubuntu; tagging `@claude` on a PR review triggers the Claude review workflow.
+CI matrix runs three jobs on Ubuntu — `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` (collectively equivalent to `make check`). Tagging `@claude` on a PR triggers the Claude review workflow.
 
 ## CLI (POC)
 
