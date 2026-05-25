@@ -169,14 +169,24 @@ pub async fn boot(
 
     wait_for_socket(&socket, Duration::from_secs(5)).await?;
 
-    // Kernel cmdline: when networking is requested, append Linux's built-in IP
-    // autoconfig string (`ip=<client>::<gw>:<mask>::<dev>:<autoconf>`) so eth0
-    // comes up before userspace, with no DHCP needed in the rootfs.
+    // Kernel cmdline:
+    // - `console=ttyS0` routes kernel + getty output to the serial port (which
+    //   firecracker dumps to its stdout, which we redirect to firecracker.log).
+    // - `reboot=k panic=1 pci=off` are firecracker quickstart conventions.
+    // - When networking is requested, append Linux's built-in IP autoconfig
+    //   string (`ip=<client>::<gw>:<mask>::<dev>:<autoconf>`) so eth0 comes up
+    //   before userspace, with no DHCP needed in the rootfs.
+    // - `random.trust_cpu=on` tells the kernel to seed the CRNG from RDRAND
+    //   (the CPU's hardware RNG). Without this, the microVM has no entropy
+    //   source — no real keyboard/mouse/disk jitter — and openssl's TLS
+    //   handshake blocks indefinitely on `getrandom()`. RDRAND is always
+    //   available under KVM on modern host CPUs.
+    let base = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
     let boot_args = network.map_or_else(
-        || String::from("console=ttyS0 reboot=k panic=1 pci=off"),
+        || base.to_owned(),
         |net| {
             format!(
-                "console=ttyS0 reboot=k panic=1 pci=off ip={}::{}:{}::eth0:off",
+                "{base} ip={}::{}:{}::eth0:off",
                 net.guest_ip, net.gateway_ip, net.netmask
             )
         },
