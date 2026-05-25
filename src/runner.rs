@@ -82,8 +82,8 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
 /// `entropy_avail` from ~30 to ~2200.
 ///
 /// 512 (not 1024) because Python's `fcntl.ioctl` default `buf` size cap is
-/// 1024 bytes; the ioctl struct adds 8 bytes of header (entropy_count +
-/// buf_size), so 1024 of payload overshoots and `ioctl` raises `ValueError:
+/// 1024 bytes; the ioctl struct adds 8 bytes of header (`entropy_count` +
+/// `buf_size`), so 1024 of payload overshoots and `ioctl` raises `ValueError:
 /// ioctl string arg too long`. 512 + 8 = 520 stays safely under.
 ///
 /// Goes away when the productionization rootfs builder ships a kernel with
