@@ -163,6 +163,22 @@ nameserver 8.8.8.8
 EOF
 sudo chmod 644 "$RESOLV"
 
+# 7c. Install a CA bundle from the host.
+# The quickstart bionic rootfs is the "minimal" variant — `ca-certificates`
+# isn't installed, /etc/ssl/certs/ is empty, and openssl/curl hang on TLS
+# handshake with any HTTPS endpoint (no roots to validate against, no
+# fast-fail). Copy the host's bundle so HTTPS works end-to-end. Same
+# productionization replacement as the resolv.conf above.
+HOST_CA="/etc/ssl/certs/ca-certificates.crt"
+if [[ -f "$HOST_CA" ]]; then
+    log "copying CA bundle from host into rootfs"
+    sudo mkdir -p "$MNT/etc/ssl/certs"
+    sudo cp "$HOST_CA" "$MNT/etc/ssl/certs/ca-certificates.crt"
+    sudo chmod 644 "$MNT/etc/ssl/certs/ca-certificates.crt"
+else
+    log "warn: host CA bundle not at $HOST_CA — HTTPS from guest will hang on TLS"
+fi
+
 # 8. Sync + unmount + fsck
 sync
 sudo umount "$MNT"
