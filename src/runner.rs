@@ -104,7 +104,14 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
     // The ioctl number 0x40085203 is RNDADDENTROPY on x86_64. The struct
     // packed below is `struct rand_pool_info { int entropy_count; int
     // buf_size; __u32 buf[]; }` from include/uapi/linux/random.h, credit
-    // = len*8 bits, size = len bytes, payload = the 1024 stdin bytes.
+    // = len*8 bits, size = len bytes, payload = the 512 stdin bytes.
+    //
+    // The python invocation hard-codes `python` (which on bionic resolves to
+    // 2.7) because `sys.stdin.read()` returns bytes on py2; under py3 it would
+    // return a text-decoded str and `struct.pack(..., data)` would raise. When
+    // the rootfs builder ships a python3-only image, the whole seed_entropy
+    // step disappears (the new kernel will have virtio-rng), so this py2 tie
+    // is intentional and short-lived.
     let mut child = Command::new("ssh")
         .args([
             "-i",

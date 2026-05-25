@@ -134,25 +134,28 @@ async fn post_boot(
             Ok(0)
         }
         (false, Some(cmd)) => {
-            runner::wait_for_ssh(&network.guest_ip, key, Duration::from_mins(1)).await?;
-            // Seed the guest's CRNG before any `--command` runs. The bundled
-            // bionic kernel has no entropy source and openssl's TLS handshake
-            // would otherwise hang indefinitely on getrandom(). See
-            // runner::seed_entropy for the gory details.
-            runner::seed_entropy(&network.guest_ip, key).await?;
-            // tokio::select! between exec and ctrl_c so a Ctrl-C during the guest
-            // command drops the exec future (kill_on_drop SIGKILLs the ssh child),
-            // returns Ok(130), and run_room's vm.shutdown() runs cleanly. Without
-            // this, the default SIGINT terminates rooms before shutdown can fire.
-            let exec_fut = runner::exec_in_guest(&network.guest_ip, key, &cmd);
-            tokio::pin!(exec_fut);
+            // Wrap the entire setup-and-exec sequence (probe sshd, seed CRNG,
+            // exec) in one tokio::select! vs ctrl_c. Dropping `work` cascades
+            // through each child future — kill_on_drop fires on every spawned
+            // ssh client — so a Ctrl-C at any point still lets run_room's
+            // vm.shutdown() run cleanly. (An earlier version only wrapped
+            // exec_in_guest, leaving a 0–60s window during sshd probe + seed
+            // where Ctrl-C would leak the firecracker process + state dir.)
+            #[allow(
+                clippy::duration_suboptimal_units,
+                reason = "from_mins requires Rust 1.83; no MSRV pinned yet"
+            )]
+            let work = async {
+                runner::wait_for_ssh(&network.guest_ip, key, Duration::from_secs(60)).await?;
+                runner::seed_entropy(&network.guest_ip, key).await?;
+                let code = runner::exec_in_guest(&network.guest_ip, key, &cmd).await?;
+                Ok::<u8, anyhow::Error>(u8::try_from(code).unwrap_or(2))
+            };
+            tokio::pin!(work);
             tokio::select! {
-                res = &mut exec_fut => {
-                    let code = res?;
-                    Ok(u8::try_from(code).unwrap_or(2))
-                }
+                res = &mut work => res,
                 _ = tokio::signal::ctrl_c() => {
-                    info!("ctrl-c received during command; aborting and shutting down");
+                    info!("ctrl-c received during exec setup or run; aborting and shutting down");
                     Ok(130)
                 }
             }

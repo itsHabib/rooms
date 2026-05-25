@@ -147,7 +147,19 @@ set_directive() {
 set_directive PermitRootLogin yes
 set_directive PubkeyAuthentication yes
 set_directive PasswordAuthentication no
-set_directive AcceptEnv ANTHROPIC_API_KEY
+
+# AcceptEnv is additive (sshd accepts multiple lines) and Ubuntu defaults
+# ship `AcceptEnv LANG LC_*` — using set_directive here would replace that
+# whole value with our one token and silently drop locale forwarding for
+# every SSH session. Instead, append a fresh `AcceptEnv ANTHROPIC_API_KEY`
+# line iff no existing AcceptEnv already grants that exact token. Cheap
+# idempotent grep avoids accumulating duplicate lines on re-runs.
+if sudo grep -qE "^AcceptEnv[[:space:]].*\bANTHROPIC_API_KEY\b" "$CONFIG"; then
+    log "AcceptEnv already grants ANTHROPIC_API_KEY"
+else
+    log "appending AcceptEnv ANTHROPIC_API_KEY (preserves existing AcceptEnv lines)"
+    echo "AcceptEnv ANTHROPIC_API_KEY" | sudo tee -a "$CONFIG" >/dev/null
+fi
 
 # 7b. Replace the quickstart rootfs's stale /etc/resolv.conf.
 # The bionic quickstart image was built on AWS EC2 and ships with a
