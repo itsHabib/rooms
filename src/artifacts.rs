@@ -185,11 +185,14 @@ fn validate_reference(out_dir: &Path, rel: Option<&str>) -> Result<(), Artifacts
         return Ok(());
     };
     let path = safe_join(out_dir, rel)?;
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(ArtifactsError::DanglingReference(rel.to_owned()))
+    if !path.is_file() {
+        return Err(ArtifactsError::DanglingReference(rel.to_owned()));
     }
+    // The lexical safe_join above catches `..` and absolute paths, but a
+    // symlink at `out_dir/summary.md` pointing at `/etc/passwd` would
+    // still pass that check. Resolve the real path and verify it stays
+    // under the canonical out_dir before any reader follows it.
+    ensure_inside_out_dir(out_dir, &path, rel)
 }
 
 async fn read_optional_text(
@@ -200,6 +203,7 @@ async fn read_optional_text(
         return Ok(None);
     };
     let path = safe_join(out_dir, rel)?;
+    ensure_inside_out_dir(out_dir, &path, rel)?;
     let contents = tokio::fs::read_to_string(&path)
         .await
         .map_err(|err| io_error(path, &err))?;
@@ -227,6 +231,22 @@ fn safe_join(out_dir: &Path, rel: &str) -> Result<PathBuf, ArtifactsError> {
         }
     }
     Ok(out_dir.join(rel_path))
+}
+
+/// Resolve `path` (which already passed `safe_join`) through any symlinks
+/// and confirm the real target still sits under `out_dir`. Rejects
+/// `summary.md → /etc/passwd` and similar escapes that the lexical check
+/// can't see. The path must exist; callers should `is_file()` first.
+fn ensure_inside_out_dir(out_dir: &Path, path: &Path, rel: &str) -> Result<(), ArtifactsError> {
+    let canonical_out =
+        std::fs::canonicalize(out_dir).map_err(|err| io_error(out_dir.to_path_buf(), &err))?;
+    let canonical_target =
+        std::fs::canonicalize(path).map_err(|err| io_error(path.to_path_buf(), &err))?;
+    if canonical_target.starts_with(&canonical_out) {
+        Ok(())
+    } else {
+        Err(ArtifactsError::UnsafeReference(rel.to_owned()))
+    }
 }
 
 fn io_error(path: PathBuf, err: &std::io::Error) -> ArtifactsError {
@@ -416,6 +436,30 @@ mod tests {
         assert_eq!(
             err,
             ArtifactsError::UnsafeReference("../escape.md".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_escape_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let mut result = sample_result();
+        // Inside out_dir, place a symlink that points outside.
+        let outside = dir.path().parent().expect("temp parent").join("escape.md");
+        tokio::fs::write(&outside, "escaped")
+            .await
+            .expect("write outside");
+        let link = dir.path().join("summary.md");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        result.summary_path = Some("summary.md".to_owned());
+        write_minimal_out(dir.path(), &result).await;
+
+        let err = RunnerArtifacts::load(dir.path())
+            .await
+            .expect_err("symlink escape should be rejected");
+        assert_eq!(
+            err,
+            ArtifactsError::UnsafeReference("summary.md".to_owned())
         );
     }
 

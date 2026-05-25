@@ -188,14 +188,15 @@ pub struct GuestExecOutcome {
 /// `/workspace/out/result.json` per the runner contract. Guest output is not
 /// inherited on the host — use `rooms collect --from` after exec to inspect logs.
 ///
-/// Exit code: parsed from a trailing `echo $?` in the wrapped remote script
-/// rather than from SSH's process status, so genuine guest exit codes (including
-/// 255) round-trip without being conflated with SSH transport errors.
+/// Exit code: parsed from an `EXIT=<n>` marker line printed after the user
+/// command runs inside a subshell, so genuine guest exit codes (including 255,
+/// and `exit N` / `set -e; false` cases that abort the shell) round-trip
+/// without being conflated with SSH transport errors.
 ///
-/// Returns `Err` only when SSH itself fails to invoke the wrapper — the spawned
-/// `ssh` process exited non-zero before `echo $?` could run, the wrapper output
-/// was unparseable, etc. For those cases we cannot trust an exit code from the
-/// guest, so the caller should treat it as a substrate-level transport failure.
+/// Returns `Err` only when the wrapper never ran to completion (no EXIT=
+/// marker in stdout). In that case the spawned `ssh` failed before the
+/// wrapper could emit its trailer — network, auth, sshd not listening — and
+/// the caller should treat it as a substrate-level transport failure.
 ///
 /// Forwards `ANTHROPIC_API_KEY` from the host process env via SSH's `SendEnv`
 /// option. The matching `AcceptEnv ANTHROPIC_API_KEY` lives in the rootfs's
@@ -206,10 +207,17 @@ pub async fn exec_in_guest(
     command: &str,
 ) -> Result<GuestExecOutcome> {
     let started_at = Utc::now();
+    // Run the user command in a subshell `( ... )` rather than a group
+    // `{ ...; }`. With `{}`, a user command like `exit 42` or `set -e;
+    // false` terminates the wrapper shell itself, so `echo $?` never runs
+    // and SSH returns the wrapper's exit status — which used to be
+    // misclassified here as a transport failure. The subshell isolates
+    // `exit`, leaving the parent shell to print the exit code on the
+    // EXIT= marker line that `parse_remote_exit_code` reads.
     let remote = format!(
         "mkdir -p /workspace/out/logs && \
-         {{ {command}; }} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
-         echo $?"
+         ( {command} ) > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
+         echo EXIT=$?"
     );
     let output = ssh_command(guest_ip, key_path, &remote)?
         .stdin(Stdio::null())
@@ -221,10 +229,17 @@ pub async fn exec_in_guest(
         .context("failed to spawn ssh; is openssh-client installed?")?;
 
     let ended_at = Utc::now();
-    if !output.status.success() {
+    // Decide failure mode by looking for the EXIT= marker. If we see it,
+    // SSH ran the wrapper to completion and the user command's exit code
+    // is in `output.stdout` — even if SSH itself returned non-zero (which
+    // it does when, e.g., the user's last command exits non-zero and bash
+    // surfaces that). If we don't see it, the wrapper never ran and this
+    // is genuine SSH-transport failure.
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    if !stdout_str.lines().any(|l| l.starts_with("EXIT=")) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "guest exec via SSH failed (exit {}): {stderr}",
+            "guest exec via SSH failed before wrapper completed (ssh exit {}): {stderr}",
             output.status
         );
     }
@@ -329,9 +344,19 @@ fn guest_command_argv(command: &str) -> Vec<String> {
 }
 
 fn parse_remote_exit_code(stdout: &[u8]) -> Result<i32> {
-    let text = String::from_utf8_lossy(stdout).trim().to_owned();
-    text.parse::<i32>()
-        .with_context(|| format!("guest did not return numeric exit code; stdout: {text:?}"))
+    let text = String::from_utf8_lossy(stdout);
+    // Scan lines (last wins) for the `EXIT=<n>` marker. The wrapper
+    // appends it after running the user command in a subshell, so even
+    // commands that print to stdout don't mask the marker.
+    let marker = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("EXIT="))
+        .next_back()
+        .with_context(|| format!("guest stdout missing EXIT= marker; raw stdout: {text:?}"))?;
+    marker
+        .trim()
+        .parse::<i32>()
+        .with_context(|| format!("EXIT= marker not numeric: {marker:?}; raw stdout: {text:?}"))
 }
 
 fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command> {
