@@ -8,10 +8,13 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, info};
+
+use crate::artifacts::{ResultJson, RunStatus};
 
 /// Probe the guest's sshd until it accepts a pubkey connection, or `timeout` elapses.
 ///
@@ -170,73 +173,159 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Outcome of a guest command exec, including artifact metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestExecOutcome {
+    pub exit_code: i32,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+}
+
 /// Exec `command` in the guest as root via SSH.
 ///
-/// Wires the guest's stdin from /dev/null, and inherits stdout / stderr so guest
-/// output flows to the host's fds directly (operators can pipe
-/// `rooms run --command '...' | jq`).
+/// Captures stdout/stderr under `/workspace/out/logs/` and writes
+/// `/workspace/out/result.json` per the runner contract. Guest output is not
+/// inherited on the host — use `rooms collect --from` after exec to inspect logs.
 ///
-/// Returns the guest command's exit code clamped to `0..=255`:
-/// - guest exited normally with `ExitStatus.code() == Some(n)` → returns `n`
-///   (always in `0..=255` per POSIX). The clamp to `u8` happens in the caller,
-///   not here — keep the wider type so the caller can distinguish "ran" from
-///   any future "did not run" sentinel.
-/// - guest killed by signal: returns `128 + sig.unwrap_or(0)`. Per
-///   `ExitStatusExt::signal()`, `sig` is `Option<i32>`, but in practice it's
-///   `Some(n)` with `n <= 64` whenever the underlying status was a signal kill,
-///   so the result stays in `0..=255`.
+/// Returns exec metadata including the guest command's exit code:
+/// - guest exited normally with `ExitStatus.code() == Some(n)` → `exit_code = n`
+/// - guest killed by signal: `128 + sig.unwrap_or(0)`
 ///
-/// SSH-internal errors (host unreachable, key rejected, ssh-binary missing)
-/// surface as `Err` with anyhow context; the bail message names the most likely
-/// cause. The SSH-internal exit code 255 is NOT translated — it passes through
-/// as `Ok(255)` and is indistinguishable from "remote command exited 255".
-/// Documented tradeoff (see Risks).
+/// SSH-internal errors surface as `Err`. The SSH-internal exit code 255 passes
+/// through as `Ok(255)` and is indistinguishable from "remote command exited 255".
 ///
 /// Forwards `ANTHROPIC_API_KEY` from the host process env via SSH's `SendEnv`
 /// option. The matching `AcceptEnv ANTHROPIC_API_KEY` lives in the rootfs's
 /// `/etc/ssh/sshd_config`, baked by `scripts/bake-rootfs-ssh.sh`.
-pub async fn exec_in_guest(guest_ip: &str, key_path: &Path, command: &str) -> Result<i32> {
-    let status = Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().context("key path not utf-8")?,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            "SendEnv=ANTHROPIC_API_KEY",
-            &format!("root@{guest_ip}"),
-            "--",
-            command,
-        ])
+pub async fn exec_in_guest(
+    guest_ip: &str,
+    key_path: &Path,
+    command: &str,
+) -> Result<GuestExecOutcome> {
+    let started_at = Utc::now();
+    let remote = format!(
+        "mkdir -p /workspace/out/logs && \
+         {{ {command}; }} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
+         echo $?"
+    );
+    let output = ssh_command(guest_ip, key_path, &remote)?
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .status()
+        .output()
         .await
         .context("failed to spawn ssh; is openssh-client installed?")?;
 
-    if let Some(code) = status.code() {
-        return Ok(code);
+    let ended_at = Utc::now();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "guest exec via SSH failed (exit {}): {stderr}",
+            output.status
+        );
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        Ok(128 + status.signal().unwrap_or(0))
+    let exit_code = parse_remote_exit_code(&output.stdout)?;
+    let status = ResultJson::status_from_exit_code(exit_code);
+    let result = ResultJson::from_exec(
+        exit_code,
+        status,
+        started_at,
+        ended_at,
+        guest_command_argv(command),
+    );
+    write_guest_result_json(guest_ip, key_path, &result).await?;
+
+    Ok(GuestExecOutcome {
+        exit_code,
+        status,
+        started_at,
+        ended_at,
+    })
+}
+
+/// Write `result.json` into the guest artifact directory.
+pub async fn write_guest_result_json(
+    guest_ip: &str,
+    key_path: &Path,
+    result: &ResultJson,
+) -> Result<()> {
+    let json = serde_json::to_string_pretty(result).context("serialize result.json")?;
+    let mut child = ssh_command(
+        guest_ip,
+        key_path,
+        "mkdir -p /workspace/out && cat > /workspace/out/result.json",
+    )?
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .spawn()
+    .context("spawn ssh to write result.json")?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("result.json ssh has no stdin (unexpected)")?;
+    stdin
+        .write_all(json.as_bytes())
+        .await
+        .context("write result.json to ssh stdin")?;
+    stdin
+        .shutdown()
+        .await
+        .context("close ssh stdin after result.json")?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("wait on result.json ssh")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "write result.json via SSH failed (exit {}): {stderr}",
+            output.status
+        );
     }
-    #[cfg(not(unix))]
-    {
-        Ok(128)
-    }
+    Ok(())
+}
+
+fn guest_command_argv(command: &str) -> Vec<String> {
+    vec!["sh".to_owned(), "-c".to_owned(), command.to_owned()]
+}
+
+fn parse_remote_exit_code(stdout: &[u8]) -> Result<i32> {
+    let text = String::from_utf8_lossy(stdout).trim().to_owned();
+    text.parse::<i32>()
+        .with_context(|| format!("guest did not return numeric exit code; stdout: {text:?}"))
+}
+
+fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command> {
+    let key = key_path.to_str().context("key path not utf-8")?;
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-i",
+        key,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        "SendEnv=ANTHROPIC_API_KEY",
+        &format!("root@{guest_ip}"),
+        "--",
+        remote,
+    ]);
+    Ok(cmd)
 }
 
 #[cfg(test)]
