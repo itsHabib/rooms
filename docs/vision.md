@@ -87,10 +87,10 @@ Nothing here is a shipped claim — check README status and spec docs for what e
 | **v0.1** | Nix flake as deps spec (`--flake`), ship backend integration, cursor SDK runner inside the guest. |
 | **v0.2** | Snapshots + fork, replay receipts, hard parallelism for `/work-driver` fan-out. |
 
-See [`docs/features/rooms-v0/spec.md`](features/rooms-v0/spec.md) for the v0 design and [`docs/features/01-productionization/driver.md`](features/01-productionization/driver.md) for the post-POC task manifest.
+See [v0 spec](features/rooms-v0/spec.md) for the design and [productionization driver](features/01-productionization/driver.md) for the post-POC task manifest.
 
 ## Further reading
 
-- [`docs/features/rooms-v0/spec.md`](features/rooms-v0/spec.md) — v0 architecture, CLI surface, lifecycle, conventions.
+- [v0 spec](features/rooms-v0/spec.md) — v0 architecture, CLI surface, lifecycle, conventions.
 - [`README.md`](../README.md) — how to run it today.
 - [`CLAUDE.md`](../CLAUDE.md) — notes for agents working in this repo.

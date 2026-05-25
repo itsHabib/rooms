@@ -28,12 +28,11 @@ git clone https://github.com/itsHabib/rooms ~/rooms
 cd ~/rooms && make check
 
 # boot, run one command in the guest, shut down (works today)
-export ANTHROPIC_API_KEY=sk-ant-...
 cargo run -- run \
   --image ~/rooms/images/rootfs.ext4 \
-  --command 'curl -s https://api.anthropic.com/v1/messages -H "x-api-key: $ANTHROPIC_API_KEY" ...'
+  --command 'echo "hello from $(uname -srm)"'
 
-# expected: JSON response on stdout, exit code 0, microVM destroyed
+# expected: "hello from Linux <version> x86_64" on stdout, exit code 0, microVM destroyed
 ```
 
 **POC upper bar (target, not yet one command):**
