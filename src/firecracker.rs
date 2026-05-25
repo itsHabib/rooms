@@ -232,6 +232,20 @@ pub async fn boot(
         info!(tap = %net.tap_name, guest_ip = %net.guest_ip, "network attached");
     }
 
+    // Attach a virtio-rng device so the guest's CRNG initializes promptly.
+    // Without this, the microVM has no entropy source (no HW RNG, no
+    // keyboard/mouse jitter, no disk seek noise) and openssl's RAND_bytes
+    // blocks indefinitely during the TLS handshake — `curl https://...` hangs
+    // forever after TCP connect with no diagnostic output. Firecracker draws
+    // host entropy from /dev/urandom and feeds it to the guest's /dev/hwrng.
+    api_put(
+        &socket,
+        "/entropy",
+        &serde_json::json!({}),
+    )
+    .await
+    .context("PUT /entropy")?;
+
     api_put(
         &socket,
         "/actions",
