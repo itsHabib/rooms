@@ -54,7 +54,10 @@ impl RoomsConfig {
     /// API call timeout for a specific endpoint.
     #[must_use]
     pub fn timeout_for_endpoint(&self, endpoint: &str) -> Duration {
-        if endpoint.contains("InstanceStart") || endpoint == "/actions" {
+        // Firecracker endpoint paths don't embed the action type
+        // (`InstanceStart` lives in the JSON body, not the URL), so the
+        // only call that ever hits `/actions` is the boot trigger.
+        if endpoint == "/actions" {
             self.instance_start_timeout
         } else {
             self.api_timeout

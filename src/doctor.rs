@@ -293,12 +293,11 @@ fn check_tap_roundtrip() -> CheckResult {
 fn check_nested_virt() -> CheckResult {
     let name = "nested_virt".to_owned();
 
-    // Try kvm-ok first.
+    // Try kvm-ok first. Trust the exit status — the string match was a
+    // double-positive that would have flipped "nested virtualisation not
+    // enabled" stderr into a "ok" result.
     if let Ok(out) = Command::new("kvm-ok").output() {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let combined = format!("{stdout}{stderr}");
-        if out.status.success() || combined.contains("enabled") {
+        if out.status.success() {
             return CheckResult {
                 name,
                 ok: true,
