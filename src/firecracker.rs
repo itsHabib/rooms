@@ -150,12 +150,25 @@ pub async fn boot(
     // --command '...' | jq` doesn't see kernel boot output interleaved with
     // the guest command's stdout. The log file is cleaned up with the room dir
     // on shutdown; operators who need to debug a hung boot can `--keep` and
-    // tail the file.
-    let log_file = std::fs::File::create(&log_path)
-        .with_context(|| format!("create firecracker log file at {}", log_path.display()))?;
-    let log_file_stderr = log_file
-        .try_clone()
-        .context("clone firecracker log file handle for stderr")?;
+    // tail the file. Use spawn_blocking — std::fs::File::create + try_clone are
+    // blocking syscalls; calling them on the Tokio runtime thread stalls the
+    // reactor under load (mirrors the DirBuilder pattern above).
+    let log_path_spawn = log_path.clone();
+    let (log_file, log_file_stderr) =
+        tokio::task::spawn_blocking(move || -> Result<(std::fs::File, std::fs::File)> {
+            let f = std::fs::File::create(&log_path_spawn).with_context(|| {
+                format!(
+                    "create firecracker log file at {}",
+                    log_path_spawn.display()
+                )
+            })?;
+            let f2 = f
+                .try_clone()
+                .context("clone firecracker log file handle for stderr")?;
+            Ok((f, f2))
+        })
+        .await
+        .context("spawn_blocking for log file create failed (panic or cancellation)")??;
 
     info!(socket = %socket.display(), log = %log_path.display(), "spawning firecracker");
     let child = Command::new("firecracker")
