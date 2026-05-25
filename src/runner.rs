@@ -1,33 +1,39 @@
 //! Run commands inside a booted microVM, via SSH.
-//!
-//! POC: shells out to the `ssh` client. A native russh/openssh-rs client is
-//! a productionization concern.
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-/// Probe the guest's sshd until it accepts a pubkey connection, or `timeout` elapses.
-///
-/// Returns the last underlying error on timeout so failure modes
-/// (network down, key not baked, sshd never started) are debuggable from the
-/// surface error.
-pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) -> Result<()> {
-    let key = key_path.to_str().context("key path not utf-8")?;
+use crate::config::RoomsConfig;
+use crate::error::{FirecrackerError, RunnerError};
+
+/// Probe the guest's sshd until it accepts a pubkey connection, or timeout elapses.
+pub async fn wait_for_ssh(
+    guest_ip: &str,
+    key_path: &Path,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    let key = key_path
+        .to_str()
+        .ok_or(RunnerError::KeyPathNotUtf8)
+        .map_err(FirecrackerError::from)?;
+    let timeout = config.guest_reach_timeout;
+    let poll = config.guest_reach_poll_interval;
     let deadline = Instant::now() + timeout;
     let mut last_err = String::new();
 
     loop {
         if Instant::now() >= deadline {
-            anyhow::bail!(
-                "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
-            );
+            return Err(FirecrackerError::GuestUnreachable {
+                reason: format!(
+                    "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
+                ),
+            });
         }
 
         let output = Command::new("ssh")
@@ -52,7 +58,8 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("failed to spawn ssh probe; is openssh-client installed?")?;
+            .map_err(|e| RunnerError::SshProbe(e.to_string()))
+            .map_err(FirecrackerError::from)?;
 
         if output.status.success() {
             info!(guest_ip, "sshd accepted pubkey connection");
@@ -61,58 +68,23 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
 
         last_err = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         debug!(guest_ip, stderr = %last_err, "sshd probe failed; retrying");
-        sleep(Duration::from_secs(1)).await;
+        sleep(poll).await;
     }
 }
 
-/// Seed 512 bytes of host entropy into the guest's kernel CRNG via
-/// `RNDADDENTROPY` on `/dev/random`.
-///
-/// The bundled bionic kernel has no `virtio-rng` driver and ignores
-/// `random.trust_cpu` (added in 4.19), so the guest's CRNG never initializes
-/// from any internal source. `getrandom()` blocks indefinitely and every TLS
-/// handshake hangs silently after TCP connect. Without this seed, `rooms run
-/// --command 'curl https://...'` cannot reach any HTTPS endpoint.
-///
-/// Implementation: read 512 bytes from the host's `/dev/urandom` (the host's
-/// CRNG has plenty of entropy), pipe through SSH stdin to a python one-liner
-/// that builds a `rand_pool_info` and calls the `RNDADDENTROPY` ioctl. 512
-/// bytes credits 4096 bits — well past the 384 bits the kernel needs to
-/// transition `crng_init` from `unseeded` to `ready`. Empirically lifts
-/// `entropy_avail` from ~30 to ~2200.
-///
-/// 512 (not 1024) because Python's `fcntl.ioctl` default `buf` size cap is
-/// 1024 bytes; the ioctl struct adds 8 bytes of header (`entropy_count` +
-/// `buf_size`), so 1024 of payload overshoots and `ioctl` raises `ValueError:
-/// ioctl string arg too long`. 512 + 8 = 520 stays safely under.
-///
-/// Goes away when the productionization rootfs builder ships a kernel with
-/// `CONFIG_HW_RANDOM_VIRTIO=y` and our `/entropy` device attaches as
-/// `/dev/hwrng`.
-pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
-    let key = key_path.to_str().context("key path not utf-8")?;
+/// Seed host entropy into the guest CRNG via SSH.
+pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<(), RunnerError> {
+    let key = key_path.to_str().ok_or(RunnerError::KeyPathNotUtf8)?;
     let mut host_random = tokio::fs::File::open("/dev/urandom")
         .await
-        .context("open /dev/urandom on host (every Linux has this)")?;
+        .map_err(RunnerError::Io)?;
     let mut seed = vec![0_u8; 512];
     host_random
         .read_exact(&mut seed)
         .await
-        .context("read 512 bytes from host /dev/urandom")?;
+        .map_err(RunnerError::Io)?;
     drop(host_random);
 
-    // The ioctl number 0x40085203 is RNDADDENTROPY on x86_64. The struct
-    // packed below is `struct rand_pool_info { int entropy_count; int
-    // buf_size; __u32 buf[]; }` from include/uapi/linux/random.h, credit
-    // = len*8 bits, size = len bytes, payload = the 512 stdin bytes.
-    //
-    // `getattr(sys.stdin, "buffer", sys.stdin).read()` reads bytes on both
-    // py2 and py3: on py2 the `buffer` attr doesn't exist so the fallback
-    // returns `sys.stdin` itself (whose `.read()` is bytes), on py3 the
-    // `buffer` attr is the binary stream backing the text wrapper. Without
-    // this, a py3 invocation would decode stdin as text and `struct.pack`
-    // would type-error. Today's bionic rootfs only has py2, but this keeps
-    // the workaround forward-compatible until rootfs-builder retires it.
     let mut child = Command::new("ssh")
         .args([
             "-i",
@@ -139,67 +111,38 @@ pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .context("spawn ssh for entropy seed")?;
+        .map_err(|e| RunnerError::EntropySeed(e.to_string()))?;
 
     let mut stdin = child
         .stdin
         .take()
-        .context("entropy-seed ssh has no stdin (unexpected)")?;
-    stdin
-        .write_all(&seed)
-        .await
-        .context("write seed bytes to ssh stdin")?;
-    stdin
-        .shutdown()
-        .await
-        .context("close ssh stdin after seed")?;
+        .ok_or_else(|| RunnerError::EntropySeed("entropy-seed ssh has no stdin".to_owned()))?;
+    stdin.write_all(&seed).await.map_err(RunnerError::Io)?;
+    stdin.shutdown().await.map_err(RunnerError::Io)?;
     drop(stdin);
 
-    let output = child
-        .wait_with_output()
-        .await
-        .context("wait on entropy-seed ssh")?;
+    let output = child.wait_with_output().await.map_err(RunnerError::Io)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
+        return Err(RunnerError::EntropySeed(format!(
             "entropy seed via SSH failed (exit {}): {stderr}",
             output.status
-        );
+        )));
     }
     info!(guest_ip, "seeded 512 bytes of host entropy into guest CRNG");
     Ok(())
 }
 
 /// Exec `command` in the guest as root via SSH.
-///
-/// Wires the guest's stdin from /dev/null, and inherits stdout / stderr so guest
-/// output flows to the host's fds directly (operators can pipe
-/// `rooms run --command '...' | jq`).
-///
-/// Returns the guest command's exit code clamped to `0..=255`:
-/// - guest exited normally with `ExitStatus.code() == Some(n)` → returns `n`
-///   (always in `0..=255` per POSIX). The clamp to `u8` happens in the caller,
-///   not here — keep the wider type so the caller can distinguish "ran" from
-///   any future "did not run" sentinel.
-/// - guest killed by signal: returns `128 + sig.unwrap_or(0)`. Per
-///   `ExitStatusExt::signal()`, `sig` is `Option<i32>`, but in practice it's
-///   `Some(n)` with `n <= 64` whenever the underlying status was a signal kill,
-///   so the result stays in `0..=255`.
-///
-/// SSH-internal errors (host unreachable, key rejected, ssh-binary missing)
-/// surface as `Err` with anyhow context; the bail message names the most likely
-/// cause. The SSH-internal exit code 255 is NOT translated — it passes through
-/// as `Ok(255)` and is indistinguishable from "remote command exited 255".
-/// Documented tradeoff (see Risks).
-///
-/// Forwards `ANTHROPIC_API_KEY` from the host process env via SSH's `SendEnv`
-/// option. The matching `AcceptEnv ANTHROPIC_API_KEY` lives in the rootfs's
-/// `/etc/ssh/sshd_config`, baked by `scripts/bake-rootfs-ssh.sh`.
-pub async fn exec_in_guest(guest_ip: &str, key_path: &Path, command: &str) -> Result<i32> {
+pub async fn exec_in_guest(
+    guest_ip: &str,
+    key_path: &Path,
+    command: &str,
+) -> Result<i32, RunnerError> {
     let status = Command::new("ssh")
         .args([
             "-i",
-            key_path.to_str().context("key path not utf-8")?,
+            key_path.to_str().ok_or(RunnerError::KeyPathNotUtf8)?,
             "-o",
             "BatchMode=yes",
             "-o",
@@ -222,7 +165,7 @@ pub async fn exec_in_guest(guest_ip: &str, key_path: &Path, command: &str) -> Re
         .kill_on_drop(true)
         .status()
         .await
-        .context("failed to spawn ssh; is openssh-client installed?")?;
+        .map_err(|e| RunnerError::Exec(e.to_string()))?;
 
     if let Some(code) = status.code() {
         return Ok(code);
@@ -245,29 +188,32 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        reason = "test module: panicky lints are noise in tests"
+        reason = "test module"
     )]
 
-    use std::time::Duration;
-
     use super::wait_for_ssh;
+    use crate::config::RoomsConfig;
 
     #[tokio::test]
     async fn wait_for_ssh_times_out_when_no_sshd() {
         let key_path = std::path::Path::new("/nonexistent/key");
-        let timeout = Duration::from_secs(2);
+        let config = RoomsConfig {
+            guest_reach_timeout: std::time::Duration::from_secs(2),
+            guest_reach_poll_interval: std::time::Duration::from_secs(1),
+            ..RoomsConfig::default()
+        };
         let start = std::time::Instant::now();
 
-        let err = wait_for_ssh("127.0.0.255", key_path, timeout)
+        let err = wait_for_ssh("127.0.0.255", key_path, &config)
             .await
             .expect_err("unreachable address should time out");
 
         assert!(
-            err.to_string().contains("did not accept connections"),
+            matches!(err, crate::error::FirecrackerError::GuestUnreachable { .. }),
             "unexpected error: {err}"
         );
         assert!(
-            start.elapsed() >= timeout,
+            start.elapsed() >= config.guest_reach_timeout,
             "should wait at least the timeout duration"
         );
     }

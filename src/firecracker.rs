@@ -1,33 +1,28 @@
 //! Firecracker process + API control.
-//!
-//! POC: shells out to `firecracker` and `curl --unix-socket` for API calls.
-//! A proper HTTP-over-Unix-socket client lands in task #2 (`harden-firecracker-control`).
+
+#![allow(
+    clippy::missing_const_for_fn,
+    reason = "many helpers include cfg-gated non-const bodies"
+)]
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
-use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use ulid::Ulid;
 
+use crate::config::RoomsConfig;
+use crate::error::FirecrackerError;
+use crate::rootfs::unmount_overlay;
+use crate::transport;
+
 /// Network configuration for a microVM.
-///
-/// The TAP device named by `tap_name` must already exist on the host (the
-/// POC ships `scripts/setup-tap.sh` to create the conventional `tap-fc0`).
-/// The guest IP is plumbed via the Linux kernel's built-in IP autoconfig
-/// (`boot_args` `ip=...`), so no DHCP / systemd-networkd / `/etc/network`
-/// fiddling is needed inside the rootfs.
 pub struct NetworkConfig {
-    /// TAP device name on the host (e.g. `"tap-fc0"`).
     pub tap_name: String,
-    /// IP address the guest's eth0 takes (e.g. `"172.16.0.2"`).
     pub guest_ip: String,
-    /// Gateway IP — the host-side TAP IP (e.g. `"172.16.0.1"`).
     pub gateway_ip: String,
-    /// Netmask in dotted form (e.g. `"255.255.255.0"`).
     pub netmask: String,
 }
 
@@ -41,161 +36,255 @@ impl RoomId {
     }
 }
 
-/// A booted Firecracker microVM. Dropping the handle kills the process.
-pub struct BootedVm {
-    // Field order matters: `child` drops first so `kill_on_drop` fires before
-    // any cleanup that might reference `room_dir`.
-    child: Child,
-    socket: PathBuf,
+/// RAII guard that cleans up room resources on drop or explicit shutdown.
+pub struct RoomGuard {
     room_dir: PathBuf,
+    socket: PathBuf,
+    child_pid: Option<u32>,
+    tap_name: Option<String>,
+    overlay_mount: Option<PathBuf>,
+    suppress_cleanup: bool,
+    dismiss: bool,
+    cleanup_grace: Duration,
+}
+
+impl RoomGuard {
+    fn new(room_dir: PathBuf, socket: PathBuf, config: &RoomsConfig) -> Self {
+        Self {
+            room_dir,
+            socket,
+            child_pid: None,
+            tap_name: None,
+            overlay_mount: None,
+            suppress_cleanup: false,
+            dismiss: false,
+            cleanup_grace: config.cleanup_grace,
+        }
+    }
+
+    fn set_child(&mut self, child: &Child) {
+        self.child_pid = child.id();
+    }
+
+    fn set_tap(&mut self, tap_name: String) {
+        self.tap_name = Some(tap_name);
+    }
+
+    /// Prevent cleanup on drop (successful handoff to caller-managed shutdown).
+    pub fn dismiss(&mut self) {
+        self.dismiss = true;
+    }
+
+    /// Suppress all cleanup (for `--keep` debugging).
+    pub fn set_suppress_cleanup(&mut self, suppress: bool) {
+        self.suppress_cleanup = suppress;
+    }
+
+    /// Explicit cleanup before dropping ownership.
+    pub fn cleanup(&mut self) {
+        if self.suppress_cleanup || self.dismiss {
+            return;
+        }
+        self.cleanup_sync();
+    }
+
+    fn cleanup_sync(&mut self) {
+        if self.suppress_cleanup {
+            return;
+        }
+        debug!(room_dir = %self.room_dir.display(), "RoomGuard cleanup");
+        kill_child_gracefully(self.child_pid, self.cleanup_grace);
+        self.child_pid = None;
+        release_tap(self.tap_name.as_deref());
+        if let Some(ref mount) = self.overlay_mount {
+            unmount_overlay(mount);
+        }
+        if self.socket.exists() {
+            let _ = std::fs::remove_file(&self.socket);
+        }
+        let _ = std::fs::remove_dir_all(&self.room_dir);
+    }
+}
+
+impl Drop for RoomGuard {
+    fn drop(&mut self) {
+        if self.dismiss || self.suppress_cleanup {
+            debug!("RoomGuard drop skipped (dismissed or suppressed)");
+            return;
+        }
+        debug!(room_dir = %self.room_dir.display(), "RoomGuard drop firing cleanup");
+        self.cleanup_sync();
+    }
+}
+
+/// A booted Firecracker microVM.
+pub struct BootedVm {
+    guard: RoomGuard,
+    child: Child,
 }
 
 impl BootedVm {
-    /// Truly best-effort: terminate the firecracker process and remove room
-    /// state. Continues cleanup even if `kill` fails — process may have
-    /// already exited, and we still want the socket file + per-room dir gone.
-    /// (Reviewer feedback on PR #1: earlier `?` on kill could leak the dir.)
-    pub async fn shutdown(mut self) -> Result<()> {
-        // SIGKILL is fine for the POC; SIGTERM-then-SIGKILL with grace is
-        // a task #2 concern.
-        if let Err(e) = self.child.kill().await {
-            // Don't bail — process may have already exited (expected) or
-            // failed to die for a non-fatal reason. Log so the operator
-            // can investigate stray firecrackers, then proceed with file
-            // cleanup. (Reviewer PR #1 round 2: prior `let _ = kill()`
-            // hid real failures.)
-            warn!(error = %e, "failed to kill firecracker child; continuing cleanup");
+    /// Terminate the firecracker process and remove room state.
+    pub async fn shutdown(mut self) -> Result<(), FirecrackerError> {
+        if !self.guard.suppress_cleanup {
+            if let Err(e) = self.child.kill().await {
+                warn!(error = %e, "failed to kill firecracker child; continuing cleanup");
+            }
+            self.guard.cleanup();
         }
-        if self.socket.exists() {
-            tokio::fs::remove_file(&self.socket).await.ok();
-        }
-        tokio::fs::remove_dir_all(&self.room_dir).await.ok();
+        self.guard.dismiss();
         Ok(())
     }
 
     /// Returns true if the firecracker process is still running.
-    pub fn is_alive(&mut self) -> Result<bool> {
-        Ok(self.child.try_wait().context("try_wait failed")?.is_none())
+    pub fn is_alive(&mut self) -> Result<bool, FirecrackerError> {
+        Ok(self
+            .child
+            .try_wait()
+            .map_err(FirecrackerError::Io)?
+            .is_none())
+    }
+
+    pub fn guard_mut(&mut self) -> &mut RoomGuard {
+        &mut self.guard
     }
 }
 
-struct RoomDirGuard {
-    path: PathBuf,
-    dismiss: bool,
-}
-
-impl Drop for RoomDirGuard {
-    fn drop(&mut self) {
-        if !self.dismiss {
-            // Drop is sync; async drop isn't stable — blocking cleanup is fine here.
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-}
-
-/// Boot a Firecracker microVM with the given kernel + rootfs, optionally
-/// attaching a network interface.
-///
-/// POC: minimal config — 1 vCPU, 256 MiB. Caller is responsible for invoking
-/// [`BootedVm::shutdown`] when done.
-#[allow(
-    clippy::too_many_lines,
-    reason = "POC: cohesive boot orchestrator. Splitting into prepare_dir / spawn / configure / start helpers belongs in task #2 (harden-firecracker-control) alongside the structured-error refactor."
-)]
+/// Boot a Firecracker microVM with the given kernel + rootfs.
 pub async fn boot(
     kernel: &Path,
     rootfs: &Path,
     network: Option<&NetworkConfig>,
-) -> Result<BootedVm> {
-    let room_id = RoomId::new();
-    let home = env::var("HOME").context("failed to read HOME env var")?;
-    let per_room_dir = PathBuf::from(home)
-        .join(".local/state/rooms")
-        .join(room_id.0.to_string().to_lowercase());
+    config: &RoomsConfig,
+) -> Result<BootedVm, FirecrackerError> {
+    check_kvm()?;
+    resolve_firecracker_binary(config)?;
 
-    // Ensure parent dir exists (not security-critical; ~/.local/state/rooms
-    // uses HOME's mode). Recursive create is safe here — no TOCTOU concern
-    // because the parent isn't the secret-holding leaf.
+    let room_id = RoomId::new();
+    let per_room_dir = room_state_dir(&room_id)?;
+    prepare_room_dir(&per_room_dir).await?;
+
+    let socket = per_room_dir.join("api.sock");
+    let log_path = per_room_dir.join("firecracker.log");
+    let mut guard = RoomGuard::new(per_room_dir.clone(), socket.clone(), config);
+
+    if let Some(net) = network {
+        guard.set_tap(net.tap_name.clone());
+    }
+
+    let log_handles = open_log_file(&log_path).await?;
+    let mut child = spawn_firecracker(&config.firecracker_binary, &socket, log_handles)?;
+    guard.set_child(&child);
+
+    wait_for_socket(&socket, config.api_socket_timeout, &mut child).await?;
+
+    let boot_args = build_boot_args(network);
+    configure_vm(&socket, kernel, rootfs, network, &boot_args, config).await?;
+
+    info!("microVM booted");
+    Ok(BootedVm { guard, child })
+}
+
+fn check_kvm() -> Result<(), FirecrackerError> {
+    #[cfg(unix)]
+    {
+        let path = Path::new("/dev/kvm");
+        if !path.exists() {
+            return Err(FirecrackerError::KvmUnavailable);
+        }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| FirecrackerError::KvmUnavailable)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        Err(FirecrackerError::KvmUnavailable)
+    }
+}
+
+fn resolve_firecracker_binary(config: &RoomsConfig) -> Result<(), FirecrackerError> {
+    if config.firecracker_binary.is_absolute() {
+        if config.firecracker_binary.exists() {
+            return Ok(());
+        }
+        return Err(FirecrackerError::BinaryNotFound {
+            path: config.firecracker_binary.clone(),
+        });
+    }
+    // Relative name: rely on PATH at spawn time; doctor validates separately.
+    Ok(())
+}
+
+fn room_state_dir(room_id: &RoomId) -> Result<PathBuf, FirecrackerError> {
+    let home = env::var("HOME").map_err(|_| FirecrackerError::HomeUnset)?;
+    Ok(PathBuf::from(home)
+        .join(".local/state/rooms")
+        .join(room_id.0.to_string().to_lowercase()))
+}
+
+async fn prepare_room_dir(per_room_dir: &Path) -> Result<(), FirecrackerError> {
     if let Some(parent) = per_room_dir.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .context("failed to create rooms parent dir")?;
+            .map_err(FirecrackerError::Io)?;
     }
 
-    // Atomically create the leaf dir WITH mode 0700 — no TOCTOU window
-    // between create + chmod (reviewer feedback PR #1 from Copilot). Uses
-    // spawn_blocking because std::fs::DirBuilder is sync.
-    let leaf = per_room_dir.clone();
-    tokio::task::spawn_blocking(move || {
+    let leaf = per_room_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || create_room_dir_0700(&leaf))
+        .await
+        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))?
+        .map_err(FirecrackerError::Io)
+}
+
+fn create_room_dir_0700(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new().mode(0o700).create(&leaf)
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(path)
+    }
+}
+
+async fn open_log_file(
+    log_path: &Path,
+) -> Result<(std::fs::File, std::fs::File), FirecrackerError> {
+    let path = log_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let f = std::fs::File::create(&path)?;
+        let f2 = f.try_clone()?;
+        Ok((f, f2))
     })
     .await
-    .context("spawn_blocking for dir create failed (panic or cancellation)")?
-    .context("failed to create per-room state dir with mode 0700")?;
+    .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))?
+}
 
-    // Construct the cleanup guard IMMEDIATELY after the dir exists so any
-    // subsequent failure path is caught by Drop. (Reviewer feedback PR #1
-    // from Codex: earlier order constructed the guard after set_permissions,
-    // leaking the dir if set_permissions failed.)
-    let mut guard = RoomDirGuard {
-        path: per_room_dir.clone(),
-        dismiss: false,
-    };
-    let socket = per_room_dir.join("api.sock");
-    let log_path = per_room_dir.join("firecracker.log");
-
-    // Route firecracker's own logs AND the guest serial console (kernel boot
-    // log via `console=ttyS0`) into a per-room log file, so `rooms run
-    // --command '...' | jq` doesn't see kernel boot output interleaved with
-    // the guest command's stdout. The log file is cleaned up with the room dir
-    // on shutdown; operators who need to debug a hung boot can `--keep` and
-    // tail the file. Use spawn_blocking — std::fs::File::create + try_clone are
-    // blocking syscalls; calling them on the Tokio runtime thread stalls the
-    // reactor under load (mirrors the DirBuilder pattern above).
-    let log_path_spawn = log_path.clone();
-    let (log_file, log_file_stderr) =
-        tokio::task::spawn_blocking(move || -> Result<(std::fs::File, std::fs::File)> {
-            let f = std::fs::File::create(&log_path_spawn).with_context(|| {
-                format!(
-                    "create firecracker log file at {}",
-                    log_path_spawn.display()
-                )
-            })?;
-            let f2 = f
-                .try_clone()
-                .context("clone firecracker log file handle for stderr")?;
-            Ok((f, f2))
-        })
-        .await
-        .context("spawn_blocking for log file create failed (panic or cancellation)")??;
-
-    info!(socket = %socket.display(), log = %log_path.display(), "spawning firecracker");
-    let child = Command::new("firecracker")
+fn spawn_firecracker(
+    binary: &Path,
+    socket: &Path,
+    (log_file, log_stderr): (std::fs::File, std::fs::File),
+) -> Result<Child, FirecrackerError> {
+    info!(socket = %socket.display(), "spawning firecracker");
+    Command::new(binary)
         .arg("--api-sock")
-        .arg(&socket)
+        .arg(socket)
         .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file_stderr))
+        .stderr(std::process::Stdio::from(log_stderr))
         .kill_on_drop(true)
         .spawn()
-        .context("failed to spawn firecracker; is it on PATH?")?;
+        .map_err(|_| FirecrackerError::BinaryNotFound {
+            path: binary.to_path_buf(),
+        })
+}
 
-    wait_for_socket(&socket, Duration::from_secs(5)).await?;
-
-    // Kernel cmdline:
-    // - `console=ttyS0` routes kernel + getty output to the serial port (which
-    //   firecracker dumps to its stdout, which we redirect to firecracker.log).
-    // - `reboot=k panic=1 pci=off` are firecracker quickstart conventions.
-    // - When networking is requested, append Linux's built-in IP autoconfig
-    //   string (`ip=<client>::<gw>:<mask>::<dev>:<autoconf>`) so eth0 comes up
-    //   before userspace, with no DHCP needed in the rootfs.
-    // - `random.trust_cpu=on` tells the kernel to seed the CRNG from RDRAND
-    //   (the CPU's hardware RNG). Without this, the microVM has no entropy
-    //   source — no real keyboard/mouse/disk jitter — and openssl's TLS
-    //   handshake blocks indefinitely on `getrandom()`. RDRAND is always
-    //   available under KVM on modern host CPUs.
+fn build_boot_args(network: Option<&NetworkConfig>) -> String {
     let base = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
-    let boot_args = network.map_or_else(
+    network.map_or_else(
         || base.to_owned(),
         |net| {
             format!(
@@ -203,21 +292,30 @@ pub async fn boot(
                 net.guest_ip, net.gateway_ip, net.netmask
             )
         },
-    );
+    )
+}
 
-    api_put(
-        &socket,
+async fn configure_vm(
+    socket: &Path,
+    kernel: &Path,
+    rootfs: &Path,
+    network: Option<&NetworkConfig>,
+    boot_args: &str,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    transport::api_put(
+        socket,
         "/boot-source",
         &serde_json::json!({
             "kernel_image_path": kernel,
             "boot_args": boot_args,
         }),
+        config,
     )
-    .await
-    .context("PUT /boot-source")?;
+    .await?;
 
-    api_put(
-        &socket,
+    transport::api_put(
+        socket,
         "/drives/rootfs",
         &serde_json::json!({
             "drive_id": "rootfs",
@@ -225,122 +323,159 @@ pub async fn boot(
             "is_root_device": true,
             "is_read_only": false,
         }),
+        config,
     )
-    .await
-    .context("PUT /drives/rootfs")?;
+    .await?;
 
-    api_put(
-        &socket,
+    transport::api_put(
+        socket,
         "/machine-config",
         &serde_json::json!({
             "vcpu_count": 1,
             "mem_size_mib": 256,
         }),
+        config,
     )
-    .await
-    .context("PUT /machine-config")?;
+    .await?;
 
     if let Some(net) = network {
-        // Firecracker auto-generates the guest MAC if we don't supply one.
-        api_put(
-            &socket,
+        transport::api_put(
+            socket,
             "/network-interfaces/eth0",
             &serde_json::json!({
                 "iface_id": "eth0",
                 "host_dev_name": net.tap_name,
             }),
+            config,
         )
-        .await
-        .context("PUT /network-interfaces/eth0")?;
+        .await?;
         info!(tap = %net.tap_name, guest_ip = %net.guest_ip, "network attached");
     }
 
-    // Attach a virtio-rng device so the guest's CRNG initializes promptly.
-    // Without this, the microVM has no entropy source (no HW RNG, no
-    // keyboard/mouse jitter, no disk seek noise) and openssl's RAND_bytes
-    // blocks indefinitely during the TLS handshake — `curl https://...` hangs
-    // forever after TCP connect with no diagnostic output. Firecracker draws
-    // host entropy from /dev/urandom and feeds it to the guest's /dev/hwrng.
-    api_put(&socket, "/entropy", &serde_json::json!({}))
-        .await
-        .context("PUT /entropy")?;
+    transport::api_put(socket, "/entropy", &serde_json::json!({}), config).await?;
 
-    api_put(
-        &socket,
-        "/actions",
-        &serde_json::json!({
-            "action_type": "InstanceStart",
-        }),
-    )
-    .await
-    .context("PUT /actions (InstanceStart)")?;
-
-    info!("microVM booted");
-    guard.dismiss = true;
-    Ok(BootedVm {
-        child,
+    transport::api_put(
         socket,
-        room_dir: per_room_dir,
-    })
+        "/actions",
+        &serde_json::json!({ "action_type": "InstanceStart" }),
+        config,
+    )
+    .await?;
+
+    Ok(())
 }
 
-async fn wait_for_socket(socket: &Path, timeout: Duration) -> Result<()> {
+async fn wait_for_socket(
+    socket: &Path,
+    timeout: Duration,
+    child: &mut Child,
+) -> Result<(), FirecrackerError> {
+    #[cfg(unix)]
+    {
+        wait_for_socket_unix(socket, timeout, child).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket, timeout, child);
+        std::future::ready(Err(FirecrackerError::KvmUnavailable)).await
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_socket_unix(
+    socket: &Path,
+    timeout: Duration,
+    child: &mut Child,
+) -> Result<(), FirecrackerError> {
+    use std::time::Instant;
+
+    use tokio::time::sleep;
     let start = Instant::now();
-    let mut last_err: Option<std::io::Error> = None;
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+
     while start.elapsed() < timeout {
-        match tokio::net::UnixStream::connect(socket).await {
-            Ok(_) => {
-                // Connection succeeded → Firecracker has listen()ed.
-                // Drop the stream immediately; next API call opens a fresh one.
-                debug!("api socket accepting connections");
-                return Ok(());
-            }
-            Err(e) => last_err = Some(e),
+        if let Some(status) = child.try_wait().map_err(FirecrackerError::Io)? {
+            let stderr_tail = read_log_tail(socket).await;
+            return Err(FirecrackerError::ProcessExitedEarly {
+                exit_code: status.code().unwrap_or(-1),
+                stderr_tail,
+            });
         }
+
+        if tokio::net::UnixStream::connect(socket).await.is_ok() {
+            debug!("api socket accepting connections");
+            return Ok(());
+        }
+
         sleep(Duration::from_millis(50)).await;
     }
-    // Surface the last connect error so failures don't look like a generic
-    // timeout (reviewer feedback PR #1 from Copilot: permission errors and
-    // similar would otherwise be hidden).
-    let detail = last_err.map_or_else(
-        || String::from("no connect attempts completed"),
-        |e| format!("last error: {e}"),
-    );
-    anyhow::bail!(
-        "firecracker api socket at {} did not accept connections within {:?} ({detail})",
-        socket.display(),
-        timeout,
-    )
+
+    Err(FirecrackerError::ApiSocketNeverAppeared { timeout_ms })
 }
 
-async fn api_put(socket: &Path, endpoint: &str, body: &serde_json::Value) -> Result<()> {
-    let body_str = serde_json::to_string(body)?;
-    debug!(endpoint, body = %body_str, "PUT");
-    let output = Command::new("curl")
-        .arg("--unix-socket")
-        .arg(socket)
-        .arg("-X")
-        .arg("PUT")
-        .arg(format!("http://localhost{endpoint}"))
-        .arg("-H")
-        .arg("Content-Type: application/json")
-        .arg("-d")
-        .arg(&body_str)
-        .arg("--fail-with-body")
-        .arg("--silent")
-        .arg("--show-error")
-        .output()
+#[cfg(unix)]
+async fn read_log_tail(socket: &Path) -> String {
+    let log_path = socket
+        .parent()
+        .map_or_else(|| socket.to_path_buf(), |p| p.join("firecracker.log"));
+
+    let content = tokio::fs::read_to_string(&log_path)
         .await
-        .context("curl invocation failed")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "api PUT {endpoint} failed (exit {}): stderr={stderr}, stdout={stdout}",
-            output.status,
-        );
+        .unwrap_or_default();
+    let tail: String = content
+        .chars()
+        .rev()
+        .take(512)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    tail
+}
+
+fn kill_child_gracefully(pid: Option<u32>, grace: Duration) {
+    let Some(pid) = pid else { return };
+
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        use std::thread;
+        use std::time::Duration as StdDuration;
+
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+        thread::sleep(grace.min(StdDuration::from_secs(5)));
+        if Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
+        }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, grace);
+    }
+}
+
+fn release_tap(tap_name: Option<&str>) {
+    let Some(tap) = tap_name else { return };
+
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let _ = Command::new("ip")
+            .args(["tuntap", "del", "dev", tap, "mode", "tap"])
+            .output();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tap;
+    }
 }
 
 #[cfg(test)]
@@ -349,66 +484,83 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        reason = "test module: panicky lints are noise in tests"
+        reason = "test module"
     )]
 
-    use std::time::Duration;
+    #[cfg(unix)]
+    mod unix_tests {
+        use std::time::Duration;
 
-    use super::{wait_for_socket, RoomDirGuard};
-    use tokio::net::UnixListener;
+        use tokio::net::UnixListener;
+        use tokio::process::Command;
+
+        use super::super::{wait_for_socket, RoomGuard};
+        use crate::config::RoomsConfig;
+
+        #[tokio::test]
+        async fn wait_for_socket_requires_listener_not_just_file() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let socket_path = dir.path().join("fake.sock");
+            tokio::fs::File::create(&socket_path)
+                .await
+                .expect("create fake socket file");
+
+            let mut child = Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep");
+            let err = wait_for_socket(&socket_path, Duration::from_millis(300), &mut child)
+                .await
+                .expect_err("file without listener should time out");
+            assert!(
+                matches!(
+                    err,
+                    crate::error::FirecrackerError::ApiSocketNeverAppeared { .. }
+                ),
+                "unexpected error: {err}"
+            );
+            let _ = child.kill().await;
+
+            tokio::fs::remove_file(&socket_path)
+                .await
+                .expect("remove fake socket file");
+            let _listener = UnixListener::bind(&socket_path).expect("bind listener");
+            let mut child2 = Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep");
+            wait_for_socket(&socket_path, Duration::from_millis(300), &mut child2)
+                .await
+                .expect("listening socket should be ready");
+            let _ = child2.kill().await;
+        }
+    }
+
+    use super::RoomGuard;
+    use crate::config::RoomsConfig;
 
     #[test]
-    fn room_dir_guard_cleans_up_on_drop_when_not_dismissed() {
+    fn room_guard_cleans_up_on_drop_when_not_dismissed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         std::fs::write(path.join("marker"), b"x").expect("write marker");
 
-        drop(RoomDirGuard {
-            path: path.clone(),
-            dismiss: false,
-        });
+        let config = RoomsConfig::default();
+        drop(RoomGuard::new(path.clone(), path.join("api.sock"), &config));
 
         assert!(!path.exists(), "guard should remove the directory");
     }
 
     #[test]
-    fn room_dir_guard_preserves_dir_when_dismissed() {
+    fn room_guard_preserves_dir_when_dismissed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
-
-        drop(RoomDirGuard {
-            path: path.clone(),
-            dismiss: true,
-        });
+        let config = RoomsConfig::default();
+        let mut guard = RoomGuard::new(path.clone(), path.join("api.sock"), &config);
+        guard.dismiss();
+        drop(guard);
 
         assert!(path.exists(), "dismissed guard should leave the directory");
-    }
-
-    #[tokio::test]
-    async fn wait_for_socket_requires_listener_not_just_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let socket_path = dir.path().join("fake.sock");
-        tokio::fs::File::create(&socket_path)
-            .await
-            .expect("create fake socket file");
-
-        let err = wait_for_socket(&socket_path, Duration::from_millis(300))
-            .await
-            .expect_err("file without listener should time out");
-        assert!(
-            err.to_string().contains("did not accept connections"),
-            "unexpected error: {err}"
-        );
-
-        // Remove the fake file before binding — UnixListener::bind refuses
-        // to overwrite an existing path.
-        tokio::fs::remove_file(&socket_path)
-            .await
-            .expect("remove fake socket file");
-        let _listener = UnixListener::bind(&socket_path).expect("bind listener");
-        wait_for_socket(&socket_path, Duration::from_millis(300))
-            .await
-            .expect("listening socket should be ready");
     }
 }
 
@@ -418,13 +570,14 @@ mod e2e_tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        reason = "test module: panicky lints are noise in tests"
+        reason = "test module"
     )]
 
     use std::path::PathBuf;
     use std::time::Duration;
 
     use super::boot;
+    use crate::config::RoomsConfig;
 
     fn image_path(name: &str) -> PathBuf {
         let home = std::env::var("HOME").expect("HOME env var must be set");
@@ -435,30 +588,17 @@ mod e2e_tests {
     async fn firecracker_boots_and_survives_briefly() {
         let kernel = image_path("vmlinux.bin");
         let rootfs = image_path("rootfs.ext4");
+        let config = RoomsConfig::default();
 
-        assert!(
-            kernel.exists(),
-            "kernel missing at {kernel:?} — run scripts/setup-rooms-host.sh"
-        );
-        assert!(
-            rootfs.exists(),
-            "rootfs missing at {rootfs:?} — run scripts/setup-rooms-host.sh"
-        );
+        assert!(kernel.exists(), "kernel missing at {kernel:?}");
+        assert!(rootfs.exists(), "rootfs missing at {rootfs:?}");
 
-        // e2e smoke test runs without networking — proves the no-net path
-        // still works after the NetworkConfig refactor.
-        let mut vm = boot(&kernel, &rootfs, None)
+        let mut vm = boot(&kernel, &rootfs, None, &config)
             .await
             .expect("boot should succeed");
 
-        // Give the guest kernel + init a moment to come up.
         tokio::time::sleep(Duration::from_secs(3)).await;
-
-        assert!(
-            vm.is_alive().expect("is_alive probe"),
-            "firecracker exited prematurely — check serial console output"
-        );
-
+        assert!(vm.is_alive().expect("is_alive probe"));
         vm.shutdown().await.expect("shutdown should succeed");
     }
 }

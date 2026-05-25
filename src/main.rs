@@ -1,15 +1,10 @@
 //! `rooms` — disposable Firecracker microVMs with specified deps.
-//!
-//! Substrate for spawning a clean microVM, running a command in it, collecting
-//! artifacts, and tearing it down. See `docs/features/rooms-v0/spec.md`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
-use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use rooms::{firecracker, runner};
+use rooms::{config::RoomsConfig, doctor, error::RoomsError, firecracker, rootfs, runner};
 use tracing::{info, warn};
 
 /// rooms — disposable Firecracker microVMs with specified deps.
@@ -28,17 +23,23 @@ enum Command {
         #[arg(long)]
         image: PathBuf,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
-        /// Mutually exclusive with `--command`.
+        /// Mutually exclusive with `--command`. Suppresses cleanup for debugging.
         #[arg(long, conflicts_with = "command")]
         keep: bool,
         /// Run a single command in the guest via SSH, capture its stdout/stderr on
         /// host stdout/stderr, propagate its exit code, then shut down.
-        /// Mutually exclusive with `--keep`.
         #[arg(long, conflicts_with = "keep", value_parser = non_empty_command)]
         command: Option<String>,
     },
     /// Check the host environment (KVM, Firecracker, image, etc.).
-    Doctor,
+    Doctor {
+        /// Path to the rootfs image for kernel/rootfs checks.
+        #[arg(long)]
+        image: Option<PathBuf>,
+        /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn non_empty_command(s: &str) -> Result<String, String> {
@@ -68,32 +69,58 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn dispatch(cli: Cli) -> Result<u8> {
+async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
+    let config = RoomsConfig::default();
     match cli.command {
         Command::Run {
             image,
             keep,
             command,
-        } => run_room(image, keep, command).await,
-        Command::Doctor => {
-            info!("rooms doctor");
-            anyhow::bail!("doctor: not yet implemented (POC in flight)")
-        }
+        } => run_room(image, keep, command, &config).await,
+        Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
     }
 }
 
-async fn run_room(image: PathBuf, keep: bool, command: Option<String>) -> Result<u8> {
+fn run_doctor_cmd(
+    image: Option<&Path>,
+    json: bool,
+    config: &RoomsConfig,
+) -> Result<u8, RoomsError> {
+    info!("rooms doctor");
+    let report = doctor::run_doctor(config, image);
+
+    if json {
+        let out = serde_json::to_string_pretty(&report)
+            .map_err(|e| RoomsError::Internal(e.to_string()))?;
+        eprintln!("{out}");
+    } else {
+        for check in &report.checks {
+            let status = if check.ok { "ok" } else { "FAIL" };
+            eprintln!("[{status}] {}: {}", check.name, check.message);
+        }
+    }
+
+    Ok(u8::from(!report.all_ok()))
+}
+
+async fn run_room(
+    image: PathBuf,
+    keep: bool,
+    command: Option<String>,
+    config: &RoomsConfig,
+) -> Result<u8, RoomsError> {
     info!(?image, keep, command = ?command.as_deref(), "rooms run");
 
     let kernel = image
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("--image has no parent directory: {}", image.display()))?
-        .join("vmlinux.bin");
-    anyhow::ensure!(
-        kernel.exists(),
-        "kernel not found at {}; expected sibling of --image",
-        kernel.display()
-    );
+        .map(|p| p.join("vmlinux.bin"))
+        .ok_or_else(|| {
+            RoomsError::Internal(format!(
+                "--image has no parent directory: {}",
+                image.display()
+            ))
+        })?;
+    rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
 
     let network = firecracker::NetworkConfig {
         tap_name: "tap-fc0".to_owned(),
@@ -102,13 +129,19 @@ async fn run_room(image: PathBuf, keep: bool, command: Option<String>) -> Result
         netmask: "255.255.255.0".to_owned(),
     };
     let key = key_path()?;
-    let mut vm = firecracker::boot(&kernel, &image, Some(&network)).await?;
+    let mut vm = firecracker::boot(&kernel, &image, Some(&network), config).await?;
 
-    // Always run shutdown, whatever post_boot returns. `post_boot` is a separate
-    // function so its internal `?` returns from itself, NOT from run_room — that's
-    // what guarantees the shutdown call below runs on the error paths.
-    let outcome = post_boot(&network, &key, keep, command, &mut vm).await;
-    if let Err(e) = vm.shutdown().await {
+    if keep {
+        vm.guard_mut().set_suppress_cleanup(true);
+    }
+
+    let outcome = post_boot(&network, &key, keep, command, &mut vm, config).await;
+    if keep {
+        vm.guard_mut().dismiss();
+        // Prevent kill_on_drop from terminating the microVM — operator inspects manually.
+        std::mem::forget(vm);
+        info!("--keep: cleanup suppressed; firecracker process and state dir preserved");
+    } else if let Err(e) = vm.shutdown().await {
         warn!(error = %e, "shutdown reported an error after post-boot");
     }
     outcome
@@ -120,7 +153,8 @@ async fn post_boot(
     keep: bool,
     command: Option<String>,
     vm: &mut firecracker::BootedVm,
-) -> Result<u8> {
+    config: &RoomsConfig,
+) -> Result<u8, RoomsError> {
     match (keep, command) {
         (true, _) => {
             info!(
@@ -130,26 +164,19 @@ async fn post_boot(
             );
             tokio::signal::ctrl_c()
                 .await
-                .context("waiting for Ctrl-C")?;
+                .map_err(|e| RoomsError::Internal(e.to_string()))?;
             Ok(0)
         }
         (false, Some(cmd)) => {
-            // Wrap the entire setup-and-exec sequence (probe sshd, seed CRNG,
-            // exec) in one tokio::select! vs ctrl_c. Dropping `work` cascades
-            // through each child future — kill_on_drop fires on every spawned
-            // ssh client — so a Ctrl-C at any point still lets run_room's
-            // vm.shutdown() run cleanly. (An earlier version only wrapped
-            // exec_in_guest, leaving a 0–60s window during sshd probe + seed
-            // where Ctrl-C would leak the firecracker process + state dir.)
-            #[allow(
-                clippy::duration_suboptimal_units,
-                reason = "from_mins requires Rust 1.83; no MSRV pinned yet"
-            )]
             let work = async {
-                runner::wait_for_ssh(&network.guest_ip, key, Duration::from_secs(60)).await?;
-                runner::seed_entropy(&network.guest_ip, key).await?;
-                let code = runner::exec_in_guest(&network.guest_ip, key, &cmd).await?;
-                Ok::<u8, anyhow::Error>(u8::try_from(code).unwrap_or(2))
+                runner::wait_for_ssh(&network.guest_ip, key, config).await?;
+                runner::seed_entropy(&network.guest_ip, key)
+                    .await
+                    .map_err(RoomsError::Runner)?;
+                let code = runner::exec_in_guest(&network.guest_ip, key, &cmd)
+                    .await
+                    .map_err(RoomsError::Runner)?;
+                Ok::<u8, RoomsError>(u8::try_from(code).unwrap_or(2))
             };
             tokio::pin!(work);
             tokio::select! {
@@ -161,28 +188,28 @@ async fn post_boot(
             }
         }
         (false, None) => {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            if vm.is_alive()? {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if vm.is_alive().map_err(RoomsError::Firecracker)? {
                 info!("microVM is up; shutting down (POC: no exec yet)");
                 Ok(0)
             } else {
-                anyhow::bail!("firecracker exited prematurely; check serial output")
+                Err(RoomsError::Firecracker(
+                    rooms::error::FirecrackerError::ProcessExitedEarly {
+                        exit_code: -1,
+                        stderr_tail: String::new(),
+                    },
+                ))
             }
         }
     }
 }
 
-fn key_path() -> Result<PathBuf> {
-    // Convention: same dedicated key m3's bake script creates / reuses.
-    // No env-var override at the m4 layer; --key-path lands in productionization
-    // when per-room dynamic keys become a thing.
-    //
-    // Bail (don't fall back to "/root") if HOME is unset — silent /root fallback
-    // would mask "you ran with sudo" footguns, where the key actually lives in
-    // the operator's home. The bake script itself refuses to run under sudo for
-    // the same reason.
-    let home = std::env::var("HOME")
-        .context("HOME env var unset; rooms needs it to locate ~/.ssh/id_rooms")?;
+fn key_path() -> Result<PathBuf, RoomsError> {
+    let home = std::env::var("HOME").map_err(|_| {
+        RoomsError::Internal(
+            "HOME env var unset; rooms needs it to locate ~/.ssh/id_rooms".to_owned(),
+        )
+    })?;
     Ok(PathBuf::from(home).join(".ssh/id_rooms"))
 }
 
@@ -193,7 +220,7 @@ mod tests {
         clippy::expect_used,
         clippy::panic,
         clippy::indexing_slicing,
-        reason = "test module: panicky lints are noise in tests"
+        reason = "test module"
     )]
 
     use super::Cli;
@@ -201,7 +228,6 @@ mod tests {
 
     #[test]
     fn cli_definition_is_valid() {
-        // clap's `debug_assert` validates the derived CLI shape at runtime.
         Cli::command().debug_assert();
     }
 
