@@ -36,6 +36,7 @@ impl RoomId {
 }
 
 /// RAII guard that cleans up room resources on drop or explicit shutdown.
+#[derive(Debug)]
 pub struct RoomGuard {
     room_dir: PathBuf,
     socket: PathBuf,
@@ -128,6 +129,7 @@ impl Drop for RoomGuard {
 }
 
 /// A booted Firecracker microVM.
+#[derive(Debug)]
 pub struct BootedVm {
     guard: RoomGuard,
     child: Child,

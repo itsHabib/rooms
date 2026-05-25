@@ -5,7 +5,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -15,22 +15,37 @@ use tokio::time::sleep;
 use tracing::{debug, info};
 
 use crate::artifacts::{ResultJson, RunStatus};
+use crate::config::RoomsConfig;
+use crate::error::FirecrackerError;
 
-/// Probe the guest's sshd until it accepts a pubkey connection, or `timeout` elapses.
+/// Probe the guest's sshd until it accepts a pubkey connection, or the
+/// configured timeout elapses.
 ///
-/// Returns the last underlying error on timeout so failure modes
-/// (network down, key not baked, sshd never started) are debuggable from the
-/// surface error.
-pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) -> Result<()> {
-    let key = key_path.to_str().context("key path not utf-8")?;
+/// Returns `FirecrackerError::GuestUnreachable` (preserving the last underlying
+/// stderr) on timeout so callers can distinguish guest-unreachability from
+/// host-side substrate failures. Takes `&RoomsConfig` so the probe inherits
+/// `guest_reach_timeout` and `guest_reach_poll_interval` knobs without each
+/// caller redefining them.
+pub async fn wait_for_ssh(
+    guest_ip: &str,
+    key_path: &Path,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    let key = key_path
+        .to_str()
+        .ok_or_else(|| FirecrackerError::Internal("key path not utf-8".to_owned()))?;
+    let timeout = config.guest_reach_timeout;
+    let poll = config.guest_reach_poll_interval;
     let deadline = Instant::now() + timeout;
     let mut last_err = String::new();
 
     loop {
         if Instant::now() >= deadline {
-            anyhow::bail!(
-                "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
-            );
+            return Err(FirecrackerError::GuestUnreachable {
+                reason: format!(
+                    "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
+                ),
+            });
         }
 
         let output = Command::new("ssh")
@@ -55,7 +70,7 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
             .stderr(Stdio::piped())
             .output()
             .await
-            .context("failed to spawn ssh probe; is openssh-client installed?")?;
+            .map_err(|e| FirecrackerError::Internal(format!("ssh probe spawn failed: {e}")))?;
 
         if output.status.success() {
             info!(guest_ip, "sshd accepted pubkey connection");
@@ -64,7 +79,7 @@ pub async fn wait_for_ssh(guest_ip: &str, key_path: &Path, timeout: Duration) ->
 
         last_err = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         debug!(guest_ip, stderr = %last_err, "sshd probe failed; retrying");
-        sleep(Duration::from_secs(1)).await;
+        sleep(poll).await;
     }
 }
 
@@ -419,6 +434,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{shell_single_quote, wait_for_ssh};
+    use crate::config::RoomsConfig;
+    use crate::error::FirecrackerError;
 
     #[test]
     fn shell_single_quote_handles_meta_and_embedded_quotes() {
@@ -435,19 +452,23 @@ mod tests {
     #[tokio::test]
     async fn wait_for_ssh_times_out_when_no_sshd() {
         let key_path = std::path::Path::new("/nonexistent/key");
-        let timeout = Duration::from_secs(2);
+        let config = RoomsConfig {
+            guest_reach_timeout: Duration::from_secs(2),
+            guest_reach_poll_interval: Duration::from_secs(1),
+            ..RoomsConfig::default()
+        };
         let start = std::time::Instant::now();
 
-        let err = wait_for_ssh("127.0.0.255", key_path, timeout)
+        let err = wait_for_ssh("127.0.0.255", key_path, &config)
             .await
             .expect_err("unreachable address should time out");
 
         assert!(
-            err.to_string().contains("did not accept connections"),
+            matches!(err, FirecrackerError::GuestUnreachable { .. }),
             "unexpected error: {err}"
         );
         assert!(
-            start.elapsed() >= timeout,
+            start.elapsed() >= config.guest_reach_timeout,
             "should wait at least the timeout duration"
         );
     }
