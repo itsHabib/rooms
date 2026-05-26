@@ -36,6 +36,7 @@ impl RoomId {
 }
 
 /// RAII guard that cleans up room resources on drop or explicit shutdown.
+#[derive(Debug)]
 pub struct RoomGuard {
     room_dir: PathBuf,
     socket: PathBuf,
@@ -128,6 +129,7 @@ impl Drop for RoomGuard {
 }
 
 /// A booted Firecracker microVM.
+#[derive(Debug)]
 pub struct BootedVm {
     guard: RoomGuard,
     child: Child,
@@ -523,8 +525,7 @@ mod tests {
         use tokio::net::UnixListener;
         use tokio::process::Command;
 
-        use super::super::{wait_for_socket, RoomGuard};
-        use crate::config::RoomsConfig;
+        use super::super::wait_for_socket;
 
         #[tokio::test]
         async fn wait_for_socket_requires_listener_not_just_file() {

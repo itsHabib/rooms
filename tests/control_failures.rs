@@ -4,6 +4,12 @@
 //! the stub-binary tests only need a Unix host.
 
 #![cfg(all(unix, feature = "e2e"))]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test module: panicky lints are noise in tests"
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -52,9 +58,11 @@ async fn firecracker_exits_early_is_caught() {
         return;
     }
 
-    let mut config = RoomsConfig::default();
-    config.firecracker_binary = stub;
-    config.api_socket_timeout = Duration::from_secs(2);
+    let config = RoomsConfig {
+        firecracker_binary: stub,
+        api_socket_timeout: Duration::from_secs(2),
+        ..RoomsConfig::default()
+    };
 
     let before = room_dirs_glob();
     let err = firecracker::boot(&kernel, &rootfs, None, &config)
@@ -69,9 +77,9 @@ async fn firecracker_exits_early_is_caught() {
     }
 
     if before.exists() {
+        // is_none_or = "no room dirs at all" OR "the latest one was already cleaned up"
         assert!(
-            latest_room_dir(&before).is_none()
-                || latest_room_dir(&before).is_some_and(|d| !d.exists()),
+            latest_room_dir(&before).is_none_or(|d| !d.exists()),
             "room work dir should be cleaned up"
         );
     }
@@ -89,9 +97,11 @@ async fn api_socket_never_appears() {
         return;
     }
 
-    let mut config = RoomsConfig::default();
-    config.firecracker_binary = stub;
-    config.api_socket_timeout = Duration::from_secs(2);
+    let config = RoomsConfig {
+        firecracker_binary: stub,
+        api_socket_timeout: Duration::from_secs(2),
+        ..RoomsConfig::default()
+    };
 
     let err = firecracker::boot(&kernel, &rootfs, None, &config)
         .await
@@ -114,16 +124,18 @@ async fn guest_unreachable() {
         return;
     }
 
-    let mut config = RoomsConfig::default();
-    config.guest_reach_timeout = Duration::from_secs(5);
-    config.guest_reach_poll_interval = Duration::from_secs(1);
+    let config = RoomsConfig {
+        guest_reach_timeout: Duration::from_secs(5),
+        guest_reach_poll_interval: Duration::from_secs(1),
+        ..RoomsConfig::default()
+    };
 
     // Boot without network so SSH can never succeed.
-    let mut vm = firecracker::boot(&kernel, &rootfs, None, &config)
+    let vm = firecracker::boot(&kernel, &rootfs, None, &config)
         .await
         .expect("boot without network should succeed");
 
-    let key = PathBuf::from(std::env::var("HOME").expect("HOME").to_string() + "/.ssh/id_rooms");
+    let key = PathBuf::from(std::env::var("HOME").expect("HOME") + "/.ssh/id_rooms");
 
     let err = runner::wait_for_ssh("172.16.0.2", &key, &config)
         .await

@@ -176,7 +176,6 @@ async fn post_boot(
     vm: &mut firecracker::BootedVm,
     config: &RoomsConfig,
 ) -> Result<u8, RoomsError> {
-    let _ = config; // run_room already passes config to firecracker::boot; reserved for future use.
     match (keep, command) {
         (true, _) => {
             info!(
@@ -197,14 +196,10 @@ async fn post_boot(
             // through each child future — kill_on_drop fires on every spawned
             // ssh client — so a Ctrl-C at any point still lets run_room's
             // vm.shutdown() run cleanly.
-            #[allow(
-                clippy::duration_suboptimal_units,
-                reason = "from_mins requires Rust 1.83; no MSRV pinned yet"
-            )]
             let work = async {
-                runner::wait_for_ssh(&network.guest_ip, key, Duration::from_secs(60))
+                runner::wait_for_ssh(&network.guest_ip, key, config)
                     .await
-                    .map_err(|e| RoomsError::Internal(e.to_string()))?;
+                    .map_err(RoomsError::Firecracker)?;
                 runner::seed_entropy(&network.guest_ip, key)
                     .await
                     .map_err(|e| RoomsError::Internal(e.to_string()))?;
