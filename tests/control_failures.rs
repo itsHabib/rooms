@@ -18,6 +18,21 @@ use rooms::config::RoomsConfig;
 use rooms::error::{FirecrackerError, RoomsError};
 use rooms::firecracker;
 use rooms::runner;
+use tokio::sync::Mutex;
+
+// Tests in this module share `~/.local/state/rooms/` (the per-room state
+// dir parent) and `tap-fc0` (the host TAP). The cleanup-leak assertion in
+// `firecracker_exits_early_is_caught` walks the shared state dir and pops
+// the lexicographically-latest entry — when run in parallel, that entry
+// may be a sibling test's still-in-flight room dir, leading to a
+// misleading "room work dir should be cleaned up" panic. Serializing the
+// three tests via this module-level mutex makes the parallel assertion
+// match what `--test-threads=1` already proves: the production cleanup
+// path is correct; only the test's shared-state assertion was racy.
+//
+// `tokio::sync::Mutex::const_new` is async-aware so the guard is Send and
+// can be held across `.await` without tripping `clippy::await_holding_lock`.
+static SERIAL: Mutex<()> = Mutex::const_new(());
 
 fn image_path(name: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
@@ -48,6 +63,7 @@ fn latest_room_dir(base: &Path) -> Option<PathBuf> {
 
 #[tokio::test]
 async fn firecracker_exits_early_is_caught() {
+    let _serial = SERIAL.lock().await;
     let stub = fixture_path("firecracker_exit2.sh");
     assert!(stub.exists(), "missing fixture {}", stub.display());
 
@@ -87,6 +103,7 @@ async fn firecracker_exits_early_is_caught() {
 
 #[tokio::test]
 async fn api_socket_never_appears() {
+    let _serial = SERIAL.lock().await;
     let stub = fixture_path("firecracker_no_socket.sh");
     assert!(stub.exists(), "missing fixture {}", stub.display());
 
@@ -117,6 +134,7 @@ async fn api_socket_never_appears() {
 
 #[tokio::test]
 async fn guest_unreachable() {
+    let _serial = SERIAL.lock().await;
     let kernel = image_path("vmlinux.bin");
     let rootfs = image_path("rootfs.ext4");
     if !kernel.exists() || !rootfs.exists() {
