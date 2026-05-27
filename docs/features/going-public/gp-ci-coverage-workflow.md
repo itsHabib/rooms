@@ -27,8 +27,6 @@ name: coverage
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * 1"  # Mondays at 06:00 UTC
 
 jobs:
   coverage:
@@ -47,12 +45,11 @@ jobs:
           path: lcov.info
 ```
 
-Manual trigger + weekly cron. Uploads lcov as an artifact; no third-party subscription required.
+`workflow_dispatch` only — fires on demand via `gh workflow run`, no scheduled runs. Uploads lcov as an artifact; no third-party subscription required.
 
 ## Acceptance
 
 - `gh workflow run coverage.yml --repo itsHabib/rooms` produces an `lcov.info` artifact attached to the run.
-- Scheduled run lands Monday morning UTC.
 
 ## Non-goals
 
