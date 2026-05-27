@@ -16,3 +16,11 @@
 # Per-room state lives in ~/.local/state/rooms/; never end up here, but
 # guard against an accidental dev redirect.
 /.rooms-state/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+credentials*
+secrets/
