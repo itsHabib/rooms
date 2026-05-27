@@ -41,7 +41,7 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
         check_kernel(image, config),
         check_rootfs(image, config),
         check_anthropic_api_key(),
-        check_tap_roundtrip(),
+        check_tap(),
         check_nested_virt(),
     ];
 
@@ -225,58 +225,47 @@ fn check_anthropic_api_key() -> CheckResult {
     }
 }
 
-fn check_tap_roundtrip() -> CheckResult {
+fn check_tap() -> CheckResult {
     let name = "tap".to_owned();
     #[cfg(unix)]
     {
-        // Use a PID-suffixed name so concurrent doctor runs (or a leftover
-        // probe from an interrupted prior run) don't collide and trip a
-        // false "File exists" failure.
-        let tap = format!("rooms-doctor-probe-{}", std::process::id());
-        let tap = tap.as_str();
-        let add = Command::new("ip")
-            .args(["tuntap", "add", "dev", tap, "mode", "tap"])
-            .output();
-        match add {
-            Ok(out) if out.status.success() => {
-                let del = Command::new("ip")
-                    .args(["tuntap", "del", "dev", tap, "mode", "tap"])
-                    .output();
-                match del {
-                    Ok(d) if d.status.success() => CheckResult {
-                        name,
-                        ok: true,
-                        message: "ip tuntap add/del round-trip succeeded".to_owned(),
-                    },
-                    Ok(d) => CheckResult {
-                        name,
-                        ok: false,
-                        message: format!(
-                            "ip tuntap del failed (exit {}): {}",
-                            d.status,
-                            String::from_utf8_lossy(&d.stderr)
-                        ),
-                    },
-                    Err(e) => CheckResult {
-                        name,
-                        ok: false,
-                        message: format!("ip tuntap del failed: {e}"),
-                    },
-                }
-            }
-            Ok(out) => CheckResult {
+        // Rooms doesn't create TAP devices at runtime — `scripts/setup-tap.sh`
+        // does that once with sudo, and firecracker then opens the existing
+        // `tap-fc0` via `/dev/net/tun`. The check verifies those runtime
+        // prerequisites without requiring CAP_NET_ADMIN at probe time.
+        //
+        // The previous round-trip probe (`ip tuntap add ... del ...`) always
+        // failed for non-root operators: even with the right keyword (`name`,
+        // not `dev` — the latter references an existing physical device) and
+        // a name short enough to satisfy IFNAMSIZ (15 chars), `add` needs
+        // CAP_NET_ADMIN and would EPERM.
+        let tun = Path::new("/dev/net/tun");
+        if !tun.exists() {
+            return CheckResult {
                 name,
                 ok: false,
-                message: format!(
-                    "ip tuntap add failed (exit {}): {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr)
-                ),
+                message: "/dev/net/tun missing; load the tun kernel module (sudo modprobe tun)"
+                    .to_owned(),
+            };
+        }
+        let show = Command::new("ip")
+            .args(["link", "show", "tap-fc0"])
+            .output();
+        match show {
+            Ok(out) if out.status.success() => CheckResult {
+                name,
+                ok: true,
+                message: "/dev/net/tun present and tap-fc0 exists".to_owned(),
+            },
+            Ok(_) => CheckResult {
+                name,
+                ok: false,
+                message: "tap-fc0 not found; run `sudo bash scripts/setup-tap.sh`".to_owned(),
             },
             Err(e) => CheckResult {
                 name,
                 ok: false,
-                message: format!("ip command not available: {e}"),
+                message: format!("could not run `ip link show tap-fc0`: {e}"),
             },
         }
     }
