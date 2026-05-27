@@ -73,6 +73,8 @@ make build        # debug build
 
 Specs live at [`docs/features/<slug>/spec.md`](docs/features/). One spec per productionization task; read [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md) first.
 
+**PR conventions:** request Copilot review; comment `@codex review`, `@claude review`, and `@cursor review` on the PR. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor onramp and [`CLAUDE.md`](CLAUDE.md) for sizing bands and lint discipline.
+
 ### Building the rootfs
 
 The v0 guest image is built on the rooms-host VM with debootstrap (not committed to git):
@@ -87,13 +89,18 @@ sudo ./scripts/build-rootfs.sh \
 
 See [`scripts/README.md`](scripts/README.md) for prereqs, sha256 verification, and the `--extend` hook. If you have not built locally yet, `scripts/setup-rooms-host.sh` downloads the Firecracker quickstart bionic rootfs as a one-time POC fallback (`~/rooms/images/rootfs.ext4`).
 
-**PR conventions:** request Copilot review; comment `@codex review` and `@claude review` on the PR. See [`CLAUDE.md`](CLAUDE.md) for sizing bands and lint discipline.
-
 ## CI
 
-GitHub Actions on `ubuntu-latest`: `cargo fmt --check`, `clippy -D warnings`, `cargo test` (no `--features e2e` — e2e needs real Firecracker on the rooms-host). Comment `@claude review` on a PR to trigger [`.github/workflows/claude.yml`](.github/workflows/claude.yml).
+GitHub Actions, every PR:
 
-Locally, `make check` mirrors CI.
+- `fmt` and `clippy -D warnings` on `ubuntu-latest`.
+- `test` matrix on `ubuntu-latest` + `windows-latest` (no `--features e2e` — e2e needs real Firecracker on the rooms-host).
+- `audit` via [`rustsec/audit-check`](https://github.com/rustsec/audit-check) on `Cargo.lock`.
+- Bot reviews: `@claude review` triggers [`.github/workflows/claude.yml`](.github/workflows/claude.yml); Cursor Bugbot runs automatically.
+
+Manually dispatched via `workflow_dispatch`: [`coverage.yml`](.github/workflows/coverage.yml) (cargo-llvm-cov), [`mutants.yml`](.github/workflows/mutants.yml) (cargo-mutants).
+
+Locally, `make check` mirrors the PR jobs.
 
 ## Architecture
 

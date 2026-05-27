@@ -121,37 +121,49 @@ batches:
   - id: 2
     label: ci.yml + README.md sub-region overlaps — parallel-safe with rebase
     depends_on: []
-    status: pending
+    status: done
     streams:
       - task_id: tsk_01KSMXDMNTP3J7SDV23EFJNG33
         task_slug: gp-ci-cargo-audit
         spec_path: docs/features/going-public/gp-ci-cargo-audit.md
         runtime: cloud
         touches: [.github/workflows/ci.yml]
-        status: pending
+        status: done
+        pr_number: 29
+        merge_commit: 9060dc66ca829d61cabf422ddaf75ab1981b8ae3
+        merged_at: 2026-05-27T16:11:00Z
       - task_id: tsk_01KSMXE0H143PJXP89XHZ7VWJ1
         task_slug: gp-ci-os-matrix
         spec_path: docs/features/going-public/gp-ci-os-matrix.md
         runtime: cloud
         touches: [.github/workflows/ci.yml]
-        status: pending
+        status: done
+        pr_number: 26
+        merge_commit: d2e3ffefaad28edf2a09706f72458477100110e4
+        merged_at: 2026-05-27T15:50:30Z
       - task_id: tsk_01KSMXEKQ0DSTVR13Q0PEB2NDQ
         task_slug: gp-readme-badges
         spec_path: docs/features/going-public/gp-readme-badges.md
         runtime: cloud
         touches: [README.md]
-        status: pending
+        status: done
+        pr_number: 27
+        merge_commit: a0d070e5a843f64a5264f73ea669a659c50dfbbb
+        merged_at: 2026-05-27T15:50:36Z
       - task_id: tsk_01KSMXETRJRKACM7Z96E4RH8VV
         task_slug: gp-readme-doctor-drift
         spec_path: docs/features/going-public/gp-readme-doctor-drift.md
         runtime: cloud
         touches: [README.md]
-        status: pending
+        status: done
+        pr_number: 25
+        merge_commit: b39effbdb43c8900b687d7a9946fc3a5efadf075
+        merged_at: 2026-05-27T15:50:25Z
 
   - id: 3
     label: Cargo.toml [dev-dependencies] overlap — parallel-safe with rebase
     depends_on: []
-    status: pending
+    status: done
     streams:
       - task_id: tsk_01KSMXG43H8CKPPH1SHTT9YYDD
         task_slug: gp-tests-proptest
@@ -162,13 +174,19 @@ batches:
           - src/doctor.rs
           - src/artifacts.rs
           - src/firecracker.rs
-        status: pending
+        status: done
+        pr_number: 31
+        merge_commit: 84633d8fb572aff2a600a25f112722181aa148ce
+        merged_at: 2026-05-27T16:23:25Z
       - task_id: tsk_01KSMXGCRJCMNHGR0Q61YV3PQD
         task_slug: gp-tests-cli-integration
         spec_path: docs/features/going-public/gp-tests-cli-integration.md
         runtime: cloud
         touches: [Cargo.toml, tests/cli.rs]
-        status: pending
+        status: done
+        pr_number: 30
+        merge_commit: bb7c34df3a8508e0bcb4c4a118f2f3f4c3398698
+        merged_at: 2026-05-27T16:19:53Z
 
   - id: 4
     label: tag v0.1.0 (must follow every other gp-* landing)
@@ -315,4 +333,6 @@ Or batch-by-batch, operator-paced:
 ## Status (updated by /work-driver as the manifest runs)
 
 - Batch 1: **done** (11 PRs merged 2026-05-27, all green CI, address-inline fixes applied to 5 of 11 before merge).
-- Batches 2–4: pending.
+- Batch 2: **done** (PRs #25, #26, #27, #29 merged 2026-05-27, inline fix on #29 for `checks: write` permission).
+- Batch 3: **done** (PRs #30, #31 merged 2026-05-27, inline fixes for exit-code assertion + dishonest proptest demotion; #31 rebased onto #30 for Cargo.toml dev-deps merge).
+- Batch 4: tag-only per operator (`git tag v0.1.0`, no GitHub release).
