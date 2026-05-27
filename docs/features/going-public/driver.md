@@ -11,7 +11,7 @@ default_runtime: cloud
 
 batches:
   - id: 1
-    label: ready now — file-disjoint, fully parallel-safe
+    label: ready now — file-disjoint, fully parallel-safe (11 streams; gp-ci-dependabot dropped 2026-05-27 per operator)
     depends_on: []
     status: pending
     streams:
@@ -32,12 +32,6 @@ batches:
         spec_path: docs/features/going-public/gp-no-changelog.md
         runtime: cloud
         touches: [CHANGELOG.md]
-        status: pending
-      - task_id: tsk_01KSMXDS2DEKBMS3EN0H99B2ZR
-        task_slug: gp-ci-dependabot
-        spec_path: docs/features/going-public/gp-ci-dependabot.md
-        runtime: cloud
-        touches: [.github/dependabot.yml]
         status: pending
       - task_id: tsk_01KSMXE7E7TKMAPTRMD5NBMC0K
         task_slug: gp-ci-coverage-workflow
@@ -222,22 +216,21 @@ rooms is launch-ready:
 
 ## Batches
 
-### Batch 1 — ready now, 12 streams (parallel-safe, file-disjoint)
+### Batch 1 — ready now, 11 streams (parallel-safe, file-disjoint)
 
 | # | task | runtime | touches | spec |
 |---|---|---|---|---|
 | 1 | gp-personal-path-in-spec-doc | cloud | docs/features/poc-m2-1-hardening-followups/spec.md | [spec](gp-personal-path-in-spec-doc.md) |
 | 2 | gp-gitignore-missing-secret-patterns | cloud | .gitignore | [spec](gp-gitignore-missing-secret-patterns.md) |
 | 3 | gp-no-changelog | cloud | CHANGELOG.md | [spec](gp-no-changelog.md) |
-| 4 | gp-ci-dependabot | cloud | .github/dependabot.yml | [spec](gp-ci-dependabot.md) |
-| 5 | gp-ci-coverage-workflow | cloud | .github/workflows/coverage.yml | [spec](gp-ci-coverage-workflow.md) |
-| 6 | gp-ci-mutants-workflow | cloud | .github/workflows/mutants.yml + .cargo/mutants.toml | [spec](gp-ci-mutants-workflow.md) |
-| 7 | gp-docs-followups-file | cloud | docs/follow-ups.md + CLAUDE.md | [spec](gp-docs-followups-file.md) |
-| 8 | gp-docs-index | cloud | docs/README.md | [spec](gp-docs-index.md) |
-| 9 | gp-contributing-md | cloud | CONTRIBUTING.md | [spec](gp-contributing-md.md) |
-| 10 | gp-code-of-conduct-md | cloud | CODE_OF_CONDUCT.md | [spec](gp-code-of-conduct-md.md) |
-| 11 | gp-security-md | cloud | SECURITY.md | [spec](gp-security-md.md) |
-| 12 | gp-github-templates | cloud | .github/ISSUE_TEMPLATE/* + PULL_REQUEST_TEMPLATE.md | [spec](gp-github-templates.md) |
+| 4 | gp-ci-coverage-workflow | cloud | .github/workflows/coverage.yml | [spec](gp-ci-coverage-workflow.md) |
+| 5 | gp-ci-mutants-workflow | cloud | .github/workflows/mutants.yml + .cargo/mutants.toml | [spec](gp-ci-mutants-workflow.md) |
+| 6 | gp-docs-followups-file | cloud | docs/follow-ups.md + CLAUDE.md | [spec](gp-docs-followups-file.md) |
+| 7 | gp-docs-index | cloud | docs/README.md | [spec](gp-docs-index.md) |
+| 8 | gp-contributing-md | cloud | CONTRIBUTING.md | [spec](gp-contributing-md.md) |
+| 9 | gp-code-of-conduct-md | cloud | CODE_OF_CONDUCT.md | [spec](gp-code-of-conduct-md.md) |
+| 10 | gp-security-md | cloud | SECURITY.md | [spec](gp-security-md.md) |
+| 11 | gp-github-templates | cloud | .github/ISSUE_TEMPLATE/* + PULL_REQUEST_TEMPLATE.md | [spec](gp-github-templates.md) |
 
 ### Batch 2 — 4 streams (sub-region overlaps in ci.yml + README.md, parallel-safe with rebase)
 
