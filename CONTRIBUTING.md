@@ -1,6 +1,6 @@
 # Contributing to rooms
 
-Thanks for helping improve rooms. This document is the first stop for humans contributing code or docs. For agent-oriented workflow notes (MCP servers, work-driver, architecture layers), see [CLAUDE.md](CLAUDE.md) at the bottom.
+Thanks for helping improve rooms. This document is the first stop for humans contributing code or docs. For agent-oriented workflow notes (MCP servers, work-driver, architecture layers), see [CLAUDE.md](CLAUDE.md) — also linked in the "Further reading" section below.
 
 ## Dev setup
 
