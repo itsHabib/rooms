@@ -1,0 +1,3 @@
+exclude_globs = ["src/main.rs"]
+exclude_re = ["tests/fixtures/.*"]
+timeout_multiplier = 3.0
