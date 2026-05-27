@@ -293,6 +293,7 @@ Adapted from ship's workflow:
 - **"I want the runner to know about the agent"** → stop. Runner contract is substrate-side; agent logic lives in the rootfs runner script ([`docs/features/cursor-sdk-runner/spec.md`](docs/features/cursor-sdk-runner/spec.md)).
 - **"Add Docker / devcontainer / web preview"** → stop. Non-goals. Re-read [`docs/vision.md`](docs/vision.md).
 - **Firecracker misbehaving** → check per-room log under work dir, serial output, `tap-fc0` exists (`scripts/setup-tap.sh`).
+- **Out-of-scope discovery during implementation** → add a one-line entry to [`docs/follow-ups.md`](docs/follow-ups.md); defer depth to the originating PR.
 
 ## Cloud runtime defaults
 
