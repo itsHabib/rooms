@@ -41,3 +41,11 @@ jobs:
       # requires real Firecracker + kernel + rootfs on the host. CI runners
       # don't have those; the gated e2e tests run on the rooms-host VM only.
       - run: cargo test
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
