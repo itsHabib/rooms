@@ -13,68 +13,98 @@ batches:
   - id: 1
     label: ready now — file-disjoint, fully parallel-safe (11 streams; gp-ci-dependabot dropped 2026-05-27 per operator)
     depends_on: []
-    status: pending
+    status: done
     streams:
       - task_id: tsk_01KSMXCW5RFB7NXXZY8KWNMDQ2
         task_slug: gp-personal-path-in-spec-doc
         spec_path: docs/features/going-public/gp-personal-path-in-spec-doc.md
         runtime: cloud
         touches: [docs/features/poc-m2-1-hardening-followups/spec.md]
-        status: pending
+        status: done
+        pr_number: 19
+        merge_commit: 90106a823832b31fb68cdc5f9e5c46828eca422c
+        merged_at: 2026-05-27T15:30:12Z
       - task_id: tsk_01KSMXD86ZG2P32WJFD98F9KY4
         task_slug: gp-gitignore-missing-secret-patterns
         spec_path: docs/features/going-public/gp-gitignore-missing-secret-patterns.md
         runtime: cloud
         touches: [.gitignore]
-        status: pending
+        status: done
+        pr_number: 16
+        merge_commit: d0bb28d6f8d99cffc4f5ae90085d509690b676a0
+        merged_at: 2026-05-27T15:30:04Z
       - task_id: tsk_01KSMXDG38XGDTW31M9WC76HRD
         task_slug: gp-no-changelog
         spec_path: docs/features/going-public/gp-no-changelog.md
         runtime: cloud
         touches: [CHANGELOG.md]
-        status: pending
+        status: done
+        pr_number: 17
+        merge_commit: e43cdaebe93688041394433e458a8513ce4746d5
+        merged_at: 2026-05-27T15:37:00Z
       - task_id: tsk_01KSMXE7E7TKMAPTRMD5NBMC0K
         task_slug: gp-ci-coverage-workflow
         spec_path: docs/features/going-public/gp-ci-coverage-workflow.md
         runtime: cloud
         touches: [.github/workflows/coverage.yml]
-        status: pending
+        status: done
+        pr_number: 14
+        merge_commit: c93101fbc12c022c1dc847d1b9a7578488b75c7f
+        merged_at: 2026-05-27T15:36:53Z
       - task_id: tsk_01KSMXEDXV4VC2M3V8A1R12B3G
         task_slug: gp-ci-mutants-workflow
         spec_path: docs/features/going-public/gp-ci-mutants-workflow.md
         runtime: cloud
         touches: [.github/workflows/mutants.yml, .cargo/mutants.toml]
-        status: pending
+        status: done
+        pr_number: 23
+        merge_commit: f1f5f972d8eb0efef1678753af845239d3d4ccec
+        merged_at: 2026-05-27T15:37:22Z
       - task_id: tsk_01KSMXF01G4WN7ATTE9QKVW1DZ
         task_slug: gp-docs-followups-file
         spec_path: docs/features/going-public/gp-docs-followups-file.md
         runtime: cloud
         touches: [docs/follow-ups.md, CLAUDE.md]
-        status: pending
+        status: done
+        pr_number: 15
+        merge_commit: 4d7652497cfff18052b90ee7a7e1cfcf685153f7
+        merged_at: 2026-05-27T15:29:48Z
       - task_id: tsk_01KSMXF7CJ6RGJ890S2FXQ16WJ
         task_slug: gp-docs-index
         spec_path: docs/features/going-public/gp-docs-index.md
         runtime: cloud
         touches: [docs/README.md]
-        status: pending
+        status: done
+        pr_number: 13
+        merge_commit: 32c33769ee84e9e21671c1249f079326dffb9113
+        merged_at: 2026-05-27T15:29:56Z
       - task_id: tsk_01KSMXFD7DSW48DA1D7V36Y8FN
         task_slug: gp-contributing-md
         spec_path: docs/features/going-public/gp-contributing-md.md
         runtime: cloud
         touches: [CONTRIBUTING.md]
-        status: pending
+        status: done
+        pr_number: 20
+        merge_commit: 1f096679e745d9903be4e04e948af01ae4d8015a
+        merged_at: 2026-05-27T15:37:15Z
       - task_id: tsk_01KSMXFHE8TCVF0H6A82880ZVC
         task_slug: gp-code-of-conduct-md
         spec_path: docs/features/going-public/gp-code-of-conduct-md.md
         runtime: cloud
         touches: [CODE_OF_CONDUCT.md]
-        status: pending
+        status: done
+        pr_number: 22
+        merge_commit: 168f58b9b5a32c8bdca46b944b679255349ddc9e
+        merged_at: 2026-05-27T15:30:28Z
       - task_id: tsk_01KSMXFT5SE6K5HT57YGR0E4EX
         task_slug: gp-security-md
         spec_path: docs/features/going-public/gp-security-md.md
         runtime: cloud
         touches: [SECURITY.md]
-        status: pending
+        status: done
+        pr_number: 18
+        merge_commit: e0fe5a40f0e37f8885f4f540fd8e6d02509a3ed9
+        merged_at: 2026-05-27T15:37:08Z
       - task_id: tsk_01KSMXFW4NGPS2HCZZ0V6PWXMX
         task_slug: gp-github-templates
         spec_path: docs/features/going-public/gp-github-templates.md
@@ -83,7 +113,10 @@ batches:
           - .github/ISSUE_TEMPLATE/bug_report.md
           - .github/ISSUE_TEMPLATE/feature_request.md
           - .github/PULL_REQUEST_TEMPLATE.md
-        status: pending
+        status: done
+        pr_number: 21
+        merge_commit: bd1d74ab038978efab37ba94453b1c499220c20b
+        merged_at: 2026-05-27T15:30:20Z
 
   - id: 2
     label: ci.yml + README.md sub-region overlaps — parallel-safe with rebase
@@ -281,4 +314,5 @@ Or batch-by-batch, operator-paced:
 
 ## Status (updated by /work-driver as the manifest runs)
 
-All four batches: pending.
+- Batch 1: **done** (11 PRs merged 2026-05-27, all green CI, address-inline fixes applied to 5 of 11 before merge).
+- Batches 2–4: pending.
