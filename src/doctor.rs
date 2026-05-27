@@ -229,16 +229,9 @@ fn check_tap() -> CheckResult {
     let name = "tap".to_owned();
     #[cfg(unix)]
     {
-        // Rooms doesn't create TAP devices at runtime — `scripts/setup-tap.sh`
-        // does that once with sudo, and firecracker then opens the existing
-        // `tap-fc0` via `/dev/net/tun`. The check verifies those runtime
-        // prerequisites without requiring CAP_NET_ADMIN at probe time.
-        //
-        // The previous round-trip probe (`ip tuntap add ... del ...`) always
-        // failed for non-root operators: even with the right keyword (`name`,
-        // not `dev` — the latter references an existing physical device) and
-        // a name short enough to satisfy IFNAMSIZ (15 chars), `add` needs
-        // CAP_NET_ADMIN and would EPERM.
+        // Verifies the runtime prerequisites without needing CAP_NET_ADMIN:
+        // firecracker opens the existing `tap-fc0` via `/dev/net/tun` at boot;
+        // tap creation is `scripts/setup-tap.sh`'s job, not the probe's.
         let tun = Path::new("/dev/net/tun");
         if !tun.exists() {
             return CheckResult {
@@ -257,10 +250,14 @@ fn check_tap() -> CheckResult {
                 ok: true,
                 message: "/dev/net/tun present and tap-fc0 exists".to_owned(),
             },
-            Ok(_) => CheckResult {
+            Ok(out) => CheckResult {
                 name,
                 ok: false,
-                message: "tap-fc0 not found; run `sudo bash scripts/setup-tap.sh`".to_owned(),
+                message: format!(
+                    "tap-fc0 not found (ip link exit {}: {}); run `sudo bash scripts/setup-tap.sh`",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
             },
             Err(e) => CheckResult {
                 name,
