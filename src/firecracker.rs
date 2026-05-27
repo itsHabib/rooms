@@ -592,6 +592,77 @@ mod tests {
 
         assert!(path.exists(), "dismissed guard should leave the directory");
     }
+
+    mod room_guard_properties {
+        use proptest::prelude::*;
+
+        use super::RoomGuard;
+        use crate::config::RoomsConfig;
+
+        #[derive(Debug, Clone)]
+        enum GuardAction {
+            Dismiss,
+            SetSuppressCleanup(bool),
+            SetTapOwned(bool),
+        }
+
+        prop_compose! {
+            fn arb_guard_action()(tag in 0u8..3, flag in any::<bool>()) -> GuardAction {
+                match tag {
+                    0 => GuardAction::Dismiss,
+                    1 => GuardAction::SetSuppressCleanup(flag),
+                    _ => GuardAction::SetTapOwned(flag),
+                }
+            }
+        }
+
+        fn apply_action(guard: &mut RoomGuard, action: &GuardAction) {
+            match action {
+                GuardAction::Dismiss => guard.dismiss(),
+                GuardAction::SetSuppressCleanup(suppress) => {
+                    guard.set_suppress_cleanup(*suppress);
+                }
+                GuardAction::SetTapOwned(owned) => guard.set_tap_owned(*owned),
+            }
+        }
+
+        fn should_preserve_on_drop(actions: &[GuardAction]) -> bool {
+            let mut dismissed = false;
+            let mut suppress_cleanup = false;
+            for action in actions {
+                match action {
+                    GuardAction::Dismiss => dismissed = true,
+                    GuardAction::SetSuppressCleanup(suppress) => suppress_cleanup = *suppress,
+                    GuardAction::SetTapOwned(_) => {}
+                }
+            }
+            dismissed || suppress_cleanup
+        }
+
+        proptest! {
+            #[test]
+            fn drop_respects_dismiss_and_suppress_flags(
+                actions in proptest::collection::vec(arb_guard_action(), 0..24),
+            ) {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().to_path_buf();
+                std::fs::write(path.join("marker"), b"x").expect("write marker");
+
+                let config = RoomsConfig::default();
+                let mut guard = RoomGuard::new(path.clone(), path.join("api.sock"), &config);
+                for action in &actions {
+                    apply_action(&mut guard, action);
+                }
+                drop(guard);
+
+                if should_preserve_on_drop(&actions) {
+                    prop_assert!(path.exists(), "dismiss/suppress should skip cleanup");
+                } else {
+                    prop_assert!(!path.exists(), "guard should remove the directory");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "e2e"))]

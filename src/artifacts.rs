@@ -482,4 +482,81 @@ mod tests {
             .expect_err("absolute path should be rejected");
         assert_eq!(err, ArtifactsError::UnsafeReference(abs));
     }
+
+    mod path_validation_properties {
+        use std::path::PathBuf;
+
+        use proptest::prelude::*;
+
+        use super::super::{safe_join, ArtifactsError};
+
+        fn sample_out_dir() -> PathBuf {
+            PathBuf::from("/tmp/rooms-artifact-out")
+        }
+
+        proptest! {
+            #[test]
+            fn relative_segments_stay_inside(
+                segments in proptest::collection::vec("[a-z0-9_-]+", 1..5),
+            ) {
+                let rel = segments.join("/");
+                let out_dir = sample_out_dir();
+                let joined = safe_join(&out_dir, &rel).expect("safe relative path");
+                prop_assert!(joined.starts_with(&out_dir));
+            }
+
+            #[test]
+            fn parent_dir_components_are_rejected(
+                prefix in proptest::collection::vec("[a-z0-9]+", 0..3),
+                suffix in proptest::collection::vec("[a-z0-9]+", 0..3),
+            ) {
+                let mut parts = prefix;
+                parts.push("..".to_owned());
+                parts.extend(suffix);
+                let rel = parts.join("/");
+                let err = safe_join(&sample_out_dir(), &rel).expect_err(".. must be rejected");
+                prop_assert_eq!(err, ArtifactsError::UnsafeReference(rel));
+            }
+
+            #[test]
+            fn absolute_paths_are_rejected(segments in proptest::collection::vec("[a-z0-9]+", 1..4)) {
+                let rel = if cfg!(windows) {
+                    format!("C:\\{}", segments.join("\\"))
+                } else {
+                    format!("/{}", segments.join("/"))
+                };
+                let err = safe_join(&sample_out_dir(), &rel).expect_err("absolute path");
+                prop_assert_eq!(err, ArtifactsError::UnsafeReference(rel));
+            }
+
+            #[test]
+            fn multi_segment_escapes_are_rejected(
+                depth in 1usize..5,
+                tail in proptest::collection::vec("[a-z0-9]+", 1..3),
+            ) {
+                let mut parts = vec!["inside".to_owned(); depth];
+                for _ in 0..=depth {
+                    parts.push("..".to_owned());
+                }
+                parts.extend(tail);
+                let rel = parts.join("/");
+                let err = safe_join(&sample_out_dir(), &rel).expect_err("multi-segment escape");
+                prop_assert_eq!(err, ArtifactsError::UnsafeReference(rel));
+            }
+
+            #[test]
+            fn embedded_nul_with_traversal_is_rejected(
+                prefix in proptest::collection::vec("[a-z0-9]+", 1..3),
+                tail in proptest::collection::vec("[a-z0-9]+", 0..2),
+            ) {
+                let mut parts = prefix;
+                parts.push("seg\0ment".to_owned());
+                parts.push("..".to_owned());
+                parts.extend(tail);
+                let rel = parts.join("/");
+                let err = safe_join(&sample_out_dir(), &rel).expect_err("NUL + .. must reject");
+                prop_assert_eq!(err, ArtifactsError::UnsafeReference(rel));
+            }
+        }
+    }
 }
