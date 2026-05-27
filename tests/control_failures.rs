@@ -18,6 +18,23 @@ use rooms::config::RoomsConfig;
 use rooms::error::{FirecrackerError, RoomsError};
 use rooms::firecracker;
 use rooms::runner;
+use tokio::sync::Mutex;
+
+// All three tests boot a microVM and create a room dir under
+// `~/.local/state/rooms/`. `firecracker_exits_early_is_caught` walks that
+// dir at the end and asserts the latest entry has been cleaned up — when
+// run in parallel, that "latest" can be a sibling test's still-in-flight
+// room dir, falsely failing the cleanup-leak check. Serializing all three
+// guarantees the assertion only sees its own state. `--test-threads=1`
+// already proves serialization is sufficient; production cleanup
+// (`RoomGuard`) is correct.
+//
+// `tokio::sync::Mutex::const_new` keeps the guard `Send` across `.await`
+// (no `clippy::await_holding_lock` trip). The `_serial` binding name is
+// load-bearing: `let _ = SERIAL.lock().await` would drop the guard
+// immediately and defeat the lock; the leading underscore + name keeps
+// it alive to end of scope while suppressing `unused_variables`.
+static SERIAL: Mutex<()> = Mutex::const_new(());
 
 fn image_path(name: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
@@ -48,6 +65,7 @@ fn latest_room_dir(base: &Path) -> Option<PathBuf> {
 
 #[tokio::test]
 async fn firecracker_exits_early_is_caught() {
+    let _serial = SERIAL.lock().await;
     let stub = fixture_path("firecracker_exit2.sh");
     assert!(stub.exists(), "missing fixture {}", stub.display());
 
@@ -87,6 +105,7 @@ async fn firecracker_exits_early_is_caught() {
 
 #[tokio::test]
 async fn api_socket_never_appears() {
+    let _serial = SERIAL.lock().await;
     let stub = fixture_path("firecracker_no_socket.sh");
     assert!(stub.exists(), "missing fixture {}", stub.display());
 
@@ -117,6 +136,7 @@ async fn api_socket_never_appears() {
 
 #[tokio::test]
 async fn guest_unreachable() {
+    let _serial = SERIAL.lock().await;
     let kernel = image_path("vmlinux.bin");
     let rootfs = image_path("rootfs.ext4");
     if !kernel.exists() || !rootfs.exists() {
