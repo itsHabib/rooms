@@ -191,14 +191,18 @@ batches:
   - id: 4
     label: tag v0.1.0 (must follow every other gp-* landing)
     depends_on: [1, 2, 3]
-    status: pending
+    status: done
     streams:
       - task_id: tsk_01KSMXD1T4BXZD8B745PMGE5T7
         task_slug: gp-no-git-tags
         spec_path: docs/features/going-public/gp-no-git-tags.md
-        runtime: cloud
+        runtime: local
         touches: []
-        status: pending
+        status: done
+        tag: v0.1.0
+        tag_commit: d53a480f6f95ac056f2f74c043ba54f5c4b9e81c
+        tagged_at: 2026-05-27T16:29:09Z
+        github_release: skipped_per_operator
 
 conflict_notes:
   - kind: file_overlap
@@ -335,4 +339,5 @@ Or batch-by-batch, operator-paced:
 - Batch 1: **done** (11 PRs merged 2026-05-27, all green CI, address-inline fixes applied to 5 of 11 before merge).
 - Batch 2: **done** (PRs #25, #26, #27, #29 merged 2026-05-27, inline fix on #29 for `checks: write` permission).
 - Batch 3: **done** (PRs #30, #31 merged 2026-05-27, inline fixes for exit-code assertion + dishonest proptest demotion; #31 rebased onto #30 for Cargo.toml dev-deps merge).
-- Batch 4: tag-only per operator (`git tag v0.1.0`, no GitHub release).
+- Batch 4: **done** (v0.1.0 tagged locally on d53a480; pushed to origin; GitHub release skipped per operator).
+- Repo flipped to public 2026-05-27T16:30Z.
