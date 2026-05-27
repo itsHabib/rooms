@@ -16,3 +16,6 @@ All notable changes to rooms are documented here. Format adapted from [keepachan
 
 ### Fixed
 - n/a (first release)
+
+[Unreleased]: https://github.com/itsHabib/rooms/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/itsHabib/rooms/releases/tag/v0.1.0
