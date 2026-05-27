@@ -51,7 +51,7 @@ rooms run --repo ~/my-project --task task.md
 | `exec` | Run a command in an existing room; capture stdout/stderr/exit. | planned |
 | `collect` | Pull `/workspace/out` from guest to host. | planned |
 | `destroy` | Halt microVM, reap process, remove work dir. | planned |
-| `doctor` | Check `/dev/kvm`, Firecracker binary, image paths, TAP. | stub |
+| `doctor` | Real checks: `/dev/kvm`, Firecracker version, kernel + rootfs validation, TAP setup, nested virt, ANTHROPIC_API_KEY. `--json` for machine-readable output. | shipped |
 
 ```sh
 rooms run --help
