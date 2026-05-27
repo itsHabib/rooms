@@ -354,4 +354,63 @@ mod tests {
         assert!(version_meets_min(2, 0, (1, 7)));
         assert!(!version_meets_min(1, 6, (1, 7)));
     }
+
+    mod version_parser_properties {
+        use proptest::prelude::*;
+
+        use super::parse_firecracker_version;
+
+        proptest! {
+            #[test]
+            fn firecracker_banner_round_trips(
+                major in 0u32..=99,
+                minor in 0u32..=99,
+                patch in 0u32..=999,
+            ) {
+                let output = format!("Firecracker v{major}.{minor}.{patch}");
+                prop_assert_eq!(parse_firecracker_version(&output), Some((major, minor)));
+            }
+
+            #[test]
+            fn v_prefix_round_trips(
+                major in 0u32..=99,
+                minor in 0u32..=99,
+                patch in 0u32..=99,
+            ) {
+                let output = format!("v{major}.{minor}.{patch}");
+                prop_assert_eq!(parse_firecracker_version(&output), Some((major, minor)));
+            }
+
+            #[test]
+            fn trailing_junk_still_parses_version(
+                major in 1u32..=20,
+                minor in 0u32..=20,
+                patch in 0u32..=20,
+                junk in "\\s+[A-Za-z0-9._-]+",
+            ) {
+                let output = format!("Firecracker v{major}.{minor}.{patch}{junk}");
+                prop_assert_eq!(parse_firecracker_version(&output), Some((major, minor)));
+            }
+
+            #[test]
+            fn tokens_without_dots_return_none(words in proptest::collection::vec("[^\\.\\s]+", 1..6)) {
+                let output = words.join(" ");
+                prop_assert_eq!(parse_firecracker_version(&output), None);
+            }
+        }
+
+        #[test]
+        fn adversarial_inputs_return_none() {
+            for input in [
+                "",
+                "Firecracker",
+                "no version token here",
+                "v.",
+                "v1.",
+                "v.not_a_number.2",
+            ] {
+                assert_eq!(parse_firecracker_version(input), None, "input: {input:?}");
+            }
+        }
+    }
 }
