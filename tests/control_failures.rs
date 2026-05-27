@@ -20,18 +20,20 @@ use rooms::firecracker;
 use rooms::runner;
 use tokio::sync::Mutex;
 
-// Tests in this module share `~/.local/state/rooms/` (the per-room state
-// dir parent) and `tap-fc0` (the host TAP). The cleanup-leak assertion in
-// `firecracker_exits_early_is_caught` walks the shared state dir and pops
-// the lexicographically-latest entry — when run in parallel, that entry
-// may be a sibling test's still-in-flight room dir, leading to a
-// misleading "room work dir should be cleaned up" panic. Serializing the
-// three tests via this module-level mutex makes the parallel assertion
-// match what `--test-threads=1` already proves: the production cleanup
-// path is correct; only the test's shared-state assertion was racy.
+// All three tests boot a microVM and create a room dir under
+// `~/.local/state/rooms/`. `firecracker_exits_early_is_caught` walks that
+// dir at the end and asserts the latest entry has been cleaned up — when
+// run in parallel, that "latest" can be a sibling test's still-in-flight
+// room dir, falsely failing the cleanup-leak check. Serializing all three
+// guarantees the assertion only sees its own state. `--test-threads=1`
+// already proves serialization is sufficient; production cleanup
+// (`RoomGuard`) is correct.
 //
-// `tokio::sync::Mutex::const_new` is async-aware so the guard is Send and
-// can be held across `.await` without tripping `clippy::await_holding_lock`.
+// `tokio::sync::Mutex::const_new` keeps the guard `Send` across `.await`
+// (no `clippy::await_holding_lock` trip). The `_serial` binding name is
+// load-bearing: `let _ = SERIAL.lock().await` would drop the guard
+// immediately and defeat the lock; the leading underscore + name keeps
+// it alive to end of scope while suppressing `unused_variables`.
 static SERIAL: Mutex<()> = Mutex::const_new(());
 
 fn image_path(name: &str) -> PathBuf {
