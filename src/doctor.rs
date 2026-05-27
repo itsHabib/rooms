@@ -399,22 +399,21 @@ mod tests {
             }
         }
 
-        proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 256,
-                .. ProptestConfig::default()
-            })]
-
-            #[test]
-            fn adversarial_inputs_return_none(input in prop_oneof![
-                Just(String::new()),
-                Just("Firecracker".to_owned()),
-                Just("no version token here".to_owned()),
-                Just("v.".to_owned()),
-                Just("v1.".to_owned()),
-                Just("v.not_a_number.2".to_owned()),
-            ]) {
-                prop_assert_eq!(parse_firecracker_version(&input), None);
+        #[test]
+        fn adversarial_inputs_return_none() {
+            for input in [
+                "",
+                "Firecracker",
+                "no version token here",
+                "v.",
+                "v1.",
+                "v.not_a_number.2",
+            ] {
+                assert_eq!(
+                    parse_firecracker_version(input),
+                    None,
+                    "input: {input:?}"
+                );
             }
         }
     }
