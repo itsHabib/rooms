@@ -60,7 +60,7 @@ TypeScript MCP server that hands a spec doc to cursor (local or cloud), persists
 **Cloud defaults for this repo** (canonical, locked 2026-05-25):
 
 ```js
-cloud: { repos: [{ name: "rooms" }], env: { type: "cloud" }, autoCreatePR: true }
+cloud: { repos: [{ url: "https://github.com/itsHabib/rooms" }], env: { type: "cloud" }, autoCreatePR: true }
 ```
 
 Prefer local runtime when the PR needs heavy framing (architecture pivots, discovery logs).
@@ -300,7 +300,7 @@ When firing `mcp__ship__ship` with `runtime: "cloud"` against this repo, use:
 
 ```js
 cloud: {
-  repos: [{ name: "rooms" }],
+  repos: [{ url: "https://github.com/itsHabib/rooms" }],
   env: { type: "cloud" },
   autoCreatePR: true,
 }
