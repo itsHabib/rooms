@@ -1,5 +1,8 @@
 # rooms
 
+[![CI](https://github.com/itsHabib/rooms/actions/workflows/ci.yml/badge.svg)](https://github.com/itsHabib/rooms/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Disposable Firecracker microVMs with specified deps — the substrate that turns "run a command in a clean isolated env with a real repo" into one CLI invocation. First consumer is an LLM agent; the substrate doesn't know that.
 
 ## Status
@@ -51,7 +54,7 @@ rooms run --repo ~/my-project --task task.md
 | `exec` | Run a command in an existing room; capture stdout/stderr/exit. | planned |
 | `collect` | Pull `/workspace/out` from guest to host. | planned |
 | `destroy` | Halt microVM, reap process, remove work dir. | planned |
-| `doctor` | Check `/dev/kvm`, Firecracker binary, image paths, TAP. | stub |
+| `doctor` | Real checks: `/dev/kvm`, Firecracker version, kernel + rootfs validation, TAP setup, nested virt, ANTHROPIC_API_KEY. `--json` for machine-readable output. | shipped |
 
 ```sh
 rooms run --help
