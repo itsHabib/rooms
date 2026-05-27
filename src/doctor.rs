@@ -409,11 +409,7 @@ mod tests {
                 "v1.",
                 "v.not_a_number.2",
             ] {
-                assert_eq!(
-                    parse_firecracker_version(input),
-                    None,
-                    "input: {input:?}"
-                );
+                assert_eq!(parse_firecracker_version(input), None, "input: {input:?}");
             }
         }
     }
