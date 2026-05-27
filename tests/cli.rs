@@ -12,6 +12,7 @@ fn doctor_json_is_valid_json() {
         .unwrap()
         .args(["doctor", "--json"])
         .assert()
+        .code(predicate::in_iter([0_i32, 1_i32]))
         .stdout(predicate::function(|s: &str| {
             serde_json::from_str::<serde_json::Value>(s).is_ok()
         }));
