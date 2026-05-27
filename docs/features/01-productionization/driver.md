@@ -49,12 +49,24 @@ batches:
         pr_number: 8
         merge_commit: 46c96302
         merged_at: 2026-05-25T04:21:00Z
+        followup_pr: 10
+        followup_merge_commit: 7efbb5fc
+        followup_merged_at: 2026-05-26T03:49:24Z
         note: |
           Required a manual three-way merge against PR #7's runner-contract
           changes (both touched lib.rs / main.rs / runner.rs). Took #7's
           runner.rs (EXIT= marker + GuestExecOutcome) as canonical, layered
           harden's net-new modules (config, doctor, error, transport) and
           firecracker.rs/main.rs changes on top.
+
+          Follow-up PR #10 (merge_commit 7efbb5fc, merged 2026-05-26T03:49Z):
+          the three-way merge inadvertently dropped #8's structured
+          `wait_for_ssh(&config) -> Result<(), FirecrackerError>` contract.
+          The regression was Linux-only because the integration test in
+          tests/control_failures.rs is gated on `cfg(unix, feature = "e2e")`,
+          so Windows `make check` stayed green. Surfaced via the cfg(unix)
+          unused-imports clippy error on the next CI run and restored in
+          three squashed commits.
       - task_id: tsk_01KSBE3Z0WDF397EDMMP1N2FWX
         task_slug: runner-contract
         spec_path: docs/features/runner-contract/spec.md
@@ -295,5 +307,7 @@ Or batch-by-batch, operator-paced:
 ## Status (updated by /work-driver as the manifest runs)
 
 **Batch 1: done 2026-05-25** — 4 PRs merged (#6, #7, #8, #9); PR #5 closed as superseded by #6's README structure. 4 review cycles per PR. PR #8 required a manual three-way merge against PR #7's runner-contract restructure (both touched the same files in non-overlapping but intricately tangled regions).
+
+**Follow-up: PR #10 merged 2026-05-26** — CI hotfix that restored #8's structured `wait_for_ssh(&config) -> Result<(), FirecrackerError>` contract dropped during the three-way merge. Regression was Linux-only (the failure-injection tests are `cfg(unix, feature = "e2e")`), so Windows `make check` missed it; surfaced on first CI run after merge.
 
 Batches 2 and 3: pending.
