@@ -238,5 +238,5 @@ If any step fails, do NOT open the PR; fix and re-validate.
 PR shape: one PR, ~135 weighted LOC. "amazing" band.
 
 **Branch:** `m2-1-hardening` (already created).
-**Workdir for `ship.ship`:** `C:\Users\MichaelHabib\pers\rooms\.claude\worktrees\m2-1-hardening`.
+**Workdir for `ship.ship`:** `<repo-root>/.claude/worktrees/m2-1-hardening/`.
 **Spec path for `ship.ship`:** `docs/features/poc-m2-1-hardening-followups/spec.md` (this file, relative to workdir).
