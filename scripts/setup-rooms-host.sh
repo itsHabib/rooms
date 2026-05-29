@@ -18,11 +18,15 @@ NODE_MAJOR="${NODE_MAJOR:-20}"
 IMAGES_DIR="${IMAGES_DIR:-$HOME/rooms/images}"
 ARCH="$(uname -m)"
 
-# Firecracker quickstart kernel + rootfs URLs (x86_64).
-# These are the well-known community images suitable for getting Firecracker
-# to boot once. Production rootfs will be built by scripts/build-rootfs.sh
-# (task #6); these are for POC only.
-QUICKSTART_KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin"
+# Firecracker CI guest kernel (x86_64, uncompressed vmlinux) with virtio-rng
+# built in, so the guest CRNG seeds from the /entropy device with no host-side
+# workaround. Pinned; bump deliberately (CI_VERSION tracks the firecracker
+# release minor, e.g. v1.15.x -> v1.15).
+FC_KERNEL_CI_VERSION="${FC_KERNEL_CI_VERSION:-v1.15}"
+FC_KERNEL_VERSION="${FC_KERNEL_VERSION:-6.1.155}"
+FC_KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_KERNEL_CI_VERSION}/x86_64/vmlinux-${FC_KERNEL_VERSION}"
+# Quickstart bionic rootfs — a throwaway image to boot Firecracker once before
+# building a real agent rootfs with scripts/build-rootfs-alpine.sh.
 QUICKSTART_ROOTFS_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4"
 
 # --- helpers ---
@@ -100,8 +104,11 @@ mkdir -p "$IMAGES_DIR"
 if [[ -f "$IMAGES_DIR/vmlinux.bin" ]]; then
     log "kernel image already present: $IMAGES_DIR/vmlinux.bin"
 else
-    log "downloading quickstart kernel"
-    curl -fSL "$QUICKSTART_KERNEL_URL" -o "$IMAGES_DIR/vmlinux.bin"
+    log "downloading Firecracker CI kernel ${FC_KERNEL_VERSION} (virtio-rng built in)"
+    curl -fSL "$FC_KERNEL_URL" -o "$IMAGES_DIR/vmlinux.bin"
+    if ! file "$IMAGES_DIR/vmlinux.bin" | grep -q 'ELF 64-bit'; then
+        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $IMAGES_DIR/vmlinux.bin"
+    fi
 fi
 
 if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
