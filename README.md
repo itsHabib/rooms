@@ -77,17 +77,22 @@ Specs live at [`docs/features/<slug>/spec.md`](docs/features/). One spec per pro
 
 ### Building the rootfs
 
-The v0 guest image is built on the rooms-host VM with debootstrap (not committed to git):
+The agent guest image is built on the rooms-host VM (not committed to git). The
+current image is **Alpine** (musl/busybox/openrc) with the claude-code native
+binary, paired with a Firecracker-tuned virtio-rng kernel — it boots to sshd in
+~2 s and is ~276 MB:
 
 ```sh
-sudo ./scripts/build-rootfs.sh \
-  --suite noble \
-  --size 4G \
-  --out images/node-dev.ext4 \
+sudo ./scripts/build-rootfs-alpine.sh \
+  --out images/agent-alpine.ext4 \
   --ssh-key ~/.ssh/id_rooms.pub
 ```
 
-See [`scripts/README.md`](scripts/README.md) for prereqs, sha256 verification, and the `--extend` hook. If you have not built locally yet, `scripts/setup-rooms-host.sh` downloads the Firecracker quickstart bionic rootfs as a one-time POC fallback (`~/rooms/images/rootfs.ext4`).
+The agent runs as the unprivileged `rooms` user — `ssh -i ~/.ssh/id_rooms rooms@172.16.0.2`.
+Boot-test with [`scripts/test-rootfs-alpine.sh`](scripts/test-rootfs-alpine.sh).
+The older Ubuntu-noble debootstrap builder ([`scripts/build-rootfs.sh`](scripts/build-rootfs.sh))
+remains available. See [`scripts/README.md`](scripts/README.md) for prereqs, the
+kernel, sha256 verification, and the `--extend` hook.
 
 ## CI
 

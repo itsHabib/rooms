@@ -2,7 +2,33 @@
 
 Host-side helpers for the `rooms` Firecracker substrate.
 
-## Rootfs builder
+## Agent rootfs (Alpine) — current
+
+Build the agent guest image on Alpine (musl/busybox/openrc) with the claude-code native musl binary, paired with a Firecracker-tuned virtio-rng kernel. Boots to sshd in ~2 s; ~276 MB. The script is the source of truth; built images are **not** committed (see `images/.gitignore`).
+
+### Build
+
+```sh
+sudo ./scripts/build-rootfs-alpine.sh \
+  --out images/agent-alpine.ext4 \
+  --ssh-key ~/.ssh/id_rooms.pub
+```
+
+Pinned by default to Alpine `3.21.7` and `claude-code=2.1.148-r1` (override with `--alpine-version` / `--claude-version`). `claude-code` installs from Anthropic's official signed apk repo; the build verifies the signing-key sha256 and **aborts** if `claude --version` doesn't link cleanly against musl. The agent runs as the unprivileged `rooms` user (uid 1000) — claude-code refuses `--dangerously-skip-permissions` as root. There is **no Node** in the base image; `cursor-sdk-runner` adds it via the `--extend` hook.
+
+### Kernel
+
+`scripts/setup-rooms-host.sh` downloads the Firecracker CI kernel `vmlinux-6.1.155` (uncompressed ELF, `CONFIG_HW_RANDOM_VIRTIO=y`) to `~/rooms/images/vmlinux.bin` — the sibling `rooms` boots next to the rootfs. virtio-rng means the guest CRNG seeds from the `/entropy` device with no host-side workaround.
+
+### Smoke test
+
+```sh
+./scripts/test-rootfs-alpine.sh images/agent-alpine.ext4
+```
+
+Boots the image under Firecracker and asserts: key-only `rooms@` SSH, DNS resolves (`getent hosts github.com`), `/dev/hwrng` present, `claude`/`git` work, claude links against musl, TLS to the Anthropic API verifies, password auth refused, and size < 300 MB. Uses the private key matching `--ssh-key` (default `~/.ssh/id_rooms`).
+
+## Rootfs builder (Ubuntu/noble — legacy)
 
 Build the v0 Ubuntu rootfs from scratch (debootstrap). The script is the source of truth; built images are **not** committed (see `images/.gitignore`).
 
