@@ -349,6 +349,15 @@ mod tests {
     }
 
     #[test]
+    fn suffix_attached_to_patch_still_parses_major_minor() {
+        assert_eq!(
+            parse_firecracker_version("Firecracker v1.10.1-dirty"),
+            Some((1, 10))
+        );
+        assert_eq!(parse_firecracker_version("v2.0.5_custom"), Some((2, 0)));
+    }
+
+    #[test]
     fn version_meets_minimum() {
         assert!(version_meets_min(1, 7, (1, 7)));
         assert!(version_meets_min(2, 0, (1, 7)));
