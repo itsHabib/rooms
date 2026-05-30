@@ -113,27 +113,27 @@ async function main() {
 
   const apiKey = process.env.CURSOR_API_KEY;
   if (!apiKey) {
-    fail("api_key", "CURSOR_API_KEY environment variable is not set", undefined, 2);
+    return fail("api_key", "CURSOR_API_KEY environment variable is not set", undefined, 2);
   }
 
   let meta;
   try {
     meta = JSON.parse(readFileSync(`${IN}/meta.json`, "utf8"));
   } catch (err) {
-    fail("input", `failed to read ${IN}/meta.json`, err, 2);
+    return fail("input", `failed to read ${IN}/meta.json`, err, 2);
   }
   let taskMd;
   try {
     taskMd = readFileSync(`${IN}/task.md`, "utf8");
   } catch (err) {
-    fail("input", `failed to read ${IN}/task.md`, err, 2);
+    return fail("input", `failed to read ${IN}/task.md`, err, 2);
   }
 
   let Agent;
   try {
     ({ Agent } = await import("@cursor/sdk"));
   } catch (err) {
-    fail("sdk_load", "failed to load @cursor/sdk", err, 2);
+    return fail("sdk_load", "failed to load @cursor/sdk", err, 2);
   }
 
   let agent;
@@ -148,7 +148,7 @@ async function main() {
       ...(meta.agent_name ? { name: meta.agent_name } : {}),
     });
   } catch (err) {
-    fail("agent_create", "Agent.create failed", err, 2);
+    return fail("agent_create", "Agent.create failed", err, 2);
   }
 
   let run;
@@ -156,7 +156,7 @@ async function main() {
     run = await agent.send(taskMd);
   } catch (err) {
     await dispose(agent);
-    fail("send", "agent.send failed after Agent.create", err, 2);
+    return fail("send", "agent.send failed after Agent.create", err, 2);
   }
 
   // Stream events as they arrive. A stream error doesn't immediately fail: a
@@ -178,9 +178,9 @@ async function main() {
     if (streamErr) {
       // Both the stream and wait() failed; surface both causes so the event
       // line isn't misleadingly attributed to the stream alone.
-      fail("stream", "stream errored without a terminal RunResult", `${streamErr}; wait() also rejected: ${err}`, 2);
+      return fail("stream", "stream errored without a terminal RunResult", `${streamErr}; wait() also rejected: ${err}`, 2);
     }
-    fail("wait", "run.wait() rejected after a clean stream", err, 2);
+    return fail("wait", "run.wait() rejected after a clean stream", err, 2);
   }
 
   await dispose(agent);

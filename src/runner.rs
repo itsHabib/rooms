@@ -244,11 +244,19 @@ pub async fn exec_cursor_in_guest(
         run.ended_at,
         cursor_command_argv(),
     );
-    // Set unconditionally: cursor-runner.js creates events.ndjson + summary.md
-    // (empty if needed) at startup before any early exit, so these never dangle.
-    // This leans on that startup-write invariant — if Node dies before those
-    // writes (e.g. a musl link failure), result.json would point at missing
-    // files. Acceptable for v0: the run has failed regardless.
+    // cursor-runner.js writes events.ndjson + summary.md at startup, but if it
+    // never ran (an image missing the cursor extension, or a crash before those
+    // writes) the unconditional paths below would dangle and `RunnerArtifacts::
+    // load` would reject the otherwise-collectable failed run. Touch placeholders
+    // as a backstop — a no-op when the files exist, so a real error line and
+    // summary survive.
+    run_setup_ssh(
+        guest_ip,
+        key_path,
+        "mkdir -p /workspace/out && touch /workspace/out/events.ndjson /workspace/out/summary.md",
+        "ensure cursor output artifacts exist",
+    )
+    .await?;
     result.summary_path = Some("summary.md".to_owned());
     result.events_path = Some("events.ndjson".to_owned());
     if patch_written {
