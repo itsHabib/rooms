@@ -45,7 +45,7 @@ enum Command {
         /// Path to the task prompt (markdown) for `--runner cursor`.
         #[arg(long, required_if_eq("runner", "cursor"))]
         task: Option<PathBuf>,
-        /// Model id for `--runner cursor` (e.g. "claude-4.5-sonnet").
+        /// Model id for `--runner cursor` (e.g. "composer-2.5").
         #[arg(long, required_if_eq("runner", "cursor"))]
         model: Option<String>,
         /// Base git sha for `--runner cursor`; checked out before the run and
@@ -451,7 +451,7 @@ mod tests {
             "--task",
             "task.md",
             "--model",
-            "claude-4.5-sonnet",
+            "composer-2.5",
             "--base-sha",
             "abc123",
         ])

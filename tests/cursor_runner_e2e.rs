@@ -43,7 +43,7 @@ fn cursor_auth_failure_exits_nonzero() {
         return;
     };
     let base_sha = std::env::var("ROOMS_E2E_BASE_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    let model = std::env::var("ROOMS_E2E_MODEL").unwrap_or_else(|_| "claude-4.5-sonnet".to_owned());
+    let model = std::env::var("ROOMS_E2E_MODEL").unwrap_or_else(|_| "composer-2.5".to_owned());
 
     let mut task = tempfile::NamedTempFile::new().unwrap();
     writeln!(task, "Append a line `# rooms` to README.md.").unwrap();

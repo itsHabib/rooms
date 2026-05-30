@@ -596,13 +596,10 @@ mod tests {
     fn cursor_meta_serializes_base_sha_and_model_id() {
         let meta = CursorMeta {
             base_sha: "abc123".to_owned(),
-            model_id: "claude-4.5-sonnet".to_owned(),
+            model_id: "composer-2.5".to_owned(),
         };
         let json = serde_json::to_string(&meta).unwrap();
-        assert_eq!(
-            json,
-            r#"{"base_sha":"abc123","model_id":"claude-4.5-sonnet"}"#
-        );
+        assert_eq!(json, r#"{"base_sha":"abc123","model_id":"composer-2.5"}"#);
     }
 
     #[tokio::test]
