@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
 use rooms::{
     artifacts, config::RoomsConfig, doctor, error::RoomsError, firecracker, rootfs, runner,
@@ -28,13 +28,33 @@ enum Command {
         #[arg(long)]
         image: PathBuf,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
-        /// Mutually exclusive with `--command`. Suppresses cleanup for debugging.
-        #[arg(long, conflicts_with = "command")]
+        /// Mutually exclusive with the exec paths. Suppresses cleanup for debugging.
+        #[arg(long, conflicts_with_all = ["command", "task"])]
         keep: bool,
         /// Run a single command in the guest via SSH, capture its stdout/stderr on
         /// host stdout/stderr, propagate its exit code, then shut down.
-        #[arg(long, conflicts_with = "keep", value_parser = non_empty_command)]
+        ///
+        /// `conflicts_with task` also makes `--runner cursor --command` invalid:
+        /// `cursor` requires `--task` (below), which `--command` excludes.
+        #[arg(long, conflicts_with_all = ["keep", "task"], value_parser = non_empty_command)]
         command: Option<String>,
+        /// Runner backend. `command` runs `--command` verbatim (default; the POC
+        /// path); `cursor` clones `--repo` and drives the baked cursor-runner.js.
+        #[arg(long, value_enum, default_value = "command")]
+        runner: RunnerKind,
+        /// Git URL cloned into `/workspace/repo` for `--runner cursor`.
+        #[arg(long, required_if_eq("runner", "cursor"))]
+        repo: Option<String>,
+        /// Path to the task prompt (markdown) for `--runner cursor`.
+        #[arg(long, required_if_eq("runner", "cursor"))]
+        task: Option<PathBuf>,
+        /// Model id for `--runner cursor` (e.g. "composer-2.5").
+        #[arg(long, required_if_eq("runner", "cursor"))]
+        model: Option<String>,
+        /// Base git sha for `--runner cursor`; checked out before the run and
+        /// used as the `result.patch` diff base.
+        #[arg(long = "base-sha", required_if_eq("runner", "cursor"))]
+        base_sha: Option<String>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -51,6 +71,36 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Which runner backend drives the guest command.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lowercase")]
+enum RunnerKind {
+    /// Run `--command` verbatim (the POC path).
+    Command,
+    /// Drive the baked cursor-runner.js one-shot.
+    Cursor,
+}
+
+/// Parsed `rooms run` inputs, bundled so the orchestration functions stay under
+/// the argument-count cap.
+struct RunArgs {
+    image: PathBuf,
+    keep: bool,
+    command: Option<String>,
+    runner: RunnerKind,
+    repo: Option<String>,
+    task: Option<PathBuf>,
+    model: Option<String>,
+    base_sha: Option<String>,
+}
+
+/// What to do after the microVM boots: hold it open, exec a runner, or idle.
+enum Action {
+    Keep,
+    Exec(runner::Runner),
+    Idle,
 }
 
 fn non_empty_command(s: &str) -> Result<String, String> {
@@ -87,7 +137,27 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             image,
             keep,
             command,
-        } => run_room(image, keep, command, &config).await,
+            runner,
+            repo,
+            task,
+            model,
+            base_sha,
+        } => {
+            run_room(
+                RunArgs {
+                    image,
+                    keep,
+                    command,
+                    runner,
+                    repo,
+                    task,
+                    model,
+                    base_sha,
+                },
+                &config,
+            )
+            .await
+        }
         Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
     }
@@ -124,21 +194,17 @@ fn run_doctor_cmd(
     Ok(u8::from(!report.all_ok()))
 }
 
-async fn run_room(
-    image: PathBuf,
-    keep: bool,
-    command: Option<String>,
-    config: &RoomsConfig,
-) -> Result<u8, RoomsError> {
-    info!(?image, keep, command = ?command.as_deref(), "rooms run");
+async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
 
-    let kernel = image
+    let kernel = args
+        .image
         .parent()
         .map(|p| p.join("vmlinux.bin"))
         .ok_or_else(|| {
             RoomsError::Internal(format!(
                 "--image has no parent directory: {}",
-                image.display()
+                args.image.display()
             ))
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
@@ -150,14 +216,17 @@ async fn run_room(
         netmask: "255.255.255.0".to_owned(),
     };
     let key = key_path()?;
-    let mut vm = firecracker::boot(&kernel, &image, Some(&network), config).await?;
+    // Resolve the post-boot action before booting so a missing --task file (or
+    // other host-side input error) fails fast without spending a microVM boot.
+    let action = resolve_action(&args).await?;
+    let mut vm = firecracker::boot(&kernel, &args.image, Some(&network), config).await?;
 
-    if keep {
+    if args.keep {
         vm.guard_mut().set_suppress_cleanup(true);
     }
 
-    let outcome = post_boot(&network, &key, keep, command, &mut vm, config).await;
-    if keep {
+    let outcome = post_boot(&network, &key, &action, &mut vm, config).await;
+    if args.keep {
         vm.guard_mut().dismiss();
         // Prevent kill_on_drop from terminating the microVM — operator inspects manually.
         std::mem::forget(vm);
@@ -168,16 +237,56 @@ async fn run_room(
     outcome
 }
 
+/// Translate parsed flags into the post-boot [`Action`], reading the `--task`
+/// file for the cursor path. clap's `required_if_eq` guarantees the cursor
+/// flags are present, so the `ok_or_else` arms are defensive.
+async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
+    if args.keep {
+        return Ok(Action::Keep);
+    }
+    match args.runner {
+        RunnerKind::Cursor => {
+            let task_path = args.task.as_ref().ok_or_else(|| {
+                RoomsError::Internal("--task is required for --runner cursor".to_owned())
+            })?;
+            let task_md = tokio::fs::read_to_string(task_path).await.map_err(|e| {
+                RoomsError::Internal(format!("read --task file {}: {e}", task_path.display()))
+            })?;
+            let repo_url = args.repo.clone().ok_or_else(|| {
+                RoomsError::Internal("--repo is required for --runner cursor".to_owned())
+            })?;
+            let base_sha = args.base_sha.clone().ok_or_else(|| {
+                RoomsError::Internal("--base-sha is required for --runner cursor".to_owned())
+            })?;
+            let model_id = args.model.clone().ok_or_else(|| {
+                RoomsError::Internal("--model is required for --runner cursor".to_owned())
+            })?;
+            Ok(Action::Exec(runner::Runner::Cursor(
+                runner::CursorRequest {
+                    repo_url,
+                    task_md,
+                    meta: runner::CursorMeta { base_sha, model_id },
+                },
+            )))
+        }
+        RunnerKind::Command => {
+            let action = args.command.clone().map_or(Action::Idle, |command| {
+                Action::Exec(runner::Runner::Command(command))
+            });
+            Ok(action)
+        }
+    }
+}
+
 async fn post_boot(
     network: &firecracker::NetworkConfig,
     key: &Path,
-    keep: bool,
-    command: Option<String>,
+    action: &Action,
     vm: &mut firecracker::BootedVm,
     config: &RoomsConfig,
 ) -> Result<u8, RoomsError> {
-    match (keep, command) {
-        (true, _) => {
+    match action {
+        Action::Keep => {
             info!(
                 guest_ip = %network.guest_ip,
                 "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
@@ -188,31 +297,25 @@ async fn post_boot(
                 .map_err(|e| RoomsError::Internal(e.to_string()))?;
             Ok(0)
         }
-        (false, Some(cmd)) => {
+        Action::Exec(run) => {
             let guest_ip = network.guest_ip.clone();
-            let cmd_for_cancel = cmd.clone();
-            // Wrap the entire setup-and-exec sequence (probe sshd, seed CRNG,
-            // exec) in one tokio::select! vs ctrl_c. Dropping `work` cascades
-            // through each child future — kill_on_drop fires on every spawned
-            // ssh client — so a Ctrl-C at any point still lets run_room's
-            // vm.shutdown() run cleanly.
+            // Wrap the entire setup-and-exec sequence (probe sshd, then exec) in
+            // one tokio::select! vs ctrl_c. Dropping `work` cascades through each
+            // child future — kill_on_drop fires on every spawned ssh client — so
+            // a Ctrl-C at any point still lets run_room's vm.shutdown() run cleanly.
             let work = async {
                 runner::wait_for_ssh(&network.guest_ip, key, config)
                     .await
                     .map_err(RoomsError::Firecracker)?;
-                runner::seed_entropy(&network.guest_ip, key)
-                    .await
-                    .map_err(|e| RoomsError::Internal(e.to_string()))?;
-                let outcome = runner::exec_in_guest(&network.guest_ip, key, &cmd)
+                let outcome = runner::exec(&network.guest_ip, key, run)
                     .await
                     .map_err(|e| RoomsError::Internal(e.to_string()))?;
                 Ok::<u8, RoomsError>(u8::try_from(outcome.exit_code).unwrap_or(2))
             };
             // started_at captures when rooms began attempting exec (SSH probe,
-            // entropy seed, then user command). Exec writes its own started_at
-            // into result.json on the success path; this outer one only
-            // surfaces in the cancel branch below, where the user command may
-            // never have begun.
+            // then runner). Exec writes its own started_at into result.json on
+            // the success path; this outer one only surfaces in the cancel
+            // branch below, where the guest command may never have begun.
             let started_at = Utc::now();
             tokio::pin!(work);
             tokio::select! {
@@ -230,7 +333,7 @@ async fn post_boot(
                         RunStatus::Cancelled,
                         started_at,
                         Utc::now(),
-                        vec!["sh".to_owned(), "-c".to_owned(), cmd_for_cancel],
+                        run.command_argv(),
                     );
                     if let Err(err) = runner::write_guest_result_json(&guest_ip, key, &result).await {
                         warn!(error = %err, "failed to write cancelled result.json");
@@ -239,7 +342,7 @@ async fn post_boot(
                 }
             }
         }
-        (false, None) => {
+        Action::Idle => {
             tokio::time::sleep(Duration::from_secs(3)).await;
             if vm.is_alive().map_err(RoomsError::Firecracker)? {
                 info!("microVM is up; shutting down (POC: no exec yet)");
@@ -288,7 +391,7 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::Cli;
+    use super::{Cli, Command, RunnerKind};
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -311,6 +414,64 @@ mod tests {
         assert!(
             err.to_string().contains("--keep") && err.to_string().contains("--command"),
             "expected error to name both flags; got: {err}"
+        );
+    }
+
+    #[test]
+    fn runner_defaults_to_command() {
+        let cli = Cli::try_parse_from(["rooms", "run", "--image", "x", "--command", "echo hi"])
+            .expect("default command runner should parse");
+        match cli.command {
+            Command::Run { runner, .. } => assert_eq!(runner, RunnerKind::Command),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_requires_repo_task_model_base_sha() {
+        let err = Cli::try_parse_from(["rooms", "run", "--image", "x", "--runner", "cursor"])
+            .expect_err("--runner cursor without its required flags should fail");
+        let msg = err.to_string();
+        assert!(
+            ["--repo", "--task", "--model", "--base-sha"]
+                .iter()
+                .any(|flag| msg.contains(flag)),
+            "expected a required cursor flag in the error; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cursor_parses_with_all_required_flags() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--runner",
+            "cursor",
+            "--repo",
+            "https://example.test/r.git",
+            "--task",
+            "task.md",
+            "--model",
+            "composer-2.5",
+            "--base-sha",
+            "abc123",
+        ])
+        .expect("full cursor invocation should parse");
+        match cli.command {
+            Command::Run { runner, .. } => assert_eq!(runner, RunnerKind::Cursor),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keep_conflicts_with_cursor_task() {
+        let err = Cli::try_parse_from(["rooms", "run", "--image", "x", "--keep", "--task", "t.md"])
+            .expect_err("--keep + --task should conflict");
+        assert!(
+            err.to_string().contains("--keep"),
+            "expected error to name --keep; got: {err}"
         );
     }
 }

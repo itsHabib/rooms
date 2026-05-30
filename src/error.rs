@@ -100,8 +100,6 @@ pub enum RunnerError {
     GuestUnreachable { reason: String },
     #[error("ssh probe failed: {0}")]
     SshProbe(String),
-    #[error("entropy seed failed: {0}")]
-    EntropySeed(String),
     #[error("exec failed: {0}")]
     Exec(String),
     #[error("key path not utf-8")]
