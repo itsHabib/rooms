@@ -33,6 +33,9 @@ enum Command {
         keep: bool,
         /// Run a single command in the guest via SSH, capture its stdout/stderr on
         /// host stdout/stderr, propagate its exit code, then shut down.
+        ///
+        /// `conflicts_with task` also makes `--runner cursor --command` invalid:
+        /// `cursor` requires `--task` (below), which `--command` excludes.
         #[arg(long, conflicts_with_all = ["keep", "task"], value_parser = non_empty_command)]
         command: Option<String>,
         /// Runner backend. `command` runs `--command` verbatim (default; the POC

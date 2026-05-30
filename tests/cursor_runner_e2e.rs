@@ -67,5 +67,8 @@ fn cursor_auth_failure_exits_nonzero() {
             &base_sha,
         ])
         .assert()
-        .failure();
+        // Exit 2 specifically: cursor-runner.js takes the api_key error path
+        // (exit 2) and the substrate propagates it. Asserting the exact code
+        // (not just non-zero) keeps the test from passing on an unrelated failure.
+        .code(2);
 }

@@ -176,7 +176,9 @@ async function main() {
   } catch (err) {
     await dispose(agent);
     if (streamErr) {
-      fail("stream", "stream errored without a terminal RunResult", streamErr, 2);
+      // Both the stream and wait() failed; surface both causes so the event
+      // line isn't misleadingly attributed to the stream alone.
+      fail("stream", "stream errored without a terminal RunResult", `${streamErr}; wait() also rejected: ${err}`, 2);
     }
     fail("wait", "run.wait() rejected after a clean stream", err, 2);
   }

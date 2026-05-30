@@ -244,6 +244,11 @@ pub async fn exec_cursor_in_guest(
         run.ended_at,
         cursor_command_argv(),
     );
+    // Set unconditionally: cursor-runner.js creates events.ndjson + summary.md
+    // (empty if needed) at startup before any early exit, so these never dangle.
+    // This leans on that startup-write invariant — if Node dies before those
+    // writes (e.g. a musl link failure), result.json would point at missing
+    // files. Acceptable for v0: the run has failed regardless.
     result.summary_path = Some("summary.md".to_owned());
     result.events_path = Some("events.ndjson".to_owned());
     if patch_written {
