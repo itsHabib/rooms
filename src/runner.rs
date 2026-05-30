@@ -9,14 +9,64 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::sleep;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::artifacts::{ResultJson, RunStatus};
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
+
+/// Guest SSH login user. The agent rootfs accepts key-only login only for the
+/// unprivileged `rooms` user (uid 1000); `PermitRootLogin no`.
+const GUEST_USER: &str = "rooms";
+
+/// Absolute path of the baked cursor runner script inside the guest image.
+const CURSOR_RUNNER_JS: &str = "/opt/rooms/cursor-runner/cursor-runner.js";
+
+/// Which runner drives the guest. The substrate stays agent-agnostic — it only
+/// selects the guest-side command shape and, for cursor, clones the repo and
+/// stages the input dir first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Runner {
+    /// Run the operator's literal command (the existing `--command` path).
+    Command(String),
+    /// Drive the baked `cursor-runner.js` one-shot against `/workspace/repo`.
+    Cursor(CursorRequest),
+}
+
+impl Runner {
+    /// The argv recorded in `result.json`'s `command` field.
+    pub fn command_argv(&self) -> Vec<String> {
+        match self {
+            Self::Command(command) => guest_command_argv(command),
+            Self::Cursor(_) => cursor_command_argv(),
+        }
+    }
+}
+
+/// Inputs for a [`Runner::Cursor`] run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorRequest {
+    /// Git URL cloned into `/workspace/repo` in the guest.
+    pub repo_url: String,
+    /// Prompt sent to the agent (contents of the `--task` file).
+    pub task_md: String,
+    /// Metadata staged at `/workspace/in/meta.json`.
+    pub meta: CursorMeta,
+}
+
+/// `/workspace/in/meta.json` payload consumed by `cursor-runner.js`.
+///
+/// The spec's optional `model_params` / `agent_name` are deferred; v0 wires only
+/// the base sha and model id. `cursor-runner.js` reads those two fields and
+/// treats any others as absent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CursorMeta {
+    pub base_sha: String,
+    pub model_id: String,
+}
 
 /// Probe the guest's sshd until it accepts a pubkey connection, or the
 /// configured timeout elapses.
@@ -62,7 +112,7 @@ pub async fn wait_for_ssh(
                 "UserKnownHostsFile=/dev/null",
                 "-o",
                 "LogLevel=ERROR",
-                &format!("root@{guest_ip}"),
+                &format!("{GUEST_USER}@{guest_ip}"),
                 "true",
             ])
             .stdin(Stdio::null())
@@ -83,111 +133,6 @@ pub async fn wait_for_ssh(
     }
 }
 
-/// Seed 512 bytes of host entropy into the guest's kernel CRNG via
-/// `RNDADDENTROPY` on `/dev/random`.
-///
-/// The bundled bionic kernel has no `virtio-rng` driver and ignores
-/// `random.trust_cpu` (added in 4.19), so the guest's CRNG never initializes
-/// from any internal source. `getrandom()` blocks indefinitely and every TLS
-/// handshake hangs silently after TCP connect. Without this seed, `rooms run
-/// --command 'curl https://...'` cannot reach any HTTPS endpoint.
-///
-/// Implementation: read 512 bytes from the host's `/dev/urandom` (the host's
-/// CRNG has plenty of entropy), pipe through SSH stdin to a python one-liner
-/// that builds a `rand_pool_info` and calls the `RNDADDENTROPY` ioctl. 512
-/// bytes credits 4096 bits — well past the 384 bits the kernel needs to
-/// transition `crng_init` from `unseeded` to `ready`. Empirically lifts
-/// `entropy_avail` from ~30 to ~2200.
-///
-/// 512 (not 1024) because Python's `fcntl.ioctl` default `buf` size cap is
-/// 1024 bytes; the ioctl struct adds 8 bytes of header (`entropy_count` +
-/// `buf_size`), so 1024 of payload overshoots and `ioctl` raises `ValueError:
-/// ioctl string arg too long`. 512 + 8 = 520 stays safely under.
-///
-/// Goes away when the productionization rootfs builder ships a kernel with
-/// `CONFIG_HW_RANDOM_VIRTIO=y` and our `/entropy` device attaches as
-/// `/dev/hwrng`.
-pub async fn seed_entropy(guest_ip: &str, key_path: &Path) -> Result<()> {
-    let key = key_path.to_str().context("key path not utf-8")?;
-    let mut host_random = tokio::fs::File::open("/dev/urandom")
-        .await
-        .context("open /dev/urandom on host (every Linux has this)")?;
-    let mut seed = vec![0_u8; 512];
-    host_random
-        .read_exact(&mut seed)
-        .await
-        .context("read 512 bytes from host /dev/urandom")?;
-    drop(host_random);
-
-    // The ioctl number 0x40085203 is RNDADDENTROPY on x86_64. The struct
-    // packed below is `struct rand_pool_info { int entropy_count; int
-    // buf_size; __u32 buf[]; }` from include/uapi/linux/random.h, credit
-    // = len*8 bits, size = len bytes, payload = the 512 stdin bytes.
-    //
-    // `getattr(sys.stdin, "buffer", sys.stdin).read()` reads bytes on both
-    // py2 and py3: on py2 the `buffer` attr doesn't exist so the fallback
-    // returns `sys.stdin` itself (whose `.read()` is bytes), on py3 the
-    // `buffer` attr is the binary stream backing the text wrapper. Without
-    // this, a py3 invocation would decode stdin as text and `struct.pack`
-    // would type-error. Today's bionic rootfs only has py2, but this keeps
-    // the workaround forward-compatible until rootfs-builder retires it.
-    let mut child = Command::new("ssh")
-        .args([
-            "-i",
-            key,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("root@{guest_ip}"),
-            "--",
-            "python -c 'import sys, struct, fcntl\n\
-             data = getattr(sys.stdin, \"buffer\", sys.stdin).read()\n\
-             buf = struct.pack(\"ii%ds\" % len(data), len(data)*8, len(data), data)\n\
-             fcntl.ioctl(open(\"/dev/random\", \"wb\"), 0x40085203, buf)'",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("spawn ssh for entropy seed")?;
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .context("entropy-seed ssh has no stdin (unexpected)")?;
-    stdin
-        .write_all(&seed)
-        .await
-        .context("write seed bytes to ssh stdin")?;
-    stdin
-        .shutdown()
-        .await
-        .context("close ssh stdin after seed")?;
-    drop(stdin);
-
-    let output = child
-        .wait_with_output()
-        .await
-        .context("wait on entropy-seed ssh")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "entropy seed via SSH failed (exit {}): {stderr}",
-            output.status
-        );
-    }
-    info!(guest_ip, "seeded 512 bytes of host entropy into guest CRNG");
-    Ok(())
-}
-
 /// Outcome of a guest command exec, including artifact metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestExecOutcome {
@@ -197,7 +142,20 @@ pub struct GuestExecOutcome {
     pub ended_at: DateTime<Utc>,
 }
 
-/// Exec `command` in the guest as root via SSH.
+/// Drive `runner` in the guest, writing `result.json` per the runner contract.
+///
+/// The substrate stays agent-agnostic: it dispatches to the literal-command
+/// path or the cursor path, both of which route their guest command through the
+/// same `EXIT=` wrapper so exit-code capture and `result.json` ownership are
+/// identical.
+pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<GuestExecOutcome> {
+    match runner {
+        Runner::Command(command) => exec_in_guest(guest_ip, key_path, command).await,
+        Runner::Cursor(request) => exec_cursor_in_guest(guest_ip, key_path, request).await,
+    }
+}
+
+/// Exec `command` in the guest as the `rooms` user via SSH.
 ///
 /// Captures stdout/stderr under `/workspace/out/logs/` and writes
 /// `/workspace/out/result.json` per the runner contract. Guest output is not
@@ -213,26 +171,116 @@ pub struct GuestExecOutcome {
 /// wrapper could emit its trailer — network, auth, sshd not listening — and
 /// the caller should treat it as a substrate-level transport failure.
 ///
-/// Forwards `ANTHROPIC_API_KEY` from the host process env via SSH's `SendEnv`
-/// option. The matching `AcceptEnv ANTHROPIC_API_KEY` lives in the rootfs's
-/// `/etc/ssh/sshd_config`, baked by `scripts/bake-rootfs-ssh.sh`.
+/// Forwards `ANTHROPIC_API_KEY` and `CURSOR_API_KEY` from the host process env
+/// via SSH's `SendEnv` option; the matching `AcceptEnv` lines live in the
+/// guest's `/etc/ssh/sshd_config`.
 pub async fn exec_in_guest(
     guest_ip: &str,
     key_path: &Path,
     command: &str,
 ) -> Result<GuestExecOutcome> {
+    let run = run_wrapped(guest_ip, key_path, command).await?;
+    let status = ResultJson::status_from_exit_code(run.exit_code);
+    let result = ResultJson::from_exec(
+        run.exit_code,
+        status,
+        run.started_at,
+        run.ended_at,
+        guest_command_argv(command),
+    );
+    write_guest_result_json(guest_ip, key_path, &result).await?;
+
+    Ok(GuestExecOutcome {
+        exit_code: run.exit_code,
+        status,
+        started_at: run.started_at,
+        ended_at: run.ended_at,
+    })
+}
+
+/// Clone the repo, stage the task + meta, then drive `cursor-runner.js` against
+/// `/workspace/repo`, returning its outcome.
+///
+/// `result.json` is written by the substrate (this function) from the runner's
+/// exit code, with the cursor artifact paths set: `cursor-runner.js` always
+/// creates `events.ndjson` and `summary.md` — even an auth failure leaves a
+/// structured error line plus an empty summary — so those references never
+/// dangle. `result.patch` is generated here from `git diff` after the run.
+pub async fn exec_cursor_in_guest(
+    guest_ip: &str,
+    key_path: &Path,
+    request: &CursorRequest,
+) -> Result<GuestExecOutcome> {
+    clone_repo_in_guest(
+        guest_ip,
+        key_path,
+        &request.repo_url,
+        &request.meta.base_sha,
+    )
+    .await?;
+    stage_cursor_input(guest_ip, key_path, &request.task_md, &request.meta).await?;
+
+    let run = run_wrapped(
+        guest_ip,
+        key_path,
+        &format!("node {CURSOR_RUNNER_JS} < /dev/null"),
+    )
+    .await?;
+
+    let patch_written =
+        match generate_result_patch(guest_ip, key_path, &request.meta.base_sha).await {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(error = %err, "failed to generate result.patch; omitting patch_path");
+                false
+            }
+        };
+
+    let status = ResultJson::status_from_exit_code(run.exit_code);
+    let mut result = ResultJson::from_exec(
+        run.exit_code,
+        status,
+        run.started_at,
+        run.ended_at,
+        cursor_command_argv(),
+    );
+    result.summary_path = Some("summary.md".to_owned());
+    result.events_path = Some("events.ndjson".to_owned());
+    if patch_written {
+        result.patch_path = Some("result.patch".to_owned());
+    }
+    write_guest_result_json(guest_ip, key_path, &result).await?;
+
+    Ok(GuestExecOutcome {
+        exit_code: run.exit_code,
+        status,
+        started_at: run.started_at,
+        ended_at: run.ended_at,
+    })
+}
+
+/// Parsed result of a wrapped guest command: the exit code and the timing the
+/// substrate stamps into `result.json`.
+struct WrappedRun {
+    exit_code: i32,
+    started_at: DateTime<Utc>,
+    ended_at: DateTime<Utc>,
+}
+
+/// Run `inner` (a single shell command) through the guest wrapper that captures
+/// stdout/stderr under `/workspace/out/logs/` and prints an `EXIT=<n>` trailer.
+///
+/// `inner` runs through `bash -c <quoted>` rather than being inlined into the
+/// wrapper string. Inlining was vulnerable to shell-meta injection: a `#` in the
+/// command would comment out the wrapper's `EXIT=` trailer on the same line,
+/// breaking the marker contract. Single-quoting around the command (with the
+/// standard `'\''` escape for embedded singles) makes the whole input a single
+/// argument to `bash -c`, so no syntax in it can reach the outer wrapper.
+/// `bash -c` also gives subshell isolation, so a user `exit 42` aborts only the
+/// inner bash and the wrapper's `echo EXIT=$?` still prints.
+async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<WrappedRun> {
     let started_at = Utc::now();
-    // Run the user command through `bash -c <quoted>` instead of inlining
-    // it into the wrapper string. Inlining was vulnerable to shell-meta
-    // injection: `--command 'echo hi # note'` would comment out the
-    // wrapper's closing `)` and EXIT= trailer on the same line, breaking
-    // the marker contract. Single-quoting around the command (with
-    // standard `'\''` escaping for embedded singles) makes the whole
-    // user input a single argument to bash -c, so no syntax in it can
-    // reach the outer wrapper. `bash -c` also gives us subshell
-    // isolation, so a user `exit 42` aborts only the inner bash and the
-    // wrapper's `echo EXIT=$?` still prints.
-    let quoted_command = shell_single_quote(command);
+    let quoted_command = shell_single_quote(inner);
     let remote = format!(
         "mkdir -p /workspace/out/logs && \
          bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
@@ -248,12 +296,11 @@ pub async fn exec_in_guest(
         .context("failed to spawn ssh; is openssh-client installed?")?;
 
     let ended_at = Utc::now();
-    // Decide failure mode by looking for the EXIT= marker. If we see it,
-    // SSH ran the wrapper to completion and the user command's exit code
-    // is in `output.stdout` — even if SSH itself returned non-zero (which
-    // it does when, e.g., the user's last command exits non-zero and bash
-    // surfaces that). If we don't see it, the wrapper never ran and this
-    // is genuine SSH-transport failure.
+    // Decide failure mode by looking for the EXIT= marker. If we see it, SSH ran
+    // the wrapper to completion and the exit code is in `output.stdout` — even
+    // if SSH itself returned non-zero (which it does when the inner command
+    // exits non-zero and bash surfaces that). If we don't see it, the wrapper
+    // never ran and this is genuine SSH-transport failure.
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     if !stdout_str.lines().any(|l| l.starts_with("EXIT=")) {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -264,22 +311,71 @@ pub async fn exec_in_guest(
     }
 
     let exit_code = parse_remote_exit_code(&output.stdout)?;
-    let status = ResultJson::status_from_exit_code(exit_code);
-    let result = ResultJson::from_exec(
+    Ok(WrappedRun {
         exit_code,
-        status,
-        started_at,
-        ended_at,
-        guest_command_argv(command),
-    );
-    write_guest_result_json(guest_ip, key_path, &result).await?;
-
-    Ok(GuestExecOutcome {
-        exit_code,
-        status,
         started_at,
         ended_at,
     })
+}
+
+/// Clone `repo_url` into `/workspace/repo` and check out `base_sha`.
+///
+/// A hard error: the cursor runner can't run without a populated repo. The URL
+/// and sha are single-quoted into the remote shell so neither can inject.
+async fn clone_repo_in_guest(
+    guest_ip: &str,
+    key_path: &Path,
+    repo_url: &str,
+    base_sha: &str,
+) -> Result<()> {
+    let url = shell_single_quote(repo_url);
+    let sha = shell_single_quote(base_sha);
+    let remote = format!(
+        "rm -rf /workspace/repo && git clone {url} /workspace/repo && \
+         git -C /workspace/repo checkout {sha}"
+    );
+    run_setup_ssh(guest_ip, key_path, &remote, "clone repo in guest").await
+}
+
+/// Write `task.md` and `meta.json` into `/workspace/in/` for `cursor-runner.js`.
+async fn stage_cursor_input(
+    guest_ip: &str,
+    key_path: &Path,
+    task_md: &str,
+    meta: &CursorMeta,
+) -> Result<()> {
+    write_guest_file(
+        guest_ip,
+        key_path,
+        "/workspace/in",
+        "task.md",
+        task_md.as_bytes(),
+    )
+    .await?;
+    let meta_json = serde_json::to_string_pretty(meta).context("serialize meta.json")?;
+    write_guest_file(
+        guest_ip,
+        key_path,
+        "/workspace/in",
+        "meta.json",
+        meta_json.as_bytes(),
+    )
+    .await
+}
+
+/// Generate `/workspace/out/result.patch` from `git diff` against `base_sha`,
+/// capturing both committed and working-tree changes the agent made.
+///
+/// Best effort: a git error still leaves an (empty) patch file via the `>`
+/// redirect, but a transport failure propagates so the caller can omit
+/// `patch_path` rather than reference a missing file.
+async fn generate_result_patch(guest_ip: &str, key_path: &Path, base_sha: &str) -> Result<()> {
+    let sha = shell_single_quote(base_sha);
+    let remote = format!(
+        "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
+         git diff --cached {sha} > /workspace/out/result.patch 2>/dev/null || true"
+    );
+    run_setup_ssh(guest_ip, key_path, &remote, "generate result.patch").await
 }
 
 /// Ensure the guest artifact dir + empty log files exist.
@@ -293,22 +389,13 @@ pub async fn ensure_guest_artifact_skeleton(guest_ip: &str, key_path: &Path) -> 
     let remote = "mkdir -p /workspace/out/logs \
          && : > /workspace/out/logs/stdout.log \
          && : > /workspace/out/logs/stderr.log";
-    let output = ssh_command(guest_ip, key_path, remote)?
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .context("failed to spawn ssh; is openssh-client installed?")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "creating cancelled-run artifact skeleton failed (exit {}): {stderr}",
-            output.status
-        );
-    }
-    Ok(())
+    run_setup_ssh(
+        guest_ip,
+        key_path,
+        remote,
+        "create cancelled-run artifact skeleton",
+    )
+    .await
 }
 
 /// Write `result.json` into the guest artifact directory.
@@ -318,48 +405,91 @@ pub async fn write_guest_result_json(
     result: &ResultJson,
 ) -> Result<()> {
     let json = serde_json::to_string_pretty(result).context("serialize result.json")?;
-    let mut child = ssh_command(
+    write_guest_file(
         guest_ip,
         key_path,
-        "mkdir -p /workspace/out && cat > /workspace/out/result.json",
-    )?
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .kill_on_drop(true)
-    .spawn()
-    .context("spawn ssh to write result.json")?;
+        "/workspace/out",
+        "result.json",
+        json.as_bytes(),
+    )
+    .await
+}
+
+/// Pipe `contents` into `{dir}/{name}` in the guest via SSH stdin, creating
+/// `dir` first.
+///
+/// `dir` and `name` are fixed substrate constants (never operator input), so no
+/// shell-quoting is required for them.
+async fn write_guest_file(
+    guest_ip: &str,
+    key_path: &Path,
+    dir: &str,
+    name: &str,
+    contents: &[u8],
+) -> Result<()> {
+    let remote = format!("mkdir -p {dir} && cat > {dir}/{name}");
+    let mut child = ssh_command(guest_ip, key_path, &remote)?
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("spawn ssh to write {name}"))?;
 
     let mut stdin = child
         .stdin
         .take()
-        .context("result.json ssh has no stdin (unexpected)")?;
+        .with_context(|| format!("{name} ssh has no stdin (unexpected)"))?;
     stdin
-        .write_all(json.as_bytes())
+        .write_all(contents)
         .await
-        .context("write result.json to ssh stdin")?;
+        .with_context(|| format!("write {name} to ssh stdin"))?;
     stdin
         .shutdown()
         .await
-        .context("close ssh stdin after result.json")?;
+        .with_context(|| format!("close ssh stdin after {name}"))?;
     drop(stdin);
 
     let output = child
         .wait_with_output()
         .await
-        .context("wait on result.json ssh")?;
+        .with_context(|| format!("wait on {name} ssh"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "write result.json via SSH failed (exit {}): {stderr}",
+            "write {name} via SSH failed (exit {}): {stderr}",
             output.status
         );
     }
     Ok(())
 }
 
+/// Run a setup command in the guest that must succeed (clone, mkdir, etc.).
+///
+/// Unlike [`run_wrapped`], there is no `EXIT=` marker contract: failure is a
+/// hard error surfaced to the caller, with the guest stderr attached.
+async fn run_setup_ssh(guest_ip: &str, key_path: &Path, remote: &str, what: &str) -> Result<()> {
+    let output = ssh_command(guest_ip, key_path, remote)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn ssh for {what}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{what} failed (exit {}): {stderr}", output.status);
+    }
+    Ok(())
+}
+
 fn guest_command_argv(command: &str) -> Vec<String> {
     vec!["sh".to_owned(), "-c".to_owned(), command.to_owned()]
+}
+
+fn cursor_command_argv() -> Vec<String> {
+    vec!["node".to_owned(), CURSOR_RUNNER_JS.to_owned()]
 }
 
 /// Wrap `s` in single quotes for safe inclusion as a bash argument.
@@ -415,7 +545,9 @@ fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command>
         "LogLevel=ERROR",
         "-o",
         "SendEnv=ANTHROPIC_API_KEY",
-        &format!("root@{guest_ip}"),
+        "-o",
+        "SendEnv=CURSOR_API_KEY",
+        &format!("{GUEST_USER}@{guest_ip}"),
         "--",
         remote,
     ]);
@@ -433,7 +565,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{shell_single_quote, wait_for_ssh};
+    use super::{cursor_command_argv, shell_single_quote, wait_for_ssh, CursorMeta};
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
 
@@ -447,6 +579,30 @@ mod tests {
         assert_eq!(shell_single_quote("echo 'hello'"), r"'echo '\''hello'\'''");
         // Closing-paren can't escape the wrapper either.
         assert_eq!(shell_single_quote("echo ) rm -rf /"), "'echo ) rm -rf /'");
+    }
+
+    #[test]
+    fn cursor_command_argv_points_at_baked_script() {
+        assert_eq!(
+            cursor_command_argv(),
+            vec![
+                "node".to_owned(),
+                "/opt/rooms/cursor-runner/cursor-runner.js".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_meta_serializes_base_sha_and_model_id() {
+        let meta = CursorMeta {
+            base_sha: "abc123".to_owned(),
+            model_id: "claude-4.5-sonnet".to_owned(),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert_eq!(
+            json,
+            r#"{"base_sha":"abc123","model_id":"claude-4.5-sonnet"}"#
+        );
     }
 
     #[tokio::test]
