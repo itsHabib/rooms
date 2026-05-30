@@ -10,6 +10,9 @@
 # Requires: firecracker, curl, jq, ssh, ip, a sibling vmlinux.bin, tap-fc0
 # (scripts/setup-tap.sh), and the private key matching the pubkey baked at build.
 #
+# Note: boots the rootfs read-write, so guest boot writes (openrc, /run) persist
+# to the image after the test — fine for a one-shot test on a freshly built image.
+#
 # Usage:
 #   ./scripts/test-rootfs-alpine.sh [rootfs-path]
 #   SSH_KEY=~/.ssh/id_rooms ./scripts/test-rootfs-alpine.sh images/agent-alpine.ext4

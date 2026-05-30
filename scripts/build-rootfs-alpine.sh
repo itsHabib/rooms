@@ -178,7 +178,7 @@ iface lo inet loopback
 EOF
 
 printf 'rooms-agent\n' >"$MNT/etc/hostname"
-printf 'rc_parallel="YES"\n' >>"$MNT/etc/rc.conf"
+grep -q '^rc_parallel=' "$MNT/etc/rc.conf" || printf 'rc_parallel="YES"\n' >>"$MNT/etc/rc.conf"
 
 log "hardening sshd (key-only, no root login, env passthrough)"
 SSHD="$MNT/etc/ssh/sshd_config"

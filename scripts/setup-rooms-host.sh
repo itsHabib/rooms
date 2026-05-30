@@ -76,7 +76,7 @@ fi
 log "installing baseline apt packages"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
-    curl ca-certificates gnupg jq \
+    curl ca-certificates gnupg jq file \
     git build-essential pkg-config libssl-dev \
     iproute2 iputils-ping bridge-utils \
     e2fsprogs
@@ -88,12 +88,12 @@ if command -v firecracker >/dev/null 2>&1; then
 else
     log "installing Firecracker $FIRECRACKER_VERSION"
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' RETURN
     url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
     curl -fSL "$url" -o "$tmp/fc.tgz"
     tar -C "$tmp" -xzf "$tmp/fc.tgz"
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/firecracker
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/jailer-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/jailer
+    rm -rf "$tmp"
     log "Firecracker installed: $(firecracker --version)"
 fi
 
@@ -101,20 +101,25 @@ fi
 
 mkdir -p "$IMAGES_DIR"
 
-if [[ -f "$IMAGES_DIR/vmlinux.bin" ]]; then
-    log "kernel image already present: $IMAGES_DIR/vmlinux.bin"
+KERNEL_FILE="$IMAGES_DIR/vmlinux-${FC_KERNEL_VERSION}.bin"
+if [[ -f "$KERNEL_FILE" ]]; then
+    log "kernel image already present: $KERNEL_FILE"
 else
     log "downloading Firecracker CI kernel ${FC_KERNEL_VERSION} (virtio-rng built in)"
-    curl -fSL "$FC_KERNEL_URL" -o "$IMAGES_DIR/vmlinux.bin"
-    if ! file "$IMAGES_DIR/vmlinux.bin" | grep -q 'ELF 64-bit'; then
-        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $IMAGES_DIR/vmlinux.bin"
+    curl -fSL "$FC_KERNEL_URL" -o "$KERNEL_FILE"
+    if ! file "$KERNEL_FILE" | grep -q 'ELF 64-bit'; then
+        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $KERNEL_FILE"
     fi
 fi
+# vmlinux.bin is the sibling rooms boots next to the rootfs. Always point it at
+# the pinned kernel so a host that still has the old bionic vmlinux.bin picks up
+# the virtio-rng kernel instead of silently keeping the stale one.
+cp -f "$KERNEL_FILE" "$IMAGES_DIR/vmlinux.bin"
 
 if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
     log "rootfs image already present: $IMAGES_DIR/rootfs.ext4"
 else
-    log "downloading quickstart rootfs (this is the throwaway POC image; task #6 replaces it)"
+    log "downloading quickstart rootfs (throwaway POC image; build-rootfs-alpine.sh replaces it)"
     curl -fSL "$QUICKSTART_ROOTFS_URL" -o "$IMAGES_DIR/rootfs.ext4"
 fi
 
@@ -177,6 +182,6 @@ log "  claude:      $(command -v claude >/dev/null && echo present || echo MISSI
 log ""
 log "next:"
 log "  1. cd ~/rooms && make check         (sanity-check the toolchain)"
-log "  2. start writing the Firecracker boot code in src/firecracker.rs"
-log "  3. POC target: rooms run --repo <path> --task <task.md> → microVM + patch out"
+log "  2. build the agent image: sudo ./scripts/build-rootfs-alpine.sh --out images/agent-alpine.ext4 --ssh-key ~/.ssh/id_rooms.pub"
+log "  3. smoke test: ./scripts/test-rootfs-alpine.sh images/agent-alpine.ext4"
 log ""
