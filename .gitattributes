@@ -1,0 +1,4 @@
+# Shell scripts run on the Linux rooms-host and inside guest microVMs. Force LF
+# on every platform so a Windows checkout (core.autocrlf=true) can't introduce
+# CRLF that breaks the `#!/usr/bin/env bash` interpreter line or chroot heredocs.
+*.sh text eol=lf

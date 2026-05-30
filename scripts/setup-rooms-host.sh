@@ -18,11 +18,15 @@ NODE_MAJOR="${NODE_MAJOR:-20}"
 IMAGES_DIR="${IMAGES_DIR:-$HOME/rooms/images}"
 ARCH="$(uname -m)"
 
-# Firecracker quickstart kernel + rootfs URLs (x86_64).
-# These are the well-known community images suitable for getting Firecracker
-# to boot once. Production rootfs will be built by scripts/build-rootfs.sh
-# (task #6); these are for POC only.
-QUICKSTART_KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin"
+# Firecracker CI guest kernel (x86_64, uncompressed vmlinux) with virtio-rng
+# built in, so the guest CRNG seeds from the /entropy device with no host-side
+# workaround. Pinned; bump deliberately (CI_VERSION tracks the firecracker
+# release minor, e.g. v1.15.x -> v1.15).
+FC_KERNEL_CI_VERSION="${FC_KERNEL_CI_VERSION:-v1.15}"
+FC_KERNEL_VERSION="${FC_KERNEL_VERSION:-6.1.155}"
+FC_KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_KERNEL_CI_VERSION}/x86_64/vmlinux-${FC_KERNEL_VERSION}"
+# Quickstart bionic rootfs — a throwaway image to boot Firecracker once before
+# building a real agent rootfs with scripts/build-rootfs-alpine.sh.
 QUICKSTART_ROOTFS_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4"
 
 # --- helpers ---
@@ -72,7 +76,7 @@ fi
 log "installing baseline apt packages"
 sudo apt-get update -qq
 sudo apt-get install -y -qq \
-    curl ca-certificates gnupg jq \
+    curl ca-certificates gnupg jq file \
     git build-essential pkg-config libssl-dev \
     iproute2 iputils-ping bridge-utils \
     e2fsprogs
@@ -84,12 +88,12 @@ if command -v firecracker >/dev/null 2>&1; then
 else
     log "installing Firecracker $FIRECRACKER_VERSION"
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' RETURN
     url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
     curl -fSL "$url" -o "$tmp/fc.tgz"
     tar -C "$tmp" -xzf "$tmp/fc.tgz"
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/firecracker
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/jailer-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/jailer
+    rm -rf "$tmp"
     log "Firecracker installed: $(firecracker --version)"
 fi
 
@@ -97,17 +101,32 @@ fi
 
 mkdir -p "$IMAGES_DIR"
 
-if [[ -f "$IMAGES_DIR/vmlinux.bin" ]]; then
-    log "kernel image already present: $IMAGES_DIR/vmlinux.bin"
+KERNEL_FILE="$IMAGES_DIR/vmlinux-${FC_KERNEL_VERSION}.bin"
+if [[ ! -f "$KERNEL_FILE" ]]; then
+    log "downloading Firecracker CI kernel ${FC_KERNEL_VERSION} (virtio-rng built in)"
+    # Atomic .tmp -> mv so an interrupted download never persists as the
+    # versioned kernel (a later run would otherwise skip the download and adopt
+    # the partial file).
+    curl -fSL "$FC_KERNEL_URL" -o "$KERNEL_FILE.tmp"
+    if ! file "$KERNEL_FILE.tmp" | grep -q 'ELF 64-bit'; then
+        rm -f "$KERNEL_FILE.tmp"
+        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $FC_KERNEL_URL"
+    fi
+    mv "$KERNEL_FILE.tmp" "$KERNEL_FILE"
 else
-    log "downloading quickstart kernel"
-    curl -fSL "$QUICKSTART_KERNEL_URL" -o "$IMAGES_DIR/vmlinux.bin"
+    log "kernel image already present: $KERNEL_FILE"
 fi
+# Validate the kernel (cached or freshly downloaded) before adopting it, and
+# always point vmlinux.bin at it so a host that still has the old bionic
+# vmlinux.bin picks up the virtio-rng kernel instead of silently keeping it.
+file "$KERNEL_FILE" | grep -q 'ELF 64-bit' \
+    || fatal "cached kernel is not an uncompressed ELF vmlinux: $KERNEL_FILE"
+cp -f "$KERNEL_FILE" "$IMAGES_DIR/vmlinux.bin"
 
 if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
     log "rootfs image already present: $IMAGES_DIR/rootfs.ext4"
 else
-    log "downloading quickstart rootfs (this is the throwaway POC image; task #6 replaces it)"
+    log "downloading quickstart rootfs (throwaway POC image; build-rootfs-alpine.sh replaces it)"
     curl -fSL "$QUICKSTART_ROOTFS_URL" -o "$IMAGES_DIR/rootfs.ext4"
 fi
 
@@ -170,6 +189,6 @@ log "  claude:      $(command -v claude >/dev/null && echo present || echo MISSI
 log ""
 log "next:"
 log "  1. cd ~/rooms && make check         (sanity-check the toolchain)"
-log "  2. start writing the Firecracker boot code in src/firecracker.rs"
-log "  3. POC target: rooms run --repo <path> --task <task.md> → microVM + patch out"
+log "  2. build the agent image: sudo ./scripts/build-rootfs-alpine.sh --out images/agent-alpine.ext4 --ssh-key ~/.ssh/id_rooms.pub"
+log "  3. smoke test: ./scripts/test-rootfs-alpine.sh images/agent-alpine.ext4"
 log ""
