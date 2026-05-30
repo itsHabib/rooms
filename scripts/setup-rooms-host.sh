@@ -102,18 +102,25 @@ fi
 mkdir -p "$IMAGES_DIR"
 
 KERNEL_FILE="$IMAGES_DIR/vmlinux-${FC_KERNEL_VERSION}.bin"
-if [[ -f "$KERNEL_FILE" ]]; then
-    log "kernel image already present: $KERNEL_FILE"
-else
+if [[ ! -f "$KERNEL_FILE" ]]; then
     log "downloading Firecracker CI kernel ${FC_KERNEL_VERSION} (virtio-rng built in)"
-    curl -fSL "$FC_KERNEL_URL" -o "$KERNEL_FILE"
-    if ! file "$KERNEL_FILE" | grep -q 'ELF 64-bit'; then
-        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $KERNEL_FILE"
+    # Atomic .tmp -> mv so an interrupted download never persists as the
+    # versioned kernel (a later run would otherwise skip the download and adopt
+    # the partial file).
+    curl -fSL "$FC_KERNEL_URL" -o "$KERNEL_FILE.tmp"
+    if ! file "$KERNEL_FILE.tmp" | grep -q 'ELF 64-bit'; then
+        rm -f "$KERNEL_FILE.tmp"
+        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $FC_KERNEL_URL"
     fi
+    mv "$KERNEL_FILE.tmp" "$KERNEL_FILE"
+else
+    log "kernel image already present: $KERNEL_FILE"
 fi
-# vmlinux.bin is the sibling rooms boots next to the rootfs. Always point it at
-# the pinned kernel so a host that still has the old bionic vmlinux.bin picks up
-# the virtio-rng kernel instead of silently keeping the stale one.
+# Validate the kernel (cached or freshly downloaded) before adopting it, and
+# always point vmlinux.bin at it so a host that still has the old bionic
+# vmlinux.bin picks up the virtio-rng kernel instead of silently keeping it.
+file "$KERNEL_FILE" | grep -q 'ELF 64-bit' \
+    || fatal "cached kernel is not an uncompressed ELF vmlinux: $KERNEL_FILE"
 cp -f "$KERNEL_FILE" "$IMAGES_DIR/vmlinux.bin"
 
 if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
