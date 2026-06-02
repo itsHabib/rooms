@@ -176,9 +176,11 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
 /// wrapper could emit its trailer — network, auth, sshd not listening — and
 /// the caller should treat it as a substrate-level transport failure.
 ///
-/// Forwards `ANTHROPIC_API_KEY`, `CURSOR_API_KEY`, and `GH_TOKEN` from the host
-/// process env via SSH's `SendEnv` option; the matching `AcceptEnv` lines live
-/// in the guest's `/etc/ssh/sshd_config`.
+/// Forwards `ANTHROPIC_API_KEY` and `CURSOR_API_KEY` from the host process env
+/// via SSH's `SendEnv` option; the matching `AcceptEnv` lines live in the guest's
+/// `/etc/ssh/sshd_config`. `GH_TOKEN` is not forwarded here — it is sent only on
+/// the cursor push step (see `push_branch_in_guest`), so a `--command` run and
+/// the agent never see the push token.
 pub async fn exec_in_guest(
     guest_ip: &str,
     key_path: &Path,
@@ -330,7 +332,7 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
          bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
          echo EXIT=$?"
     );
-    let output = ssh_command(guest_ip, key_path, &remote)?
+    let output = ssh_command(guest_ip, key_path, &remote, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -457,7 +459,7 @@ async fn push_branch_in_guest(
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );
-    let output = ssh_command(guest_ip, key_path, &remote)?
+    let output = ssh_command(guest_ip, key_path, &remote, true)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -525,7 +527,7 @@ async fn write_guest_file(
     contents: &[u8],
 ) -> Result<()> {
     let remote = format!("mkdir -p {dir} && cat > {dir}/{name}");
-    let mut child = ssh_command(guest_ip, key_path, &remote)?
+    let mut child = ssh_command(guest_ip, key_path, &remote, false)?
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -566,7 +568,7 @@ async fn write_guest_file(
 /// Unlike [`run_wrapped`], there is no `EXIT=` marker contract: failure is a
 /// hard error surfaced to the caller, with the guest stderr attached.
 async fn run_setup_ssh(guest_ip: &str, key_path: &Path, remote: &str, what: &str) -> Result<()> {
-    let output = ssh_command(guest_ip, key_path, remote)?
+    let output = ssh_command(guest_ip, key_path, remote, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -624,8 +626,14 @@ fn parse_remote_exit_code(stdout: &[u8]) -> Result<i32> {
         .with_context(|| format!("EXIT= marker not numeric: {marker:?}; raw stdout: {text:?}"))
 }
 
-fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command> {
+fn ssh_command(
+    guest_ip: &str,
+    key_path: &Path,
+    remote: &str,
+    forward_gh_token: bool,
+) -> Result<Command> {
     let key = key_path.to_str().context("key path not utf-8")?;
+    let dest = format!("{GUEST_USER}@{guest_ip}");
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-i",
@@ -644,12 +652,13 @@ fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command>
         "SendEnv=ANTHROPIC_API_KEY",
         "-o",
         "SendEnv=CURSOR_API_KEY",
-        "-o",
-        "SendEnv=GH_TOKEN",
-        &format!("{GUEST_USER}@{guest_ip}"),
-        "--",
-        remote,
     ]);
+    // GH_TOKEN is forwarded ONLY for the push step — never to the agent run or
+    // arbitrary `--command` execs — so guest/agent code can't read the push token.
+    if forward_gh_token {
+        cmd.args(["-o", "SendEnv=GH_TOKEN"]);
+    }
+    cmd.args([dest.as_str(), "--", remote]);
     Ok(cmd)
 }
 
@@ -664,7 +673,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{cursor_command_argv, shell_single_quote, wait_for_ssh, CursorMeta};
+    use super::{cursor_command_argv, shell_single_quote, ssh_command, wait_for_ssh, CursorMeta};
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
 
@@ -678,6 +687,41 @@ mod tests {
         assert_eq!(shell_single_quote("echo 'hello'"), r"'echo '\''hello'\'''");
         // Closing-paren can't escape the wrapper either.
         assert_eq!(shell_single_quote("echo ) rm -rf /"), "'echo ) rm -rf /'");
+    }
+
+    #[test]
+    fn ssh_command_scopes_gh_token_to_push() {
+        let key = std::path::Path::new("/tmp/id_rooms");
+        let collect = |forward| {
+            ssh_command("10.0.0.1", key, "true", forward)
+                .expect("build ssh command")
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let without = collect(false);
+        let with = collect(true);
+        assert!(
+            !without.iter().any(|a| a == "SendEnv=GH_TOKEN"),
+            "GH_TOKEN must not be forwarded for non-push commands; got: {without:?}"
+        );
+        assert!(
+            without.iter().any(|a| a == "SendEnv=CURSOR_API_KEY"),
+            "agent keys should still be forwarded; got: {without:?}"
+        );
+        let tok = with
+            .iter()
+            .position(|a| a == "SendEnv=GH_TOKEN")
+            .expect("GH_TOKEN forwarded for push");
+        let dest = with
+            .iter()
+            .position(|a| a.contains("rooms@"))
+            .expect("destination present");
+        assert!(
+            tok < dest,
+            "SendEnv=GH_TOKEN must precede the destination; got: {with:?}"
+        );
     }
 
     #[test]
