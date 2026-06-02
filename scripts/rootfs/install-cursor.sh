@@ -225,10 +225,13 @@ CURSOR_RUNNER_JS
 chmod 0644 "$DEST/cursor-runner.js"
 chown -R "${GUEST_USER}:${GUEST_USER}" "$DEST"
 
-echo "[install-cursor] sshd AcceptEnv CURSOR_API_KEY"
+echo "[install-cursor] sshd AcceptEnv CURSOR_API_KEY + GH_TOKEN"
 SSHD=/etc/ssh/sshd_config
 if ! grep -qE '^AcceptEnv[[:space:]].*\bCURSOR_API_KEY\b' "$SSHD"; then
     printf 'AcceptEnv CURSOR_API_KEY\n' >> "$SSHD"
+fi
+if ! grep -qE '^AcceptEnv[[:space:]].*\bGH_TOKEN\b' "$SSHD"; then
+    printf 'AcceptEnv GH_TOKEN\n' >> "$SSHD"
 fi
 
 echo "[install-cursor] smoke: node --version + cursor-runner.js syntax"

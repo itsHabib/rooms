@@ -40,6 +40,9 @@ pub struct ResultJson {
     pub patch_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_path: Option<String>,
+    /// Branch the runner pushed the agent's changes to (cursor `--push-branch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_branch: Option<String>,
     pub command: Vec<String>,
 }
 
@@ -72,6 +75,7 @@ impl ResultJson {
             summary_path: None,
             patch_path: None,
             events_path: None,
+            pushed_branch: None,
             command,
         }
     }
@@ -285,6 +289,7 @@ mod tests {
             summary_path: Some("summary.md".to_owned()),
             patch_path: None,
             events_path: None,
+            pushed_branch: None,
             command: vec!["claude".to_owned(), "-p".to_owned(), "...".to_owned()],
         }
     }

@@ -55,6 +55,11 @@ pub struct CursorRequest {
     pub task_md: String,
     /// Metadata staged at `/workspace/in/meta.json`.
     pub meta: CursorMeta,
+    /// When set, after the agent runs the runner commits its changes and pushes
+    /// them to this branch on the repo's remote — the room self-persists its work
+    /// (mirrors cursor cloud). Requires `GH_TOKEN` in the host env, forwarded into
+    /// the guest via SSH `SendEnv`.
+    pub push_branch: Option<String>,
 }
 
 /// `/workspace/in/meta.json` payload consumed by `cursor-runner.js`.
@@ -236,6 +241,16 @@ pub async fn exec_cursor_in_guest(
             }
         };
 
+    // Self-persist: if a push branch was requested, commit the agent's changes
+    // and push them to the repo's remote (mirrors cursor cloud). None when the
+    // agent produced no changes; push/auth failures propagate.
+    let pushed_branch = match &request.push_branch {
+        Some(branch) => push_branch_in_guest(guest_ip, key_path, &request.repo_url, branch)
+            .await?
+            .then(|| branch.clone()),
+        None => None,
+    };
+
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let mut result = ResultJson::from_exec(
         run.exit_code,
@@ -262,6 +277,7 @@ pub async fn exec_cursor_in_guest(
     if patch_written {
         result.patch_path = Some("result.patch".to_owned());
     }
+    result.pushed_branch = pushed_branch;
     write_guest_result_json(guest_ip, key_path, &result).await?;
 
     Ok(GuestExecOutcome {
@@ -389,6 +405,50 @@ async fn generate_result_patch(guest_ip: &str, key_path: &Path, base_sha: &str) 
          git diff --cached {sha} > /workspace/out/result.patch 2>/dev/null || true"
     );
     run_setup_ssh(guest_ip, key_path, &remote, "generate result.patch").await
+}
+
+/// Commit the agent's changes and push them to `branch` on the repo's remote.
+///
+/// `Ok(true)` when a commit was pushed, `Ok(false)` when the agent produced no
+/// changes (nothing to push), `Err` on a real git/transport failure. Auth uses a
+/// git credential helper that reads `GH_TOKEN` from the guest env (forwarded via
+/// SSH `SendEnv`), so the token is never placed in argv.
+async fn push_branch_in_guest(
+    guest_ip: &str,
+    key_path: &Path,
+    repo_url: &str,
+    branch: &str,
+) -> Result<bool> {
+    let url = shell_single_quote(repo_url);
+    let branch_q = shell_single_quote(branch);
+    // The helper echoes the token from `$GH_TOKEN` at git-invoke time; the single
+    // quotes keep the guest login shell from expanding it into the command, so it
+    // stays out of argv. `exit 3` marks "no changes"; `set -e` aborts on real
+    // git failures (mapped to Err below).
+    let remote = format!(
+        "set -e; cd /workspace/repo; git checkout -B {branch_q}; git add -A; \
+         if git diff --cached --quiet; then exit 3; fi; \
+         git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
+             commit -q -m 'rooms cursor agent run' -m 'Co-authored-by: Cursor <cursoragent@cursor.com>'; \
+         git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
+             push {url} HEAD:{branch_q}"
+    );
+    let output = ssh_command(guest_ip, key_path, &remote)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to spawn ssh for push")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(3) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git push failed (exit {}): {stderr}", output.status)
+        }
+    }
 }
 
 /// Ensure the guest artifact dir + empty log files exist.
@@ -560,6 +620,8 @@ fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command>
         "SendEnv=ANTHROPIC_API_KEY",
         "-o",
         "SendEnv=CURSOR_API_KEY",
+        "-o",
+        "SendEnv=GH_TOKEN",
         &format!("{GUEST_USER}@{guest_ip}"),
         "--",
         remote,

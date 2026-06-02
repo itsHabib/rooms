@@ -55,6 +55,10 @@ enum Command {
         /// used as the `result.patch` diff base.
         #[arg(long = "base-sha", required_if_eq("runner", "cursor"))]
         base_sha: Option<String>,
+        /// Branch to push the agent's changes to (cursor only); requires `GH_TOKEN`
+        /// in the env. Omit to leave the changes in the guest (no push).
+        #[arg(long = "push-branch")]
+        push_branch: Option<String>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -94,6 +98,7 @@ struct RunArgs {
     task: Option<PathBuf>,
     model: Option<String>,
     base_sha: Option<String>,
+    push_branch: Option<String>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -142,6 +147,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             task,
             model,
             base_sha,
+            push_branch,
         } => {
             run_room(
                 RunArgs {
@@ -153,6 +159,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     task,
                     model,
                     base_sha,
+                    push_branch,
                 },
                 &config,
             )
@@ -261,11 +268,17 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
             let model_id = args.model.clone().ok_or_else(|| {
                 RoomsError::Internal("--model is required for --runner cursor".to_owned())
             })?;
+            if args.push_branch.is_some() && std::env::var_os("GH_TOKEN").is_none() {
+                return Err(RoomsError::Internal(
+                    "--push-branch requires GH_TOKEN in the environment".to_owned(),
+                ));
+            }
             Ok(Action::Exec(runner::Runner::Cursor(
                 runner::CursorRequest {
                     repo_url,
                     task_md,
                     meta: runner::CursorMeta { base_sha, model_id },
+                    push_branch: args.push_branch.clone(),
                 },
             )))
         }
