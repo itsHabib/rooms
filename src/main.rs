@@ -55,6 +55,10 @@ enum Command {
         /// used as the `result.patch` diff base.
         #[arg(long = "base-sha", required_if_eq("runner", "cursor"))]
         base_sha: Option<String>,
+        /// Branch to push the agent's changes to (cursor only); requires `GH_TOKEN`
+        /// in the env. Omit to leave the changes in the guest (no push).
+        #[arg(long = "push-branch", conflicts_with_all = ["command", "keep"])]
+        push_branch: Option<String>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -94,6 +98,7 @@ struct RunArgs {
     task: Option<PathBuf>,
     model: Option<String>,
     base_sha: Option<String>,
+    push_branch: Option<String>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -142,6 +147,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             task,
             model,
             base_sha,
+            push_branch,
         } => {
             run_room(
                 RunArgs {
@@ -153,6 +159,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     task,
                     model,
                     base_sha,
+                    push_branch,
                 },
                 &config,
             )
@@ -261,15 +268,26 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
             let model_id = args.model.clone().ok_or_else(|| {
                 RoomsError::Internal("--model is required for --runner cursor".to_owned())
             })?;
+            if args.push_branch.is_some() && std::env::var_os("GH_TOKEN").is_none() {
+                return Err(RoomsError::Internal(
+                    "--push-branch requires GH_TOKEN in the environment".to_owned(),
+                ));
+            }
             Ok(Action::Exec(runner::Runner::Cursor(
                 runner::CursorRequest {
                     repo_url,
                     task_md,
                     meta: runner::CursorMeta { base_sha, model_id },
+                    push_branch: args.push_branch.clone(),
                 },
             )))
         }
         RunnerKind::Command => {
+            if args.push_branch.is_some() {
+                return Err(RoomsError::Internal(
+                    "--push-branch is only valid with --runner cursor".to_owned(),
+                ));
+            }
             let action = args.command.clone().map_or(Action::Idle, |command| {
                 Action::Exec(runner::Runner::Command(command))
             });
@@ -391,7 +409,9 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::{Cli, Command, RunnerKind};
+    use std::path::PathBuf;
+
+    use super::{resolve_action, Cli, Command, RoomsError, RunArgs, RunnerKind};
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -473,5 +493,49 @@ mod tests {
             err.to_string().contains("--keep"),
             "expected error to name --keep; got: {err}"
         );
+    }
+
+    #[test]
+    fn push_branch_conflicts_with_command() {
+        let err = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "echo hi",
+            "--push-branch",
+            "feature",
+        ])
+        .expect_err("--push-branch + --command should fail to parse");
+        assert!(
+            err.to_string().contains("--push-branch") && err.to_string().contains("--command"),
+            "expected error to name --push-branch and --command; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_branch_without_cursor_runner_is_rejected() {
+        // Covers the resolve-time guard (the clap conflict can't catch the bare
+        // default-command case: `rooms run --image x --push-branch foo`).
+        let args = RunArgs {
+            image: PathBuf::from("x"),
+            keep: false,
+            command: None,
+            runner: RunnerKind::Command,
+            repo: None,
+            task: None,
+            model: None,
+            base_sha: None,
+            push_branch: Some("feature".to_owned()),
+        };
+        match resolve_action(&args).await {
+            Err(RoomsError::Internal(m)) => assert!(
+                m.contains("--push-branch"),
+                "expected the error to name --push-branch; got: {m}"
+            ),
+            Ok(_) => panic!("--push-branch with the default command runner should be rejected"),
+            Err(other) => panic!("expected an Internal error; got: {other:?}"),
+        }
     }
 }

@@ -55,6 +55,11 @@ pub struct CursorRequest {
     pub task_md: String,
     /// Metadata staged at `/workspace/in/meta.json`.
     pub meta: CursorMeta,
+    /// When set, after the agent runs the runner commits its changes and pushes
+    /// them to this branch on the repo's remote — the room self-persists its work
+    /// (mirrors cursor cloud). Requires `GH_TOKEN` in the host env, forwarded into
+    /// the guest via SSH `SendEnv`.
+    pub push_branch: Option<String>,
 }
 
 /// `/workspace/in/meta.json` payload consumed by `cursor-runner.js`.
@@ -172,8 +177,10 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
 /// the caller should treat it as a substrate-level transport failure.
 ///
 /// Forwards `ANTHROPIC_API_KEY` and `CURSOR_API_KEY` from the host process env
-/// via SSH's `SendEnv` option; the matching `AcceptEnv` lines live in the
-/// guest's `/etc/ssh/sshd_config`.
+/// via SSH's `SendEnv` option; the matching `AcceptEnv` lines live in the guest's
+/// `/etc/ssh/sshd_config`. `GH_TOKEN` is not forwarded here — it is sent only on
+/// the cursor push step (see `push_branch_in_guest`), so a `--command` run and
+/// the agent never see the push token.
 pub async fn exec_in_guest(
     guest_ip: &str,
     key_path: &Path,
@@ -227,14 +234,33 @@ pub async fn exec_cursor_in_guest(
     )
     .await?;
 
-    let patch_written =
-        match generate_result_patch(guest_ip, key_path, &request.meta.base_sha).await {
-            Ok(()) => true,
-            Err(err) => {
-                warn!(error = %err, "failed to generate result.patch; omitting patch_path");
-                false
+    let patch_written = match generate_result_patch(guest_ip, key_path).await {
+        Ok(()) => true,
+        Err(err) => {
+            warn!(error = %err, "failed to generate result.patch; omitting patch_path");
+            false
+        }
+    };
+
+    // Self-persist: if a push branch was requested AND the agent succeeded,
+    // commit the agent's changes and push them (mirrors cursor cloud). A failed
+    // agent run never pushes its partial work. The push error is captured rather
+    // than `?`-propagated, so `result.json` is still written below — recording
+    // the run's outcome — before the error surfaces.
+    let mut push_err: Option<anyhow::Error> = None;
+    let pushed_branch = match (&request.push_branch, run.exit_code) {
+        (Some(branch), 0) => {
+            match push_branch_in_guest(guest_ip, key_path, &request.repo_url, branch).await {
+                Ok(true) => Some(branch.clone()),
+                Ok(false) => None,
+                Err(e) => {
+                    push_err = Some(e);
+                    None
+                }
             }
-        };
+        }
+        _ => None,
+    };
 
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let mut result = ResultJson::from_exec(
@@ -262,7 +288,14 @@ pub async fn exec_cursor_in_guest(
     if patch_written {
         result.patch_path = Some("result.patch".to_owned());
     }
+    result.pushed_branch = pushed_branch;
     write_guest_result_json(guest_ip, key_path, &result).await?;
+
+    // result.json is recorded; surface a push failure last, so a push error never
+    // eats the run's artifact (the High finding).
+    if let Some(err) = push_err {
+        return Err(err);
+    }
 
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
@@ -299,7 +332,7 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
          bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
          echo EXIT=$?"
     );
-    let output = ssh_command(guest_ip, key_path, &remote)?
+    let output = ssh_command(guest_ip, key_path, &remote, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -331,10 +364,15 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
     })
 }
 
-/// Clone `repo_url` into `/workspace/repo` and check out `base_sha`.
+/// Clone `repo_url` into `/workspace/repo`, check out `base_sha`, and pin the
+/// resolved base commit as `refs/rooms/base`.
 ///
-/// A hard error: the cursor runner can't run without a populated repo. The URL
-/// and sha are single-quoted into the remote shell so neither can inject.
+/// Pinning a ref (rather than re-resolving `base_sha` later) keeps the patch and
+/// push steps comparing against a concrete commit even when `base_sha` is
+/// symbolic (e.g. `HEAD`) — otherwise it would re-resolve to the agent's tip and
+/// look like "no changes". A hard error: the cursor runner can't run without a
+/// populated repo. The URL and sha are single-quoted into the remote shell so
+/// neither can inject.
 async fn clone_repo_in_guest(
     guest_ip: &str,
     key_path: &Path,
@@ -345,7 +383,8 @@ async fn clone_repo_in_guest(
     let sha = shell_single_quote(base_sha);
     let remote = format!(
         "rm -rf /workspace/repo && git clone {url} /workspace/repo && \
-         git -C /workspace/repo checkout {sha}"
+         git -C /workspace/repo checkout {sha} && \
+         git -C /workspace/repo update-ref refs/rooms/base HEAD"
     );
     run_setup_ssh(guest_ip, key_path, &remote, "clone repo in guest").await
 }
@@ -376,19 +415,66 @@ async fn stage_cursor_input(
     .await
 }
 
-/// Generate `/workspace/out/result.patch` from `git diff` against `base_sha`,
-/// capturing both committed and working-tree changes the agent made.
+/// Generate `/workspace/out/result.patch` from `git diff` against the pinned
+/// `refs/rooms/base`, capturing both committed and working-tree changes.
 ///
 /// Best effort: a git error still leaves an (empty) patch file via the `>`
 /// redirect, but a transport failure propagates so the caller can omit
 /// `patch_path` rather than reference a missing file.
-async fn generate_result_patch(guest_ip: &str, key_path: &Path, base_sha: &str) -> Result<()> {
-    let sha = shell_single_quote(base_sha);
+async fn generate_result_patch(guest_ip: &str, key_path: &Path) -> Result<()> {
+    let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
+         git diff --cached refs/rooms/base > /workspace/out/result.patch 2>/dev/null || true";
+    run_setup_ssh(guest_ip, key_path, remote, "generate result.patch").await
+}
+
+/// Commit the agent's changes and push them to `branch` on the repo's remote.
+///
+/// `Ok(true)` when a commit was pushed, `Ok(false)` when the agent produced no
+/// changes (nothing to push), `Err` on a real git/transport failure. Auth uses a
+/// git credential helper that reads `GH_TOKEN` from the guest env (forwarded via
+/// SSH `SendEnv`), so the token is never placed in argv.
+async fn push_branch_in_guest(
+    guest_ip: &str,
+    key_path: &Path,
+    repo_url: &str,
+    branch: &str,
+) -> Result<bool> {
+    let url = shell_single_quote(repo_url);
+    let branch_q = shell_single_quote(branch);
+    // Commit any working-tree changes the agent left, then push iff HEAD has
+    // moved past the pinned base (`refs/rooms/base`, set at clone). Comparing the
+    // pinned ref — not a re-resolved base_sha — covers BOTH a working-tree edit
+    // committed just now AND the cursor SDK committing internally (clean tree,
+    // HEAD already ahead), and stays correct when base_sha was symbolic. `exit 3`
+    // marks "nothing to push"; `set -e` maps real git failures to Err. The
+    // credential helper echoes `$GH_TOKEN` at git-invoke time; the single quotes
+    // keep the guest shell from expanding it into argv.
     let remote = format!(
-        "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
-         git diff --cached {sha} > /workspace/out/result.patch 2>/dev/null || true"
+        "set -e; cd /workspace/repo; git checkout -B {branch_q}; git add -A; \
+         if ! git diff --cached --quiet; then \
+             git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
+             commit -q -m 'rooms cursor agent run' -m 'Co-authored-by: Cursor <cursoragent@cursor.com>'; \
+         fi; \
+         if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse refs/rooms/base)\" ]; then exit 3; fi; \
+         git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
+             push {url} HEAD:{branch_q}"
     );
-    run_setup_ssh(guest_ip, key_path, &remote, "generate result.patch").await
+    let output = ssh_command(guest_ip, key_path, &remote, true)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to spawn ssh for push")?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(3) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git push failed (exit {}): {stderr}", output.status)
+        }
+    }
 }
 
 /// Ensure the guest artifact dir + empty log files exist.
@@ -441,7 +527,7 @@ async fn write_guest_file(
     contents: &[u8],
 ) -> Result<()> {
     let remote = format!("mkdir -p {dir} && cat > {dir}/{name}");
-    let mut child = ssh_command(guest_ip, key_path, &remote)?
+    let mut child = ssh_command(guest_ip, key_path, &remote, false)?
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -482,7 +568,7 @@ async fn write_guest_file(
 /// Unlike [`run_wrapped`], there is no `EXIT=` marker contract: failure is a
 /// hard error surfaced to the caller, with the guest stderr attached.
 async fn run_setup_ssh(guest_ip: &str, key_path: &Path, remote: &str, what: &str) -> Result<()> {
-    let output = ssh_command(guest_ip, key_path, remote)?
+    let output = ssh_command(guest_ip, key_path, remote, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -540,8 +626,14 @@ fn parse_remote_exit_code(stdout: &[u8]) -> Result<i32> {
         .with_context(|| format!("EXIT= marker not numeric: {marker:?}; raw stdout: {text:?}"))
 }
 
-fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command> {
+fn ssh_command(
+    guest_ip: &str,
+    key_path: &Path,
+    remote: &str,
+    forward_gh_token: bool,
+) -> Result<Command> {
     let key = key_path.to_str().context("key path not utf-8")?;
+    let dest = format!("{GUEST_USER}@{guest_ip}");
     let mut cmd = Command::new("ssh");
     cmd.args([
         "-i",
@@ -560,10 +652,13 @@ fn ssh_command(guest_ip: &str, key_path: &Path, remote: &str) -> Result<Command>
         "SendEnv=ANTHROPIC_API_KEY",
         "-o",
         "SendEnv=CURSOR_API_KEY",
-        &format!("{GUEST_USER}@{guest_ip}"),
-        "--",
-        remote,
     ]);
+    // GH_TOKEN is forwarded ONLY for the push step — never to the agent run or
+    // arbitrary `--command` execs — so guest/agent code can't read the push token.
+    if forward_gh_token {
+        cmd.args(["-o", "SendEnv=GH_TOKEN"]);
+    }
+    cmd.args([dest.as_str(), "--", remote]);
     Ok(cmd)
 }
 
@@ -578,7 +673,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{cursor_command_argv, shell_single_quote, wait_for_ssh, CursorMeta};
+    use super::{cursor_command_argv, shell_single_quote, ssh_command, wait_for_ssh, CursorMeta};
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
 
@@ -592,6 +687,41 @@ mod tests {
         assert_eq!(shell_single_quote("echo 'hello'"), r"'echo '\''hello'\'''");
         // Closing-paren can't escape the wrapper either.
         assert_eq!(shell_single_quote("echo ) rm -rf /"), "'echo ) rm -rf /'");
+    }
+
+    #[test]
+    fn ssh_command_scopes_gh_token_to_push() {
+        let key = std::path::Path::new("/tmp/id_rooms");
+        let collect = |forward| {
+            ssh_command("10.0.0.1", key, "true", forward)
+                .expect("build ssh command")
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let without = collect(false);
+        let with = collect(true);
+        assert!(
+            !without.iter().any(|a| a == "SendEnv=GH_TOKEN"),
+            "GH_TOKEN must not be forwarded for non-push commands; got: {without:?}"
+        );
+        assert!(
+            without.iter().any(|a| a == "SendEnv=CURSOR_API_KEY"),
+            "agent keys should still be forwarded; got: {without:?}"
+        );
+        let tok = with
+            .iter()
+            .position(|a| a == "SendEnv=GH_TOKEN")
+            .expect("GH_TOKEN forwarded for push");
+        let dest = with
+            .iter()
+            .position(|a| a.contains("rooms@"))
+            .expect("destination present");
+        assert!(
+            tok < dest,
+            "SendEnv=GH_TOKEN must precede the destination; got: {with:?}"
+        );
     }
 
     #[test]

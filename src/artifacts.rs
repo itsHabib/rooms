@@ -40,6 +40,9 @@ pub struct ResultJson {
     pub patch_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_path: Option<String>,
+    /// Branch the runner pushed the agent's changes to (cursor `--push-branch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_branch: Option<String>,
     pub command: Vec<String>,
 }
 
@@ -72,6 +75,7 @@ impl ResultJson {
             summary_path: None,
             patch_path: None,
             events_path: None,
+            pushed_branch: None,
             command,
         }
     }
@@ -285,6 +289,7 @@ mod tests {
             summary_path: Some("summary.md".to_owned()),
             patch_path: None,
             events_path: None,
+            pushed_branch: None,
             command: vec!["claude".to_owned(), "-p".to_owned(), "...".to_owned()],
         }
     }
@@ -313,6 +318,25 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: ResultJson = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn pushed_branch_round_trips_and_is_omitted_when_none() {
+        let mut result = sample_result();
+        result.pushed_branch = Some("feature/x".to_owned());
+        let json = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            json.contains("\"pushed_branch\":\"feature/x\""),
+            "pushed_branch should serialize when Some; got: {json}"
+        );
+        let parsed: ResultJson = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(result, parsed);
+        // skip_serializing_if omits the field entirely when None.
+        let omitted = serde_json::to_string(&sample_result()).expect("serialize");
+        assert!(
+            !omitted.contains("pushed_branch"),
+            "pushed_branch should be omitted when None; got: {omitted}"
+        );
     }
 
     #[test]
