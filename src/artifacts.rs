@@ -321,6 +321,25 @@ mod tests {
     }
 
     #[test]
+    fn pushed_branch_round_trips_and_is_omitted_when_none() {
+        let mut result = sample_result();
+        result.pushed_branch = Some("feature/x".to_owned());
+        let json = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            json.contains("\"pushed_branch\":\"feature/x\""),
+            "pushed_branch should serialize when Some; got: {json}"
+        );
+        let parsed: ResultJson = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(result, parsed);
+        // skip_serializing_if omits the field entirely when None.
+        let omitted = serde_json::to_string(&sample_result()).expect("serialize");
+        assert!(
+            !omitted.contains("pushed_branch"),
+            "pushed_branch should be omitted when None; got: {omitted}"
+        );
+    }
+
+    #[test]
     fn status_from_exit_code_maps_zero_and_nonzero() {
         assert_eq!(ResultJson::status_from_exit_code(0), RunStatus::Succeeded);
         assert_eq!(ResultJson::status_from_exit_code(1), RunStatus::Failed);

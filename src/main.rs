@@ -57,7 +57,7 @@ enum Command {
         base_sha: Option<String>,
         /// Branch to push the agent's changes to (cursor only); requires `GH_TOKEN`
         /// in the env. Omit to leave the changes in the guest (no push).
-        #[arg(long = "push-branch")]
+        #[arg(long = "push-branch", conflicts_with_all = ["command", "keep"])]
         push_branch: Option<String>,
     },
     /// Validate runner artifacts in a local `out/` directory.
@@ -283,6 +283,11 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
             )))
         }
         RunnerKind::Command => {
+            if args.push_branch.is_some() {
+                return Err(RoomsError::Internal(
+                    "--push-branch is only valid with --runner cursor".to_owned(),
+                ));
+            }
             let action = args.command.clone().map_or(Action::Idle, |command| {
                 Action::Exec(runner::Runner::Command(command))
             });
@@ -485,6 +490,25 @@ mod tests {
         assert!(
             err.to_string().contains("--keep"),
             "expected error to name --keep; got: {err}"
+        );
+    }
+
+    #[test]
+    fn push_branch_conflicts_with_command() {
+        let err = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "echo hi",
+            "--push-branch",
+            "feature",
+        ])
+        .expect_err("--push-branch + --command should fail to parse");
+        assert!(
+            err.to_string().contains("--push-branch") && err.to_string().contains("--command"),
+            "expected error to name --push-branch and --command; got: {err}"
         );
     }
 }

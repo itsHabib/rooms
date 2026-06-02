@@ -241,14 +241,30 @@ pub async fn exec_cursor_in_guest(
             }
         };
 
-    // Self-persist: if a push branch was requested, commit the agent's changes
-    // and push them to the repo's remote (mirrors cursor cloud). None when the
-    // agent produced no changes; push/auth failures propagate.
-    let pushed_branch = match &request.push_branch {
-        Some(branch) => push_branch_in_guest(guest_ip, key_path, &request.repo_url, branch)
-            .await?
-            .then(|| branch.clone()),
-        None => None,
+    // Self-persist: if a push branch was requested AND the agent succeeded,
+    // commit the agent's changes and push them (mirrors cursor cloud). A failed
+    // agent run never pushes its partial work. The push error is captured rather
+    // than `?`-propagated, so `result.json` is still written below — recording
+    // the run's outcome — before the error surfaces.
+    let mut push_err: Option<anyhow::Error> = None;
+    let pushed_branch = match (&request.push_branch, run.exit_code) {
+        (Some(branch), 0) => match push_branch_in_guest(
+            guest_ip,
+            key_path,
+            &request.repo_url,
+            branch,
+            &request.meta.base_sha,
+        )
+        .await
+        {
+            Ok(true) => Some(branch.clone()),
+            Ok(false) => None,
+            Err(e) => {
+                push_err = Some(e);
+                None
+            }
+        },
+        _ => None,
     };
 
     let status = ResultJson::status_from_exit_code(run.exit_code);
@@ -279,6 +295,12 @@ pub async fn exec_cursor_in_guest(
     }
     result.pushed_branch = pushed_branch;
     write_guest_result_json(guest_ip, key_path, &result).await?;
+
+    // result.json is recorded; surface a push failure last, so a push error never
+    // eats the run's artifact (the High finding).
+    if let Some(err) = push_err {
+        return Err(err);
+    }
 
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
@@ -418,18 +440,25 @@ async fn push_branch_in_guest(
     key_path: &Path,
     repo_url: &str,
     branch: &str,
+    base_sha: &str,
 ) -> Result<bool> {
     let url = shell_single_quote(repo_url);
     let branch_q = shell_single_quote(branch);
-    // The helper echoes the token from `$GH_TOKEN` at git-invoke time; the single
-    // quotes keep the guest login shell from expanding it into the command, so it
-    // stays out of argv. `exit 3` marks "no changes"; `set -e` aborts on real
-    // git failures (mapped to Err below).
+    let base = shell_single_quote(base_sha);
+    // Commit any working-tree changes the agent left, then push iff HEAD has
+    // moved past base_sha. The HEAD-vs-base check (not an index diff) covers BOTH
+    // a working-tree edit committed just now AND the cursor SDK committing
+    // internally (clean tree, HEAD already ahead). `exit 3` marks "nothing to
+    // push"; `set -e` maps real git failures to Err. The credential helper echoes
+    // `$GH_TOKEN` at git-invoke time; the single quotes keep the guest shell from
+    // expanding it into argv.
     let remote = format!(
         "set -e; cd /workspace/repo; git checkout -B {branch_q}; git add -A; \
-         if git diff --cached --quiet; then exit 3; fi; \
-         git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
+         if ! git diff --cached --quiet; then \
+             git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
              commit -q -m 'rooms cursor agent run' -m 'Co-authored-by: Cursor <cursoragent@cursor.com>'; \
+         fi; \
+         if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse {base})\" ]; then exit 3; fi; \
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );
