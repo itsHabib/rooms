@@ -232,14 +232,13 @@ pub async fn exec_cursor_in_guest(
     )
     .await?;
 
-    let patch_written =
-        match generate_result_patch(guest_ip, key_path, &request.meta.base_sha).await {
-            Ok(()) => true,
-            Err(err) => {
-                warn!(error = %err, "failed to generate result.patch; omitting patch_path");
-                false
-            }
-        };
+    let patch_written = match generate_result_patch(guest_ip, key_path).await {
+        Ok(()) => true,
+        Err(err) => {
+            warn!(error = %err, "failed to generate result.patch; omitting patch_path");
+            false
+        }
+    };
 
     // Self-persist: if a push branch was requested AND the agent succeeded,
     // commit the agent's changes and push them (mirrors cursor cloud). A failed
@@ -248,22 +247,16 @@ pub async fn exec_cursor_in_guest(
     // the run's outcome — before the error surfaces.
     let mut push_err: Option<anyhow::Error> = None;
     let pushed_branch = match (&request.push_branch, run.exit_code) {
-        (Some(branch), 0) => match push_branch_in_guest(
-            guest_ip,
-            key_path,
-            &request.repo_url,
-            branch,
-            &request.meta.base_sha,
-        )
-        .await
-        {
-            Ok(true) => Some(branch.clone()),
-            Ok(false) => None,
-            Err(e) => {
-                push_err = Some(e);
-                None
+        (Some(branch), 0) => {
+            match push_branch_in_guest(guest_ip, key_path, &request.repo_url, branch).await {
+                Ok(true) => Some(branch.clone()),
+                Ok(false) => None,
+                Err(e) => {
+                    push_err = Some(e);
+                    None
+                }
             }
-        },
+        }
         _ => None,
     };
 
@@ -369,10 +362,15 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
     })
 }
 
-/// Clone `repo_url` into `/workspace/repo` and check out `base_sha`.
+/// Clone `repo_url` into `/workspace/repo`, check out `base_sha`, and pin the
+/// resolved base commit as `refs/rooms/base`.
 ///
-/// A hard error: the cursor runner can't run without a populated repo. The URL
-/// and sha are single-quoted into the remote shell so neither can inject.
+/// Pinning a ref (rather than re-resolving `base_sha` later) keeps the patch and
+/// push steps comparing against a concrete commit even when `base_sha` is
+/// symbolic (e.g. `HEAD`) — otherwise it would re-resolve to the agent's tip and
+/// look like "no changes". A hard error: the cursor runner can't run without a
+/// populated repo. The URL and sha are single-quoted into the remote shell so
+/// neither can inject.
 async fn clone_repo_in_guest(
     guest_ip: &str,
     key_path: &Path,
@@ -383,7 +381,8 @@ async fn clone_repo_in_guest(
     let sha = shell_single_quote(base_sha);
     let remote = format!(
         "rm -rf /workspace/repo && git clone {url} /workspace/repo && \
-         git -C /workspace/repo checkout {sha}"
+         git -C /workspace/repo checkout {sha} && \
+         git -C /workspace/repo update-ref refs/rooms/base HEAD"
     );
     run_setup_ssh(guest_ip, key_path, &remote, "clone repo in guest").await
 }
@@ -414,19 +413,16 @@ async fn stage_cursor_input(
     .await
 }
 
-/// Generate `/workspace/out/result.patch` from `git diff` against `base_sha`,
-/// capturing both committed and working-tree changes the agent made.
+/// Generate `/workspace/out/result.patch` from `git diff` against the pinned
+/// `refs/rooms/base`, capturing both committed and working-tree changes.
 ///
 /// Best effort: a git error still leaves an (empty) patch file via the `>`
 /// redirect, but a transport failure propagates so the caller can omit
 /// `patch_path` rather than reference a missing file.
-async fn generate_result_patch(guest_ip: &str, key_path: &Path, base_sha: &str) -> Result<()> {
-    let sha = shell_single_quote(base_sha);
-    let remote = format!(
-        "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
-         git diff --cached {sha} > /workspace/out/result.patch 2>/dev/null || true"
-    );
-    run_setup_ssh(guest_ip, key_path, &remote, "generate result.patch").await
+async fn generate_result_patch(guest_ip: &str, key_path: &Path) -> Result<()> {
+    let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
+         git diff --cached refs/rooms/base > /workspace/out/result.patch 2>/dev/null || true";
+    run_setup_ssh(guest_ip, key_path, remote, "generate result.patch").await
 }
 
 /// Commit the agent's changes and push them to `branch` on the repo's remote.
@@ -440,25 +436,24 @@ async fn push_branch_in_guest(
     key_path: &Path,
     repo_url: &str,
     branch: &str,
-    base_sha: &str,
 ) -> Result<bool> {
     let url = shell_single_quote(repo_url);
     let branch_q = shell_single_quote(branch);
-    let base = shell_single_quote(base_sha);
     // Commit any working-tree changes the agent left, then push iff HEAD has
-    // moved past base_sha. The HEAD-vs-base check (not an index diff) covers BOTH
-    // a working-tree edit committed just now AND the cursor SDK committing
-    // internally (clean tree, HEAD already ahead). `exit 3` marks "nothing to
-    // push"; `set -e` maps real git failures to Err. The credential helper echoes
-    // `$GH_TOKEN` at git-invoke time; the single quotes keep the guest shell from
-    // expanding it into argv.
+    // moved past the pinned base (`refs/rooms/base`, set at clone). Comparing the
+    // pinned ref — not a re-resolved base_sha — covers BOTH a working-tree edit
+    // committed just now AND the cursor SDK committing internally (clean tree,
+    // HEAD already ahead), and stays correct when base_sha was symbolic. `exit 3`
+    // marks "nothing to push"; `set -e` maps real git failures to Err. The
+    // credential helper echoes `$GH_TOKEN` at git-invoke time; the single quotes
+    // keep the guest shell from expanding it into argv.
     let remote = format!(
         "set -e; cd /workspace/repo; git checkout -B {branch_q}; git add -A; \
          if ! git diff --cached --quiet; then \
              git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
              commit -q -m 'rooms cursor agent run' -m 'Co-authored-by: Cursor <cursoragent@cursor.com>'; \
          fi; \
-         if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse {base})\" ]; then exit 3; fi; \
+         if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse refs/rooms/base)\" ]; then exit 3; fi; \
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );

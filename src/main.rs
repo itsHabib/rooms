@@ -409,7 +409,9 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::{Cli, Command, RunnerKind};
+    use std::path::PathBuf;
+
+    use super::{resolve_action, Cli, Command, RoomsError, RunArgs, RunnerKind};
     use clap::{CommandFactory, Parser};
 
     #[test]
@@ -510,5 +512,30 @@ mod tests {
             err.to_string().contains("--push-branch") && err.to_string().contains("--command"),
             "expected error to name --push-branch and --command; got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn push_branch_without_cursor_runner_is_rejected() {
+        // Covers the resolve-time guard (the clap conflict can't catch the bare
+        // default-command case: `rooms run --image x --push-branch foo`).
+        let args = RunArgs {
+            image: PathBuf::from("x"),
+            keep: false,
+            command: None,
+            runner: RunnerKind::Command,
+            repo: None,
+            task: None,
+            model: None,
+            base_sha: None,
+            push_branch: Some("feature".to_owned()),
+        };
+        match resolve_action(&args).await {
+            Err(RoomsError::Internal(m)) => assert!(
+                m.contains("--push-branch"),
+                "expected the error to name --push-branch; got: {m}"
+            ),
+            Ok(_) => panic!("--push-branch with the default command runner should be rejected"),
+            Err(other) => panic!("expected an Internal error; got: {other:?}"),
+        }
     }
 }
