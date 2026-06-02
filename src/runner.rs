@@ -176,9 +176,9 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
 /// wrapper could emit its trailer — network, auth, sshd not listening — and
 /// the caller should treat it as a substrate-level transport failure.
 ///
-/// Forwards `ANTHROPIC_API_KEY` and `CURSOR_API_KEY` from the host process env
-/// via SSH's `SendEnv` option; the matching `AcceptEnv` lines live in the
-/// guest's `/etc/ssh/sshd_config`.
+/// Forwards `ANTHROPIC_API_KEY`, `CURSOR_API_KEY`, and `GH_TOKEN` from the host
+/// process env via SSH's `SendEnv` option; the matching `AcceptEnv` lines live
+/// in the guest's `/etc/ssh/sshd_config`.
 pub async fn exec_in_guest(
     guest_ip: &str,
     key_path: &Path,
