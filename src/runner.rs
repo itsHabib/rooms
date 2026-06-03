@@ -162,13 +162,13 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
 
 /// Tar-over-ssh: stream the guest's `/workspace/out` into `host_dir`. `GH_TOKEN` not forwarded.
 pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Path) -> Result<()> {
+    // Fresh dir per collection so a reused --out can't mix in stale artifacts.
+    let _ = tokio::fs::remove_dir_all(host_dir).await;
     tokio::fs::create_dir_all(host_dir)
         .await
         .with_context(|| format!("create --out dir {}", host_dir.display()))?;
-    // Guard the dir so a run that never wrote /workspace/out yields an empty
-    // stream (success), not a confusing `cd` failure; a real tar error still
-    // propagates via the script's non-zero exit. `.output()` drains stdout +
-    // stderr together, so neither pipe can deadlock.
+    // The dir guard yields an empty stream (not a `cd` error) when the run never
+    // wrote /workspace/out; `.output()` drains stdout+stderr so no pipe deadlocks.
     let ssh_out = ssh_command(
         guest_ip,
         key_path,
@@ -203,8 +203,7 @@ pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Pat
     Ok(())
 }
 
-/// Reject any non-regular member (symlink, hardlink, device) in a guest tar, so
-/// extraction can't escape `host_dir` via a planted link.
+/// Reject any unsafe member (link, device, `..`, absolute path) in a guest tar before extraction.
 async fn ensure_tar_regular_only(archive: &[u8]) -> Result<()> {
     let listing = run_host_tar(archive, &["-tvf", "-"], None).await?;
     if !listing.status.success() {
@@ -216,22 +215,23 @@ async fn ensure_tar_regular_only(archive: &[u8]) -> Result<()> {
     }
     let text = String::from_utf8_lossy(&listing.stdout);
     for line in text.lines() {
-        if !tar_line_is_regular_or_dir(line) {
-            anyhow::bail!("refusing guest archive: non-regular member: {line}");
+        if !tar_member_is_safe(line) {
+            anyhow::bail!("refusing unsafe guest archive member: {line}");
         }
     }
     Ok(())
 }
 
-/// True if a `tar -tv` listing line describes a regular file or directory. The
-/// first char is the ls-style member type — `-` regular, `d` dir; `l`/`h`/`c`/`b`
-/// (sym/hard link, device) are rejected.
-fn tar_line_is_regular_or_dir(line: &str) -> bool {
-    matches!(line.chars().next(), Some('-' | 'd'))
+/// Safe `tar -tv` member: regular file / dir, path with no `..` component or leading `/` (no extract escape).
+fn tar_member_is_safe(line: &str) -> bool {
+    if !matches!(line.chars().next(), Some('-' | 'd')) {
+        return false;
+    }
+    let path = line.split_whitespace().last().unwrap_or("");
+    !path.starts_with('/') && !path.split('/').any(|c| c == "..")
 }
 
-/// Run host `tar args [path]`, feeding `archive` to stdin from a spawned task
-/// while `wait_with_output` drains stdout + stderr, so no pipe can deadlock.
+/// Run host `tar args [path]` with `archive` on stdin (spawned writer + `wait_with_output`, deadlock-free).
 async fn run_host_tar(
     archive: &[u8],
     args: &[&str],
@@ -776,8 +776,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        cursor_command_argv, shell_single_quote, ssh_command, tar_line_is_regular_or_dir,
-        wait_for_ssh, CursorMeta,
+        cursor_command_argv, shell_single_quote, ssh_command, tar_member_is_safe, wait_for_ssh,
+        CursorMeta,
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
@@ -830,23 +830,28 @@ mod tests {
     }
 
     #[test]
-    fn tar_line_type_gate_rejects_links_and_devices() {
-        assert!(tar_line_is_regular_or_dir(
+    fn tar_member_gate_rejects_links_devices_and_traversal() {
+        assert!(tar_member_is_safe(
             "-rw-r--r-- 0/0 12 2026-06-03 04:00 ./result.json"
         ));
-        assert!(tar_line_is_regular_or_dir(
+        assert!(tar_member_is_safe(
             "drwxr-xr-x 0/0 0 2026-06-03 04:00 ./logs/"
         ));
-        assert!(!tar_line_is_regular_or_dir(
+        // links + devices rejected by the type gate
+        assert!(!tar_member_is_safe(
             "lrwxrwxrwx 0/0 0 2026-06-03 04:00 ./evil -> /etc/passwd"
         ));
-        assert!(!tar_line_is_regular_or_dir(
-            "hrw-r--r-- 0/0 0 2026-06-03 04:00 ./hard link to result.json"
-        ));
-        assert!(!tar_line_is_regular_or_dir(
+        assert!(!tar_member_is_safe(
             "crw-rw-rw- 0/0 0 2026-06-03 04:00 ./dev/null"
         ));
-        assert!(!tar_line_is_regular_or_dir(""));
+        // regular files rejected when the path escapes host_dir
+        assert!(!tar_member_is_safe(
+            "-rw-r--r-- 0/0 9 2026-06-03 04:00 ../../etc/cron.d/x"
+        ));
+        assert!(!tar_member_is_safe(
+            "-rw-r--r-- 0/0 9 2026-06-03 04:00 /etc/passwd"
+        ));
+        assert!(!tar_member_is_safe(""));
     }
 
     #[test]

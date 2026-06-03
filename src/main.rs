@@ -59,8 +59,8 @@ enum Command {
         /// in the env. Omit to leave the changes in the guest (no push).
         #[arg(long = "push-branch", conflicts_with_all = ["command", "keep"])]
         push_branch: Option<String>,
-        /// Collect the guest's `/workspace/out` into this host directory after the
-        /// run, before teardown, so `rooms collect --from <dir>` can read it.
+        /// Collect the guest's `/workspace/out` into this host directory (created
+        /// and cleared each run) so `rooms collect --from <dir>` can read it.
         #[arg(long = "out", conflicts_with = "keep")]
         out_dir: Option<PathBuf>,
     },
@@ -254,10 +254,7 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     outcome
 }
 
-/// Collect the guest's `/workspace/out` to the host after an exec, before
-/// teardown. No-op unless the action ran a command (Idle/Keep produce no
-/// artifacts). Best-effort: a failure is logged, never fatal — the run's exit
-/// code and any pushed branch stand on their own.
+/// Best-effort collect `/workspace/out` to the host after an exec (no-op for Idle/Keep); a failure is logged, never fatal.
 async fn collect_if_exec(guest_ip: &str, key: &Path, action: &Action, out_dir: &Path) {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
