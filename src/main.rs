@@ -259,6 +259,8 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
 /// artifacts). Best-effort: a failure is logged, never fatal — the run's exit
 /// code and any pushed branch stand on their own.
 async fn collect_if_exec(guest_ip: &str, key: &Path, action: &Action, out_dir: &Path) {
+    // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
+    // already excluded by clap's --out/--keep conflict.
     if !matches!(action, Action::Exec(_)) {
         return;
     }
