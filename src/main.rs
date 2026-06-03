@@ -59,6 +59,10 @@ enum Command {
         /// in the env. Omit to leave the changes in the guest (no push).
         #[arg(long = "push-branch", conflicts_with_all = ["command", "keep"])]
         push_branch: Option<String>,
+        /// Collect the guest's `/workspace/out` into this host directory (created
+        /// and cleared each run) so `rooms collect --from <dir>` can read it.
+        #[arg(long = "out", conflicts_with = "keep")]
+        out_dir: Option<PathBuf>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -99,6 +103,7 @@ struct RunArgs {
     model: Option<String>,
     base_sha: Option<String>,
     push_branch: Option<String>,
+    out_dir: Option<PathBuf>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -148,6 +153,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             model,
             base_sha,
             push_branch,
+            out_dir,
         } => {
             run_room(
                 RunArgs {
@@ -160,6 +166,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     model,
                     base_sha,
                     push_branch,
+                    out_dir,
                 },
                 &config,
             )
@@ -233,6 +240,9 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     }
 
     let outcome = post_boot(&network, &key, &action, &mut vm, config).await;
+    if let Some(out_dir) = args.out_dir.as_deref() {
+        collect_if_exec(&network.guest_ip, &key, &action, out_dir).await;
+    }
     if args.keep {
         vm.guard_mut().dismiss();
         // Prevent kill_on_drop from terminating the microVM — operator inspects manually.
@@ -242,6 +252,23 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
         warn!(error = %e, "shutdown reported an error after post-boot");
     }
     outcome
+}
+
+/// Best-effort collect `/workspace/out` to the host after an exec (no-op for Idle/Keep); a failure is logged, never fatal.
+async fn collect_if_exec(guest_ip: &str, key: &Path, action: &Action, out_dir: &Path) {
+    // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
+    // already excluded by clap's --out/--keep conflict.
+    if !matches!(action, Action::Exec(_)) {
+        return;
+    }
+    match runner::collect_out_to_host(guest_ip, key, out_dir).await {
+        Ok(()) => {
+            info!(out = %out_dir.display(), "collected /workspace/out to host");
+        }
+        Err(e) => {
+            warn!(error = %e, out = %out_dir.display(), "collect /workspace/out to host failed");
+        }
+    }
 }
 
 /// Translate parsed flags into the post-boot [`Action`], reading the `--task`
@@ -528,6 +555,7 @@ mod tests {
             model: None,
             base_sha: None,
             push_branch: Some("feature".to_owned()),
+            out_dir: None,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
@@ -537,5 +565,16 @@ mod tests {
             Ok(_) => panic!("--push-branch with the default command runner should be rejected"),
             Err(other) => panic!("expected an Internal error; got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn out_conflicts_with_keep() {
+        let err =
+            Cli::try_parse_from(["rooms", "run", "--image", "x", "--keep", "--out", "/tmp/o"])
+                .expect_err("--keep + --out should conflict");
+        assert!(
+            err.to_string().contains("--out") && err.to_string().contains("--keep"),
+            "expected error to name --out and --keep; got: {err}"
+        );
     }
 }

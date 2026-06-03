@@ -160,6 +160,111 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
     }
 }
 
+/// Tar-over-ssh: stream the guest's `/workspace/out` into `host_dir`. `GH_TOKEN` not forwarded.
+pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Path) -> Result<()> {
+    // Fresh dir per collection; a missing dir is fine, any other remove failure is fatal.
+    match tokio::fs::remove_dir_all(host_dir).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("clear --out dir {}", host_dir.display())),
+    }
+    tokio::fs::create_dir_all(host_dir)
+        .await
+        .with_context(|| format!("create --out dir {}", host_dir.display()))?;
+    // Empty stream (not a `cd` error) when /workspace/out is absent; `.output()` drains both pipes.
+    let ssh_out = ssh_command(
+        guest_ip,
+        key_path,
+        "if [ -d /workspace/out ]; then tar cf - -C /workspace/out .; else exit 0; fi",
+        false,
+    )?
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .output()
+    .await
+    .context("failed to run guest tar over ssh")?;
+    if !ssh_out.status.success() {
+        let stderr = String::from_utf8_lossy(&ssh_out.stderr);
+        anyhow::bail!("guest tar failed (exit {}): {stderr}", ssh_out.status);
+    }
+    if ssh_out.stdout.is_empty() {
+        return Ok(());
+    }
+    // The archive is guest-controlled: reject unsafe members before extracting.
+    ensure_tar_regular_only(&ssh_out.stdout).await?;
+    let extract = run_host_tar(&ssh_out.stdout, &["-xf", "-", "-C"], Some(host_dir)).await?;
+    if !extract.status.success() {
+        let stderr = String::from_utf8_lossy(&extract.stderr);
+        anyhow::bail!(
+            "host tar extract failed (exit {}): {stderr}",
+            extract.status
+        );
+    }
+    Ok(())
+}
+
+/// Reject any unsafe member (link, device, `..`, absolute path) in a guest tar before extraction.
+async fn ensure_tar_regular_only(archive: &[u8]) -> Result<()> {
+    let listing = run_host_tar(archive, &["-tvf", "-"], None).await?;
+    if !listing.status.success() {
+        let stderr = String::from_utf8_lossy(&listing.stderr);
+        anyhow::bail!(
+            "could not list guest tar (exit {}): {stderr}",
+            listing.status
+        );
+    }
+    let text = String::from_utf8_lossy(&listing.stdout);
+    for line in text.lines() {
+        if !tar_member_is_safe(line) {
+            anyhow::bail!("refusing unsafe guest archive member: {line}");
+        }
+    }
+    Ok(())
+}
+
+/// Safe `tar -tv` member: regular file / dir, no token absolute or with a `..` component (covers spaced names).
+fn tar_member_is_safe(line: &str) -> bool {
+    if !matches!(line.chars().next(), Some('-' | 'd')) {
+        return false;
+    }
+    !line
+        .split_whitespace()
+        .any(|tok| tok.starts_with('/') || tok.split('/').any(|c| c == ".."))
+}
+
+/// Run host `tar args [path]` with `archive` on stdin (spawned writer + `wait_with_output`, deadlock-free).
+async fn run_host_tar(
+    archive: &[u8],
+    args: &[&str],
+    path: Option<&Path>,
+) -> Result<std::process::Output> {
+    let mut cmd = Command::new("tar");
+    cmd.args(args);
+    if let Some(p) = path {
+        cmd.arg(p);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to spawn host tar")?;
+    let mut stdin = child.stdin.take().context("host tar stdin missing")?;
+    let bytes = archive.to_vec();
+    let writer = tokio::spawn(async move {
+        let _ = stdin.write_all(&bytes).await;
+    });
+    let out = child
+        .wait_with_output()
+        .await
+        .context("failed to wait for host tar")?;
+    let _ = writer.await;
+    Ok(out)
+}
+
 /// Exec `command` in the guest as the `rooms` user via SSH.
 ///
 /// Captures stdout/stderr under `/workspace/out/logs/` and writes
@@ -673,7 +778,10 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{cursor_command_argv, shell_single_quote, ssh_command, wait_for_ssh, CursorMeta};
+    use super::{
+        cursor_command_argv, shell_single_quote, ssh_command, tar_member_is_safe, wait_for_ssh,
+        CursorMeta,
+    };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
 
@@ -722,6 +830,31 @@ mod tests {
             tok < dest,
             "SendEnv=GH_TOKEN must precede the destination; got: {with:?}"
         );
+    }
+
+    #[test]
+    fn tar_member_gate_rejects_links_devices_and_traversal() {
+        assert!(tar_member_is_safe(
+            "-rw-r--r-- 0/0 12 2026-06-03 04:00 ./result.json"
+        ));
+        assert!(tar_member_is_safe(
+            "drwxr-xr-x 0/0 0 2026-06-03 04:00 ./logs/"
+        ));
+        // links + devices rejected by the type gate
+        assert!(!tar_member_is_safe(
+            "lrwxrwxrwx 0/0 0 2026-06-03 04:00 ./evil -> /etc/passwd"
+        ));
+        assert!(!tar_member_is_safe(
+            "crw-rw-rw- 0/0 0 2026-06-03 04:00 ./dev/null"
+        ));
+        // regular files rejected when the path escapes host_dir
+        assert!(!tar_member_is_safe(
+            "-rw-r--r-- 0/0 9 2026-06-03 04:00 ../../etc/cron.d/x"
+        ));
+        assert!(!tar_member_is_safe(
+            "-rw-r--r-- 0/0 9 2026-06-03 04:00 /etc/passwd"
+        ));
+        assert!(!tar_member_is_safe(""));
     }
 
     #[test]
