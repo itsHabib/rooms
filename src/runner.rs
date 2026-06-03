@@ -160,6 +160,60 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
     }
 }
 
+/// Stream the guest's `/workspace/out` into `host_dir` as a tar over SSH.
+///
+/// Uses busybox `tar` in the guest piped into a host `tar` extract — no
+/// scp/sftp-server dependency (the guest write path is ssh+cat, not scp). The
+/// directory tree (`result.json`, `logs/`, `events.ndjson`, `summary.md`,
+/// `result.patch`) lands under `host_dir`, ready for `rooms collect --from`.
+/// `GH_TOKEN` is not forwarded (collection is a plain read).
+pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(host_dir)
+        .await
+        .with_context(|| format!("create --out dir {}", host_dir.display()))?;
+    let mut ssh = ssh_command(guest_ip, key_path, "cd /workspace/out && tar cf - .", false)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to spawn ssh for artifact collection")?;
+    let mut ssh_stdout = ssh.stdout.take().context("ssh stdout missing")?;
+    let mut tar = Command::new("tar")
+        .arg("xf")
+        .arg("-")
+        .arg("-C")
+        .arg(host_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to spawn host tar for extraction")?;
+    let mut tar_stdin = tar.stdin.take().context("host tar stdin missing")?;
+    tokio::io::copy(&mut ssh_stdout, &mut tar_stdin)
+        .await
+        .context("stream guest /workspace/out tar to host")?;
+    drop(tar_stdin);
+    let tar_out = tar.wait_with_output().await.context("wait for host tar")?;
+    let ssh_out = ssh
+        .wait_with_output()
+        .await
+        .context("wait for guest tar over ssh")?;
+    if !ssh_out.status.success() {
+        let stderr = String::from_utf8_lossy(&ssh_out.stderr);
+        anyhow::bail!("guest tar failed (exit {}): {stderr}", ssh_out.status);
+    }
+    if !tar_out.status.success() {
+        let stderr = String::from_utf8_lossy(&tar_out.stderr);
+        anyhow::bail!(
+            "host tar extract failed (exit {}): {stderr}",
+            tar_out.status
+        );
+    }
+    Ok(())
+}
+
 /// Exec `command` in the guest as the `rooms` user via SSH.
 ///
 /// Captures stdout/stderr under `/workspace/out/logs/` and writes
