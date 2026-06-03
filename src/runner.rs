@@ -162,13 +162,16 @@ pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<Gu
 
 /// Tar-over-ssh: stream the guest's `/workspace/out` into `host_dir`. `GH_TOKEN` not forwarded.
 pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Path) -> Result<()> {
-    // Fresh dir per collection so a reused --out can't mix in stale artifacts.
-    let _ = tokio::fs::remove_dir_all(host_dir).await;
+    // Fresh dir per collection; a missing dir is fine, any other remove failure is fatal.
+    match tokio::fs::remove_dir_all(host_dir).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("clear --out dir {}", host_dir.display())),
+    }
     tokio::fs::create_dir_all(host_dir)
         .await
         .with_context(|| format!("create --out dir {}", host_dir.display()))?;
-    // The dir guard yields an empty stream (not a `cd` error) when the run never
-    // wrote /workspace/out; `.output()` drains stdout+stderr so no pipe deadlocks.
+    // Empty stream (not a `cd` error) when /workspace/out is absent; `.output()` drains both pipes.
     let ssh_out = ssh_command(
         guest_ip,
         key_path,
@@ -189,8 +192,7 @@ pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Pat
     if ssh_out.stdout.is_empty() {
         return Ok(());
     }
-    // The archive is guest-controlled: refuse symlinks / hardlinks / devices
-    // before extracting, so a planted member can't redirect a write outside host_dir.
+    // The archive is guest-controlled: reject unsafe members before extracting.
     ensure_tar_regular_only(&ssh_out.stdout).await?;
     let extract = run_host_tar(&ssh_out.stdout, &["-xf", "-", "-C"], Some(host_dir)).await?;
     if !extract.status.success() {
@@ -222,13 +224,14 @@ async fn ensure_tar_regular_only(archive: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Safe `tar -tv` member: regular file / dir, path with no `..` component or leading `/` (no extract escape).
+/// Safe `tar -tv` member: regular file / dir, no token absolute or with a `..` component (covers spaced names).
 fn tar_member_is_safe(line: &str) -> bool {
     if !matches!(line.chars().next(), Some('-' | 'd')) {
         return false;
     }
-    let path = line.split_whitespace().last().unwrap_or("");
-    !path.starts_with('/') && !path.split('/').any(|c| c == "..")
+    !line
+        .split_whitespace()
+        .any(|tok| tok.starts_with('/') || tok.split('/').any(|c| c == ".."))
 }
 
 /// Run host `tar args [path]` with `archive` on stdin (spawned writer + `wait_with_output`, deadlock-free).
