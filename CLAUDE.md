@@ -6,22 +6,7 @@ Notes for agents working on this repo. Read before touching code.
 
 ## State
 
-**Shipped (POC):**
-
-- `rooms run --image <ext4> [--command <cmd>|--keep]` — boot microVM, optional SSH exec, shutdown.
-- Firecracker control, TAP networking, SSH transport, guest CRNG seeding, Ctrl-C cleanup.
-- CI: fmt + clippy + unit tests on `ubuntu-latest`; Claude review workflow wired.
-- Host bootstrap scripts under `scripts/`.
-
-**In flight:**
-
-- POC upper bar: `rooms run --repo <path> --task <task.md>` → repo in guest + `claude -p` + `result.patch` on host.
-- Primitive verbs (`create`, `exec`, `collect`, `destroy`) and real `doctor`.
-
-**Next (productionization — see driver manifest):**
-
-- [`docs/features/01-productionization/driver.md`](docs/features/01-productionization/driver.md) — 8 specs in 3 batches.
-- Key paths: harden firecracker control, runner contract + `docs/runner-contract.md`, rootfs builder, cursor SDK runner, Nix flake input + `docs/flakes.md`, ship backend (in ship repo).
+Live state — what's shipped, what's in flight, and what's next — lives in dossier (project `rooms`, phase `01-productionization`), not in this durable doc. Start a session with `mcp__dossier__project_get` + `mcp__dossier__task_list`; the dossier section of the dev workbench below has the query patterns.
 
 **Spec (single source of truth for v0):** [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md).
 
