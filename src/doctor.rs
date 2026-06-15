@@ -15,6 +15,7 @@ const CHECKSUMS_TXT: &str = include_str!("../scripts/checksums.txt");
 /// Artifact names in `checksums.txt` checked against on-disk installs.
 const DRIFT_ARTIFACTS: &[&str] = &[
     "firecracker-v1.10.1-x86_64",
+    "jailer-v1.10.1-x86_64",
     "vmlinux-6.1.155.bin",
     "bionic.rootfs.ext4",
 ];
@@ -392,6 +393,10 @@ fn drift_target_path(
 ) -> Option<PathBuf> {
     match artifact {
         "firecracker-v1.10.1-x86_64" => resolve_in_path(&config.firecracker_binary),
+        // jailer installs alongside firecracker (setup-rooms-host.sh) and is a
+        // security-boundary binary, so cover its pin too. It is not in
+        // RoomsConfig, so resolve the conventional name on PATH.
+        "jailer-v1.10.1-x86_64" => resolve_in_path(Path::new("jailer")),
         "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
         // The bionic pin only applies to the quickstart download at its default
         // path — never to an arbitrary --image, which may be a built agent
