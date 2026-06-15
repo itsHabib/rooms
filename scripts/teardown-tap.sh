@@ -7,6 +7,8 @@ TAP="${TAP:-tap-fc0}"
 GUEST_NET="${GUEST_NET:-172.16.0.0/24}"
 STATE_DIR="${ROOMS_TAP_STATE_DIR:-/run/rooms}"
 IP_FORWARD_STATE="$STATE_DIR/tap-ip-forward.prev"
+OUT_FORWARD_STATE="$STATE_DIR/tap-out-forward.prev"
+OUT_IFACE_STATE="$STATE_DIR/tap-out-iface"
 
 log() { printf '\033[1;34m[teardown-tap]\033[0m %s\n' "$*"; }
 
@@ -37,7 +39,7 @@ iptables_delete_while_present nat POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
 
 iptables_delete_while_present filter FORWARD -i "$TAP" -d 192.168.0.0/16 -j DROP
 iptables_delete_while_present filter FORWARD -i "$TAP" -d 10.0.0.0/8 -j DROP
-iptables_delete_while_present filter FORWARD -i "$TAP" -d 172.16.0.0/12 ! -s "$GUEST_NET" -j DROP
+iptables_delete_while_present filter FORWARD -i "$TAP" -d 172.16.0.0/12 -j DROP
 iptables_delete_while_present filter FORWARD -i "$TAP" -o "$OUT_IFACE" -j ACCEPT
 iptables_delete_while_present filter FORWARD -i "$OUT_IFACE" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
@@ -46,6 +48,15 @@ if [[ -f "$IP_FORWARD_STATE" ]]; then
     log "restoring net.ipv4.ip_forward=$prior"
     sudo sysctl -w "net.ipv4.ip_forward=$prior" >/dev/null
     sudo rm -f "$IP_FORWARD_STATE"
+fi
+
+if [[ -f "$OUT_FORWARD_STATE" ]]; then
+    out_iface_saved="$OUT_IFACE"
+    [[ -f "$OUT_IFACE_STATE" ]] && out_iface_saved="$(<"$OUT_IFACE_STATE")"
+    prior_out="$(<"$OUT_FORWARD_STATE")"
+    log "restoring net.ipv4.conf.${out_iface_saved}.forwarding=$prior_out"
+    sudo sysctl -w "net.ipv4.conf.${out_iface_saved}.forwarding=$prior_out" >/dev/null 2>&1 || true
+    sudo rm -f "$OUT_FORWARD_STATE" "$OUT_IFACE_STATE"
 fi
 
 log "done"

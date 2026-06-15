@@ -75,13 +75,13 @@ assert_rules_present() {
 
     assert_grep "$forward" "-A FORWARD -i $TAP -d 192.168.0.0/16 -j DROP" "192.168.0.0/16 drop"
     assert_grep "$forward" "-A FORWARD -i $TAP -d 10.0.0.0/8 -j DROP" "10.0.0.0/8 drop"
-    assert_grep "$forward" "-A FORWARD -i $TAP -d 172.16.0.0/12 ! -s $GUEST_NET -j DROP" "172.16.0.0/12 drop"
+    assert_grep "$forward" "-A FORWARD -i $TAP -d 172.16.0.0/12 -j DROP" "172.16.0.0/12 drop"
     assert_grep "$forward" "-A FORWARD -i $TAP -o $OUT_IFACE -j ACCEPT" "egress accept"
 
     local drop192 drop10 drop172 accept
     drop192="$(forward_line "-i $TAP -d 192.168.0.0/16 -j DROP")"
     drop10="$(forward_line "-i $TAP -d 10.0.0.0/8 -j DROP")"
-    drop172="$(forward_line "-i $TAP -d 172.16.0.0/12 ! -s $GUEST_NET -j DROP")"
+    drop172="$(forward_line "-i $TAP -d 172.16.0.0/12 -j DROP")"
     accept="$(forward_line "-i $TAP -o $OUT_IFACE -j ACCEPT")"
 
     assert_rule_before "$drop192" "$accept" "192.168 drop before egress accept"
@@ -92,6 +92,12 @@ assert_rules_present() {
     tap_forward="$(sysctl -n "net.ipv4.conf.${TAP}.forwarding")"
     if [[ "$tap_forward" != "1" ]]; then
         fatal "expected net.ipv4.conf.${TAP}.forwarding=1, got $tap_forward"
+    fi
+
+    local out_forward
+    out_forward="$(sysctl -n "net.ipv4.conf.${OUT_IFACE}.forwarding")"
+    if [[ "$out_forward" != "1" ]]; then
+        fatal "expected net.ipv4.conf.${OUT_IFACE}.forwarding=1, got $out_forward"
     fi
 }
 
@@ -104,7 +110,7 @@ assert_rules_absent() {
     assert_not_grep "$nat" "-A POSTROUTING -o $OUT_IFACE -j MASQUERADE" "legacy unrestricted MASQUERADE"
     assert_not_grep "$forward" "-A FORWARD -i $TAP -d 192.168.0.0/16 -j DROP" "192.168.0.0/16 drop"
     assert_not_grep "$forward" "-A FORWARD -i $TAP -d 10.0.0.0/8 -j DROP" "10.0.0.0/8 drop"
-    assert_not_grep "$forward" "-A FORWARD -i $TAP -d 172.16.0.0/12 ! -s $GUEST_NET -j DROP" "172.16.0.0/12 drop"
+    assert_not_grep "$forward" "-A FORWARD -i $TAP -d 172.16.0.0/12 -j DROP" "172.16.0.0/12 drop"
     assert_not_grep "$forward" "-A FORWARD -i $TAP -o $OUT_IFACE -j ACCEPT" "egress accept"
     assert_not_grep "$forward" "-A FORWARD -i $OUT_IFACE -o $TAP -m state --state RELATED,ESTABLISHED -j ACCEPT" "return accept"
 }
