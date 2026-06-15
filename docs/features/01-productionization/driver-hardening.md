@@ -28,14 +28,12 @@ batches:
             scripts/checksums.txt,
             src/doctor.rs,
           ]
-        merge_gate: rooms-host-e2e
         status: pending
       - task_id: tsk_01KSDN8TWMW75N47EJ31XGFF6S
         task_slug: harden-tap-rules
         spec_path: docs/features/harden-tap-rules/spec.md
         runtime: cloud
         touches: [scripts/setup-tap.sh, scripts/teardown-tap.sh]
-        merge_gate: rooms-host-e2e
         status: pending
 
   - id: 2
@@ -54,9 +52,6 @@ batches:
             scripts/setup-rooms-host.sh,
             scripts/setup-tap.sh,
           ]
-        merge_gate: rooms-host-e2e
-        depends_on_tasks:
-          [tsk_01KSDN6VY01DKSPX9NPN3ZQVHH, tsk_01KSDN8TWMW75N47EJ31XGFF6S]
         status: pending
 
 conflict_notes:
@@ -82,16 +77,17 @@ conflict_notes:
       Both append a new check to the doctor module. Additive + textually
       disjoint, and batch-separated regardless — jailer rebases. Low risk.
 
-merge_policy:
-  gate: rooms-host-e2e
-  note: |
-    Operator-standing decision (2026-06-15): cloud agents write code + unit
-    tests + open PRs + run the 4-bot review; the driver drives each PR to
-    review-clean but PAUSES before merge for the operator's rooms-host e2e
-    (forced-checksum-mismatch bail; guest egress-ok / LAN-blocked; jailer
-    boot as the firecracker user). Cloud VMs have no KVM/Firecracker, so the
-    real acceptance can only be verified on rooms-host. No admin-merge of
-    unverified security scripts.
+runtime_notes:
+  merge_gate: rooms-host-e2e
+  applies_to: all streams
+  decided: 2026-06-15
+  policy: |
+    Cloud agents write code + unit tests + open PRs + run the 4-bot review.
+    The driver drives each PR to review-clean but PAUSES before merge for the
+    operator's rooms-host e2e (forced-checksum-mismatch bail; guest egress-ok /
+    LAN-blocked; jailer boot as the firecracker user). Cloud VMs have no
+    KVM/Firecracker, so the real acceptance can only be verified on rooms-host.
+    No admin-merge of unverified security scripts.
 
 skipped_during_resolution: []
 ---
@@ -128,15 +124,16 @@ a later batch.
 
 `firecracker-under-jailer` collides with **both** batch-1 streams on a shared
 script (`setup-rooms-host.sh` with supply-chain, `setup-tap.sh` with
-harden-tap), so it sequences after both land and rebases onto their versions.
+harden-tap), so it sequences after both land (batch-level `depends_on: [1]`) and
+rebases onto their versions.
 
 ## Merge gate
 
-Per the 2026-06-15 operator decision, every stream carries
-`merge_gate: rooms-host-e2e`. The driver opens PRs and drives review to clean,
-then **stops before merge** for the operator to run the host e2e on
-`rooms-host`. Merge (squash, delete branch) only after the operator confirms
-the e2e passes. See `merge_policy` in the frontmatter.
+Per the 2026-06-15 operator decision (see `runtime_notes` in the frontmatter),
+every stream is gated on a **rooms-host e2e**. The driver opens PRs and drives
+review to clean, then **stops before merge** for the operator to run the host
+e2e on `rooms-host`. Merge (squash, delete branch) only after the operator
+confirms the e2e passes.
 
 ## Invocation
 
