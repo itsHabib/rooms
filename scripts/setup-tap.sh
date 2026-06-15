@@ -13,10 +13,21 @@ set -euo pipefail
 
 TAP="${TAP:-tap-fc0}"
 HOST_IP_CIDR="${HOST_IP_CIDR:-172.16.0.1/24}"
+GUEST_NET="${GUEST_NET:-172.16.0.0/24}"
 USER_NAME="${SUDO_USER:-$USER}"
+STATE_DIR="${ROOMS_TAP_STATE_DIR:-/run/rooms}"
+IP_FORWARD_STATE="$STATE_DIR/tap-ip-forward.prev"
 
 log() { printf '\033[1;34m[setup-tap]\033[0m %s\n' "$*"; }
 fatal() { printf '\033[1;31m[setup-tap]\033[0m %s\n' "$*" >&2; exit 1; }
+
+iptables_delete_while_present() {
+    local table="$1"
+    shift
+    while sudo iptables -t "$table" -C "$@" 2>/dev/null; do
+        sudo iptables -t "$table" -D "$@"
+    done
+}
 
 if ! command -v iptables >/dev/null 2>&1; then
     fatal "iptables not found; install with: sudo apt install iptables"
@@ -42,26 +53,37 @@ sudo ip tuntap add "$TAP" mode tap user "$USER_NAME"
 sudo ip addr add "$HOST_IP_CIDR" dev "$TAP"
 sudo ip link set "$TAP" up
 
-# Enable IPv4 forwarding (transient — resets on reboot, fine for POC).
-log "enabling IPv4 forwarding"
-sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-# NAT outbound traffic so the guest's 172.16.0.2 source IP gets rewritten
-# to the host's outbound interface IP. Idempotent: -C checks existence;
-# only -A if missing.
-log "ensuring NAT rule for $OUT_IFACE"
-if ! sudo iptables -t nat -C POSTROUTING -o "$OUT_IFACE" -j MASQUERADE 2>/dev/null; then
-    sudo iptables -t nat -A POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
+# Record the prior global ip_forward value once so teardown can restore it.
+if [[ ! -f "$IP_FORWARD_STATE" ]]; then
+    log "recording prior net.ipv4.ip_forward"
+    sudo mkdir -p "$STATE_DIR"
+    sysctl -n net.ipv4.ip_forward | sudo tee "$IP_FORWARD_STATE" >/dev/null
 fi
 
-# Allow forwarding from TAP to outbound and return traffic back.
-# Default Ubuntu iptables FORWARD policy is ACCEPT, so this is usually
-# already permitted — but pin it explicitly.
-if ! sudo iptables -C FORWARD -i "$TAP" -o "$OUT_IFACE" -j ACCEPT 2>/dev/null; then
-    sudo iptables -A FORWARD -i "$TAP" -o "$OUT_IFACE" -j ACCEPT
-fi
-if ! sudo iptables -C FORWARD -i "$OUT_IFACE" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
-    sudo iptables -A FORWARD -i "$OUT_IFACE" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT
-fi
+# Scope forwarding to the TAP only — do not flip the global ip_forward flag.
+log "enabling IPv4 forwarding on $TAP"
+sudo sysctl -w "net.ipv4.conf.${TAP}.forwarding=1" >/dev/null
+
+# Remove legacy unrestricted MASQUERADE and any prior rooms rule, then add
+# the source-restricted NAT rule in a known-good state.
+log "ensuring source-restricted NAT rule for $OUT_IFACE"
+iptables_delete_while_present nat POSTROUTING -s "$GUEST_NET" -o "$OUT_IFACE" -j MASQUERADE
+iptables_delete_while_present nat POSTROUTING -o "$OUT_IFACE" -j MASQUERADE
+sudo iptables -t nat -A POSTROUTING -s "$GUEST_NET" -o "$OUT_IFACE" -j MASQUERADE
+
+# Drop guest → RFC1918 before the egress accept. Re-add in order every run so
+# upgrades from the permissive POC rules cannot leave DROP after ACCEPT.
+log "ensuring guest→LAN blocks and egress forward rules"
+iptables_delete_while_present filter FORWARD -i "$TAP" -d 192.168.0.0/16 -j DROP
+iptables_delete_while_present filter FORWARD -i "$TAP" -d 10.0.0.0/8 -j DROP
+iptables_delete_while_present filter FORWARD -i "$TAP" -d 172.16.0.0/12 ! -s "$GUEST_NET" -j DROP
+iptables_delete_while_present filter FORWARD -i "$TAP" -o "$OUT_IFACE" -j ACCEPT
+iptables_delete_while_present filter FORWARD -i "$OUT_IFACE" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+sudo iptables -A FORWARD -i "$TAP" -d 192.168.0.0/16 -j DROP
+sudo iptables -A FORWARD -i "$TAP" -d 10.0.0.0/8 -j DROP
+sudo iptables -A FORWARD -i "$TAP" -d 172.16.0.0/12 ! -s "$GUEST_NET" -j DROP
+sudo iptables -A FORWARD -i "$TAP" -o "$OUT_IFACE" -j ACCEPT
+sudo iptables -A FORWARD -i "$OUT_IFACE" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 log "done. $TAP is up at ${HOST_IP_CIDR%/*}; guest will reach internet via $OUT_IFACE."

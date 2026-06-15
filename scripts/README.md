@@ -99,5 +99,22 @@ If you only need to boot once before building locally, `scripts/setup-rooms-host
 | --- | --- |
 | `setup-rooms-host.sh` | Bootstrap the rooms-host VM (Firecracker, kernel, Rust, Node) |
 | `setup-tap.sh` / `teardown-tap.sh` | TAP + NAT for guest networking |
+| `test-tap-rules.sh` | Host-only iptables rule assertions (run before merge on rooms-host) |
+
+### TAP / iptables hardening
+
+`setup-tap.sh` gives the guest internet egress only:
+
+- NAT is source-restricted to `172.16.0.0/24` (rooms guest subnet).
+- FORWARD drops guest traffic to RFC1918 (`192.168.0.0/16`, `10.0.0.0/8`, and other `172.16.0.0/12` destinations) before the egress accept.
+- IPv4 forwarding is scoped to `tap-fc0` via `net.ipv4.conf.tap-fc0.forwarding=1`; the prior global `net.ipv4.ip_forward` value is saved under `/run/rooms/` for `teardown-tap.sh` to restore.
+
+Verify on rooms-host:
+
+```sh
+sudo ./scripts/test-tap-rules.sh
+```
+
+From inside a booted guest, confirm `curl https://api.anthropic.com` succeeds while ping/connect to an RFC1918 host on the operator LAN is blocked.
 | `bake-rootfs-ssh.sh` | POC helper for the quickstart bionic image (superseded by `build-rootfs.sh` for new images) |
 | `provision-hyperv.ps1` | Create the Hyper-V VM from Windows |
