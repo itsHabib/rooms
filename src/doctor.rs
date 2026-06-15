@@ -1,5 +1,6 @@
 //! Host environment checks for `rooms doctor`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -7,6 +8,16 @@ use serde::Serialize;
 
 use crate::config::RoomsConfig;
 use crate::rootfs::{kernel_sibling, validate_kernel, validate_rootfs};
+
+/// Embedded checksum pins (same source as `scripts/checksums.txt`).
+const CHECKSUMS_TXT: &str = include_str!("../scripts/checksums.txt");
+
+/// Artifact names in `checksums.txt` checked against on-disk installs.
+const DRIFT_ARTIFACTS: &[&str] = &[
+    "firecracker-v1.10.1-x86_64",
+    "vmlinux-6.1.155.bin",
+    "bionic.rootfs.ext4",
+];
 
 /// Schema version for `--json` output (ED-4: forward-compatible).
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
@@ -43,6 +54,7 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
         check_anthropic_api_key(),
         check_tap(),
         check_nested_virt(),
+        check_sha_drift(config, image),
     ];
 
     DoctorReport {
@@ -333,11 +345,117 @@ fn default_rootfs_path() -> PathBuf {
     PathBuf::from(home).join("rooms/images/rootfs.ext4")
 }
 
+fn parse_checksums(content: &str) -> HashMap<String, String> {
+    let mut pins = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(digest) = parts.next() else {
+            continue;
+        };
+        let Some(name) = parts.next() else {
+            continue;
+        };
+        if digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            pins.insert(name.to_owned(), digest.to_ascii_lowercase());
+        }
+    }
+    pins
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("sha256sum failed for {}: {e}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sha256sum exited {} for {}",
+            output.status,
+            path.display()
+        ));
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    line.split_whitespace()
+        .next()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| format!("sha256sum produced no digest for {}", path.display()))
+}
+
+fn drift_target_path(
+    artifact: &str,
+    config: &RoomsConfig,
+    image: Option<&Path>,
+) -> Option<PathBuf> {
+    match artifact {
+        "firecracker-v1.10.1-x86_64" => Some(config.firecracker_binary.clone()),
+        "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
+        "bionic.rootfs.ext4" => Some(image.map_or_else(default_rootfs_path, Path::to_path_buf)),
+        _ => None,
+    }
+}
+
+fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
+    let name = "sha_drift".to_owned();
+    let pins = parse_checksums(CHECKSUMS_TXT);
+    let mut drifts = Vec::new();
+    let mut checked = 0u32;
+
+    for artifact in DRIFT_ARTIFACTS {
+        let Some(expected) = pins.get(*artifact) else {
+            return CheckResult {
+                name,
+                ok: true,
+                message: format!("warn: no checksum pin for {artifact} in embedded checksums"),
+            };
+        };
+        let Some(path) = drift_target_path(artifact, config, image) else {
+            continue;
+        };
+        if !path.exists() {
+            continue;
+        }
+        checked += 1;
+        match file_sha256(&path) {
+            Ok(actual) if actual == *expected => {}
+            Ok(actual) => drifts.push(format!(
+                "{artifact} at {} (expected {expected}, got {actual})",
+                path.display()
+            )),
+            Err(e) => drifts.push(format!("{artifact} at {} ({e})", path.display())),
+        }
+    }
+
+    if drifts.is_empty() {
+        return CheckResult {
+            name,
+            ok: true,
+            message: if checked == 0 {
+                "no pinned artifacts present to verify".to_owned()
+            } else {
+                format!("{checked} pinned artifact(s) match checksums.txt")
+            },
+        };
+    }
+
+    CheckResult {
+        name,
+        ok: true,
+        message: format!("warn: sha256 drift detected: {}", drifts.join("; ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
-    use super::{parse_firecracker_version, version_meets_min};
+    use super::{
+        check_sha_drift, parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn parses_firecracker_version_string() {
@@ -362,6 +480,52 @@ mod tests {
         assert!(version_meets_min(1, 7, (1, 7)));
         assert!(version_meets_min(2, 0, (1, 7)));
         assert!(!version_meets_min(1, 6, (1, 7)));
+    }
+
+    #[test]
+    fn parses_checksums_skips_comments_and_blanks() {
+        let digest = "a".repeat(64);
+        let input = format!("# comment\n\n{digest}  artifact-a\n");
+        let pins = parse_checksums(&input);
+        assert_eq!(pins.get("artifact-a"), Some(&digest));
+    }
+
+    #[test]
+    fn sha_drift_reports_ok_when_no_artifacts_present() {
+        let config = RoomsConfig {
+            firecracker_binary: PathBuf::from("/nonexistent/firecracker"),
+            ..RoomsConfig::default()
+        };
+        let result = check_sha_drift(&config, None);
+        assert!(result.ok, "missing artifacts should warn-only, not fail");
+        assert!(
+            result.message.contains("no pinned artifacts present"),
+            "unexpected message: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn sha_drift_warns_on_mismatch_not_fail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("rootfs.ext4");
+        std::fs::write(&image, b"stub-rootfs").expect("write rootfs stub");
+        let kernel_path = dir.path().join("vmlinux.bin");
+        std::fs::write(&kernel_path, b"not-the-real-kernel").expect("write kernel stub");
+
+        let config = RoomsConfig::default();
+        let result = check_sha_drift(&config, Some(&image));
+
+        assert!(
+            result.ok,
+            "sha drift must warn, not fail doctor: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("warn:") && result.message.contains("drift"),
+            "expected warn-level drift message, got: {}",
+            result.message
+        );
     }
 
     mod version_parser_properties {

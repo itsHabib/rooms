@@ -14,7 +14,7 @@ sudo ./scripts/build-rootfs-alpine.sh \
   --ssh-key ~/.ssh/id_rooms.pub
 ```
 
-Pinned by default to Alpine `3.21.7` and `claude-code=2.1.148-r1` (override with `--alpine-version` / `--claude-version`). `claude-code` installs from Anthropic's official signed apk repo; the build verifies the signing-key sha256 and **aborts** if `claude --version` doesn't link cleanly against musl. The agent runs as the unprivileged `rooms` user (uid 1000) — claude-code refuses `--dangerously-skip-permissions` as root. There is **no Node** in the base image; `cursor-sdk-runner` adds it via the `--extend` hook.
+Pinned by default to Alpine `3.21.7` and `claude-code=2.1.148-r1` (override with `--alpine-version` / `--claude-version`). The Alpine minirootfs sha256 is hardcoded (see `scripts/checksums.txt`), not taken from the CDN sidecar alone. `claude-code` installs from Anthropic's official signed apk repo; the build verifies the signing-key sha256 and **aborts** if `claude --version` doesn't link cleanly against musl. The agent runs as the unprivileged `rooms` user (uid 1000) — claude-code refuses `--dangerously-skip-permissions` as root. There is **no Node** in the base image; `cursor-sdk-runner` adds it via the `--extend` hook (sibling files in `scripts/rootfs/`, e.g. `package-lock.json`, are staged into the chroot automatically).
 
 ### Kernel
 
@@ -98,6 +98,7 @@ If you only need to boot once before building locally, `scripts/setup-rooms-host
 | Script | Purpose |
 | --- | --- |
 | `setup-rooms-host.sh` | Bootstrap the rooms-host VM (Firecracker, kernel, Rust, Node) |
+| `checksums.txt` | Central sha256 pins for every build input; bump here when upstream versions change |
 | `setup-tap.sh` / `teardown-tap.sh` | TAP + NAT for guest networking |
 | `bake-rootfs-ssh.sh` | POC helper for the quickstart bionic image (superseded by `build-rootfs.sh` for new images) |
 | `provision-hyperv.ps1` | Create the Hyper-V VM from Windows |

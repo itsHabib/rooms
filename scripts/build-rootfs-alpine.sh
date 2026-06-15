@@ -35,6 +35,8 @@ SSH_KEY=""
 EXTEND=""
 
 ALPINE_CDN="https://dl-cdn.alpinelinux.org/alpine"
+# Pinned in scripts/checksums.txt — do not trust the CDN .sha256 sidecar alone.
+ALPINE_MINIROOTFS_SHA256="8cba1ea3e8b500ea986a313d8eecf3d5952a2a0d23a69117bb81c023d9ceac05"
 CLAUDE_KEY_URL="https://downloads.claude.ai/keys/claude-code.rsa.pub"
 CLAUDE_KEY_SHA256="395759c1f7449ef4cdef305a42e820f3c766d6090d142634ebdb049f113168b6"
 CLAUDE_APK_REPO="https://downloads.claude.ai/claude-code/apk/stable"
@@ -103,9 +105,10 @@ TARBALL_PATH="${WORK}/${TARBALL}"
 
 log "fetching ${TARBALL}"
 curl -fsSL "${MIRROR}/${TARBALL}" -o "$TARBALL_PATH"
-curl -fsSL "${MIRROR}/${TARBALL}.sha256" -o "${TARBALL_PATH}.sha256"
-log "verifying minirootfs sha256"
-( cd "$WORK" && sha256sum -c "${TARBALL}.sha256" >/dev/null ) || fatal "minirootfs sha256 mismatch"
+log "verifying minirootfs sha256 (pinned for Alpine ${ALPINE_VERSION})"
+GOT="$(sha256sum "$TARBALL_PATH" | awk '{print $1}')"
+[[ "$GOT" = "$ALPINE_MINIROOTFS_SHA256" ]] \
+    || fatal "minirootfs sha256 mismatch for ${TARBALL}: expected ${ALPINE_MINIROOTFS_SHA256}, got ${GOT} (see scripts/checksums.txt)"
 
 log "allocating ${SIZE} sparse image at $TMP_OUT"
 # truncate (not fallocate) keeps the file sparse so allocated size tracks
@@ -265,11 +268,23 @@ fi
 log "claude ok in image: $SMOKE"
 
 if [[ -n "$EXTEND" ]]; then
+    EXT_DIR="$(dirname "$EXTEND")"
     EXT_BASENAME="$(basename "$EXTEND")"
+    log "staging --extend assets from ${EXT_DIR} into chroot /tmp"
+    for asset in "$EXT_DIR"/*; do
+        [[ -f "$asset" ]] || continue
+        [[ "$(basename "$asset")" == "$EXT_BASENAME" ]] && continue
+        install -m 0644 "$asset" "$MNT/tmp/$(basename "$asset")"
+    done
     log "running extension script inside chroot: $EXTEND"
     install -m 0755 "$EXTEND" "$MNT/tmp/$EXT_BASENAME"
     chroot "$MNT" "/tmp/$EXT_BASENAME"
     rm -f "$MNT/tmp/$EXT_BASENAME"
+    for asset in "$EXT_DIR"/*; do
+        [[ -f "$asset" ]] || continue
+        [[ "$(basename "$asset")" == "$EXT_BASENAME" ]] && continue
+        rm -f "$MNT/tmp/$(basename "$asset")"
+    done
 fi
 
 log "syncing and unmounting"

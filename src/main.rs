@@ -200,7 +200,15 @@ fn run_doctor_cmd(
         }
     } else {
         for check in &report.checks {
-            let status = if check.ok { "ok" } else { "FAIL" };
+            let status = if check.ok {
+                if check.message.starts_with("warn:") {
+                    "WARN"
+                } else {
+                    "ok"
+                }
+            } else {
+                "FAIL"
+            };
             eprintln!("[{status}] {}: {}", check.name, check.message);
         }
     }
