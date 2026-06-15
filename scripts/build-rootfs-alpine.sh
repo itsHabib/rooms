@@ -25,7 +25,11 @@ source "${SCRIPT_DIR}/lib/rootfs-helpers.sh"
 
 # Pinned inputs. Bump deliberately and re-run the build (the smoke gate at the
 # end refuses an image whose claude binary fails to link against musl).
-ALPINE_VERSION="3.21.7"
+# The minirootfs digest (ALPINE_MINIROOTFS_SHA256, below) is pinned to exactly
+# this Alpine release; --alpine-version is rejected unless it matches. Bump both
+# together and update scripts/checksums.txt.
+ALPINE_PINNED_VERSION="3.21.7"
+ALPINE_VERSION="$ALPINE_PINNED_VERSION"
 CLAUDE_VERSION="2.1.148-r1"
 GUEST_USER="rooms"
 GUEST_UID="1000"
@@ -54,7 +58,7 @@ usage: $0 --ssh-key <pubkey-path> [options]
 
   --out <path>             Output ext4 path (default: ${OUT})
   --ssh-key <path>         Operator SSH public key baked into the rooms user (required)
-  --alpine-version <ver>   Alpine release, e.g. 3.21.7 (default: ${ALPINE_VERSION})
+  --alpine-version <ver>   Alpine release; must match the pinned ${ALPINE_PINNED_VERSION} (the minirootfs sha256 is pinned)
   --claude-version <ver>   claude-code apk version (default: ${CLAUDE_VERSION})
   --size <size>            Image capacity, e.g. 512M (default: ${SIZE})
   --extend <script>        Script run inside the chroot after baseline installs
@@ -79,6 +83,12 @@ assert_root
 [[ -n "$SSH_KEY" ]] || fatal "--ssh-key is required (pubkey-only auth; no password)"
 [[ -f "$SSH_KEY" ]] || fatal "ssh public key not found: $SSH_KEY"
 [[ -z "$EXTEND" || -f "$EXTEND" ]] || fatal "--extend script not found: $EXTEND"
+
+# The minirootfs sha256 is pinned to one release; a different --alpine-version
+# would download a legitimate tarball that fails the hardcoded digest gate.
+# Reject early with an actionable message instead of a confusing sha mismatch.
+[[ "$ALPINE_VERSION" == "$ALPINE_PINNED_VERSION" ]] \
+    || fatal "--alpine-version ${ALPINE_VERSION} unsupported: the minirootfs sha256 is pinned to ${ALPINE_PINNED_VERSION}; to bump, update ALPINE_PINNED_VERSION + ALPINE_MINIROOTFS_SHA256 (and scripts/checksums.txt) together"
 
 # Alpine branch is vMAJOR.MINOR (e.g. 3.21.7 -> v3.21).
 ALPINE_BRANCH="v$(printf '%s' "$ALPINE_VERSION" | cut -d. -f1,2)"

@@ -391,26 +391,42 @@ fn drift_target_path(
     image: Option<&Path>,
 ) -> Option<PathBuf> {
     match artifact {
-        "firecracker-v1.10.1-x86_64" => Some(config.firecracker_binary.clone()),
+        "firecracker-v1.10.1-x86_64" => resolve_in_path(&config.firecracker_binary),
         "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
-        "bionic.rootfs.ext4" => Some(image.map_or_else(default_rootfs_path, Path::to_path_buf)),
+        // The bionic pin only applies to the quickstart download at its default
+        // path — never to an arbitrary --image, which may be a built agent
+        // rootfs that legitimately differs from the bionic digest.
+        "bionic.rootfs.ext4" => Some(default_rootfs_path()),
         _ => None,
     }
+}
+
+/// Resolve a binary to a concrete path. Absolute or directory-qualified paths
+/// are used as-is; a bare name is searched on `PATH`, so an installed
+/// `firecracker` in `/usr/local/bin` is hashed for drift rather than silently
+/// skipped because the bare name does not exist relative to the cwd.
+fn resolve_in_path(binary: &Path) -> Option<PathBuf> {
+    if binary.is_absolute() || binary.components().count() > 1 {
+        return binary.exists().then(|| binary.to_path_buf());
+    }
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
     let name = "sha_drift".to_owned();
     let pins = parse_checksums(CHECKSUMS_TXT);
-    let mut drifts = Vec::new();
+    let mut warnings = Vec::new();
     let mut checked = 0u32;
 
     for artifact in DRIFT_ARTIFACTS {
         let Some(expected) = pins.get(*artifact) else {
-            return CheckResult {
-                name,
-                ok: true,
-                message: format!("warn: no checksum pin for {artifact} in embedded checksums"),
-            };
+            warnings.push(format!(
+                "no checksum pin for {artifact} in embedded checksums"
+            ));
+            continue;
         };
         let Some(path) = drift_target_path(artifact, config, image) else {
             continue;
@@ -421,15 +437,18 @@ fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
         checked += 1;
         match file_sha256(&path) {
             Ok(actual) if actual == *expected => {}
-            Ok(actual) => drifts.push(format!(
-                "{artifact} at {} (expected {expected}, got {actual})",
+            Ok(actual) => warnings.push(format!(
+                "sha256 drift: {artifact} at {} (expected {expected}, got {actual})",
                 path.display()
             )),
-            Err(e) => drifts.push(format!("{artifact} at {} ({e})", path.display())),
+            Err(e) => warnings.push(format!(
+                "sha256 check failed: {artifact} at {} ({e})",
+                path.display()
+            )),
         }
     }
 
-    if drifts.is_empty() {
+    if warnings.is_empty() {
         return CheckResult {
             name,
             ok: true,
@@ -444,7 +463,7 @@ fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
     CheckResult {
         name,
         ok: true,
-        message: format!("warn: sha256 drift detected: {}", drifts.join("; ")),
+        message: format!("warn: {}", warnings.join("; ")),
     }
 }
 
@@ -453,7 +472,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
     use super::{
-        check_sha_drift, parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
+        check_sha_drift, default_rootfs_path, drift_target_path, parse_checksums,
+        parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
 
@@ -525,6 +545,26 @@ mod tests {
             result.message.contains("warn:") && result.message.contains("drift"),
             "expected warn-level drift message, got: {}",
             result.message
+        );
+    }
+
+    #[test]
+    fn bionic_drift_ignores_image_override() {
+        // `--image` may point at a built agent rootfs that legitimately differs
+        // from the bionic pin; the bionic drift target must stay the default
+        // quickstart path regardless, so it never spuriously warns.
+        let config = RoomsConfig::default();
+        let custom = PathBuf::from("/custom/agent-alpine.ext4");
+        let target = drift_target_path("bionic.rootfs.ext4", &config, Some(custom.as_path()));
+        assert_ne!(
+            target.as_deref(),
+            Some(custom.as_path()),
+            "bionic pin must not follow --image"
+        );
+        assert_eq!(
+            target,
+            Some(default_rootfs_path()),
+            "bionic pin must resolve to the default quickstart rootfs path"
         );
     }
 
