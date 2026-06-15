@@ -16,7 +16,6 @@ HOST_IP_CIDR="${HOST_IP_CIDR:-172.16.0.1/24}"
 GUEST_NET="${GUEST_NET:-172.16.0.0/24}"
 USER_NAME="${SUDO_USER:-$USER}"
 STATE_DIR="${ROOMS_TAP_STATE_DIR:-/run/rooms}"
-IP_FORWARD_STATE="$STATE_DIR/tap-ip-forward.prev"
 OUT_FORWARD_STATE="$STATE_DIR/tap-out-forward.prev"
 OUT_IFACE_STATE="$STATE_DIR/tap-out-iface"
 
@@ -55,14 +54,10 @@ sudo ip tuntap add "$TAP" mode tap user "$USER_NAME"
 sudo ip addr add "$HOST_IP_CIDR" dev "$TAP"
 sudo ip link set "$TAP" up
 
-# Record prior forwarding state once so teardown can restore it: the global
-# ip_forward flag (which we deliberately do NOT flip) and the outbound
-# interface's per-interface forwarding value.
+# Record the outbound interface's prior per-interface forwarding value, plus the
+# interface name, so teardown restores exactly what we changed. We never touch
+# the global net.ipv4.ip_forward flag, so we never record or restore it.
 sudo mkdir -p "$STATE_DIR"
-if [[ ! -f "$IP_FORWARD_STATE" ]]; then
-    log "recording prior net.ipv4.ip_forward"
-    sysctl -n net.ipv4.ip_forward | sudo tee "$IP_FORWARD_STATE" >/dev/null
-fi
 if [[ ! -f "$OUT_FORWARD_STATE" ]]; then
     log "recording prior net.ipv4.conf.${OUT_IFACE}.forwarding"
     sysctl -n "net.ipv4.conf.${OUT_IFACE}.forwarding" | sudo tee "$OUT_FORWARD_STATE" >/dev/null

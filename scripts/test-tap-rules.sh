@@ -29,7 +29,7 @@ assert_grep() {
     local haystack="$1"
     local needle="$2"
     local label="$3"
-    if ! grep -Fq "$needle" <<<"$haystack"; then
+    if ! grep -Fq -- "$needle" <<<"$haystack"; then
         fatal "missing $label: expected '$needle'"
     fi
 }
@@ -38,7 +38,7 @@ assert_not_grep() {
     local haystack="$1"
     local needle="$2"
     local label="$3"
-    if grep -Fq "$needle" <<<"$haystack"; then
+    if grep -Fq -- "$needle" <<<"$haystack"; then
         fatal "unexpected $label: still present '$needle'"
     fi
 }
@@ -55,8 +55,8 @@ assert_rule_before() {
     local forward_dump
     forward_dump="$(iptables -S FORWARD)"
     local earlier_line later_line
-    earlier_line="$(grep -Fn "$earlier" <<<"$forward_dump" | head -n1 | cut -d: -f1)"
-    later_line="$(grep -Fn "$later" <<<"$forward_dump" | head -n1 | cut -d: -f1)"
+    earlier_line="$(grep -Fn -- "$earlier" <<<"$forward_dump" | head -n1 | cut -d: -f1)"
+    later_line="$(grep -Fn -- "$later" <<<"$forward_dump" | head -n1 | cut -d: -f1)"
     if [[ -z "$earlier_line" || -z "$later_line" ]]; then
         fatal "could not locate rules for ordering check: $label"
     fi
