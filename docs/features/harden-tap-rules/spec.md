@@ -28,13 +28,13 @@ The POC's `scripts/setup-tap.sh` is too permissive in three independent ways (re
 2. **Block guest → LAN** with explicit drops, ordered **before** the egress accept:
    - `FORWARD -i tap-fc0 -d 192.168.0.0/16 -j DROP`
    - `FORWARD -i tap-fc0 -d 10.0.0.0/8 -j DROP`
-   - `FORWARD -i tap-fc0 -d 172.16.0.0/12 ! -s 172.16.0.0/24 -j DROP`
+   - `FORWARD -i tap-fc0 -d 172.16.0.0/12 -j DROP` — drop the whole range. (The original `! -s 172.16.0.0/24` here was a **no-op**: every packet on `tap-fc0` has a source inside the guest subnet, so the negated-source match never fired and the other `172.16/12` /16s were wide open. Corrected in review — guest↔gateway traffic uses INPUT/OUTPUT, not FORWARD, so dropping the whole range is safe. [#42](https://github.com/itsHabib/rooms/pull/42).)
    Then preserve internet egress: `FORWARD -i tap-fc0 -o eth0 -j ACCEPT` (after the drops).
-3. **Scope forwarding per-interface.** Replace the kernel-wide `net.ipv4.ip_forward=1` with `net.ipv4.conf.tap-fc0.forwarding=1`. Capture the prior global `ip_forward` state so teardown can restore it.
+3. **Scope forwarding per-interface.** Replace the kernel-wide `net.ipv4.ip_forward=1` with per-interface forwarding on **both** `net.ipv4.conf.tap-fc0.forwarding=1` (egress) **and** `net.ipv4.conf.<out_iface>.forwarding=1` (the return path — replies arrive on the outbound interface and are gated by *its* flag; enabling only the TAP silently breaks egress). Save/restore the outbound interface's prior value; never touch the global `ip_forward`. (Both refinements landed in review, [#42](https://github.com/itsHabib/rooms/pull/42).)
 
 ### `scripts/teardown-tap.sh`
 
-Undo every rule the setup adds — the source-restricted MASQUERADE, the three guest→LAN drops, the scoped egress accept — and restore the prior global `ip_forward` value captured at setup time. Teardown must be idempotent (safe to run when rules are already gone).
+Undo every rule the setup adds — the source-restricted MASQUERADE, the three guest→LAN drops, the scoped egress accept — and restore the **outbound interface's** prior per-interface forwarding value (using the interface saved at setup time, not a fresh detection — the default route may have changed). The global `ip_forward` is never touched, so it's never restored. Teardown must be idempotent (safe to run when rules are already gone).
 
 ## Acceptance
 
