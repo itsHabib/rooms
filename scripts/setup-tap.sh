@@ -14,7 +14,7 @@ set -euo pipefail
 TAP="${TAP:-tap-fc0}"
 HOST_IP_CIDR="${HOST_IP_CIDR:-172.16.0.1/24}"
 GUEST_NET="${GUEST_NET:-172.16.0.0/24}"
-USER_NAME="${SUDO_USER:-$USER}"
+FIRECRACKER_USER="${FIRECRACKER_USER:-firecracker}"
 STATE_DIR="${ROOMS_TAP_STATE_DIR:-/run/rooms}"
 OUT_FORWARD_STATE="$STATE_DIR/tap-out-forward.prev"
 OUT_IFACE_STATE="$STATE_DIR/tap-out-iface"
@@ -47,10 +47,12 @@ if ip link show "$TAP" >/dev/null 2>&1; then
     sudo ip link del "$TAP"
 fi
 
-# Create TAP, owned by current user — so firecracker (running as $USER) can
-# open it without needing CAP_NET_ADMIN or root.
-log "creating $TAP owned by $USER_NAME"
-sudo ip tuntap add "$TAP" mode tap user "$USER_NAME"
+# Create TAP, owned by the dedicated firecracker user — not the operator.
+if ! id "$FIRECRACKER_USER" >/dev/null 2>&1; then
+    fatal "system user $FIRECRACKER_USER missing; run scripts/setup-rooms-host.sh first"
+fi
+log "creating $TAP owned by $FIRECRACKER_USER"
+sudo ip tuntap add "$TAP" mode tap user "$FIRECRACKER_USER"
 sudo ip addr add "$HOST_IP_CIDR" dev "$TAP"
 sudo ip link set "$TAP" up
 

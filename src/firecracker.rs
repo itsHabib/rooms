@@ -17,6 +17,16 @@ use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
 use crate::transport;
 
+/// Dedicated unprivileged user Firecracker runs as inside the jailer.
+pub const FIRECRACKER_USER: &str = "firecracker";
+
+/// Unix socket file name inside the jail root (host path is under the chroot tree).
+const JAIL_API_SOCK: &str = "api.sock";
+
+/// Bind-mount target names inside the jail root for kernel and rootfs.
+const JAIL_KERNEL: &str = "kernel";
+const JAIL_ROOTFS: &str = "rootfs";
+
 /// Network configuration for a microVM.
 pub struct NetworkConfig {
     pub tap_name: String,
@@ -33,6 +43,10 @@ impl RoomId {
     fn new() -> Self {
         Self(Ulid::new())
     }
+
+    fn as_str(&self) -> String {
+        self.0.to_string().to_lowercase()
+    }
 }
 
 /// RAII guard that cleans up room resources on drop or explicit shutdown.
@@ -46,6 +60,7 @@ pub struct RoomGuard {
     suppress_cleanup: bool,
     dismiss: bool,
     cleanup_grace: Duration,
+    jail_instance_dir: Option<PathBuf>,
 }
 
 impl RoomGuard {
@@ -59,7 +74,12 @@ impl RoomGuard {
             suppress_cleanup: false,
             dismiss: false,
             cleanup_grace: config.cleanup_grace,
+            jail_instance_dir: None,
         }
+    }
+
+    fn set_jail_instance_dir(&mut self, path: PathBuf) {
+        self.jail_instance_dir = Some(path);
     }
 
     fn set_child(&mut self, child: &Child) {
@@ -113,6 +133,9 @@ impl RoomGuard {
         if self.socket.exists() {
             let _ = std::fs::remove_file(&self.socket);
         }
+        if let Some(jail_dir) = self.jail_instance_dir.take() {
+            teardown_jail_sync(&jail_dir);
+        }
         let _ = std::fs::remove_dir_all(&self.room_dir);
     }
 }
@@ -162,6 +185,17 @@ impl BootedVm {
     }
 }
 
+/// Resolved jailer invocation plan (pure data for tests and spawn).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JailerLaunchPlan {
+    pub jailer_binary: PathBuf,
+    pub jailer_args: Vec<String>,
+    pub firecracker_args: Vec<String>,
+    pub host_socket: PathBuf,
+    pub kernel_path_in_jail: PathBuf,
+    pub rootfs_path_in_jail: PathBuf,
+}
+
 /// Boot a Firecracker microVM with the given kernel + rootfs.
 pub async fn boot(
     kernel: &Path,
@@ -170,28 +204,60 @@ pub async fn boot(
     config: &RoomsConfig,
 ) -> Result<BootedVm, FirecrackerError> {
     check_kvm()?;
-    resolve_firecracker_binary(config)?;
+    let firecracker_binary = resolve_firecracker_binary(config)?;
+    let jailer_binary = resolve_jailer_binary(config)?;
+    let (fc_uid, fc_gid) = lookup_firecracker_ids()?;
 
     let room_id = RoomId::new();
+    let room_id_str = room_id.as_str();
     let per_room_dir = room_state_dir(&room_id)?;
     prepare_room_dir(&per_room_dir).await?;
 
-    let socket = per_room_dir.join("api.sock");
+    let chroot_base = jailer_chroot_base(config)?;
+    let jail_layout =
+        prepare_jail_layout(&chroot_base, &room_id_str, kernel, rootfs, fc_uid, fc_gid).await?;
+
+    let socket = jail_layout.host_socket.clone();
     let log_path = per_room_dir.join("firecracker.log");
     let mut guard = RoomGuard::new(per_room_dir.clone(), socket.clone(), config);
+    guard.set_jail_instance_dir(jail_layout.instance_dir.clone());
 
     if let Some(net) = network {
         guard.set_tap(net.tap_name.clone());
     }
 
+    let launch = build_jailer_launch_plan(&JailerLaunchInput {
+        jailer_binary: &jailer_binary,
+        firecracker_binary: &firecracker_binary,
+        chroot_base: &chroot_base,
+        room_id: &room_id_str,
+        fc_uid,
+        fc_gid,
+        layout: &jail_layout,
+    });
+
     let log_handles = open_log_file(&log_path).await?;
-    let mut child = spawn_firecracker(&config.firecracker_binary, &socket, log_handles)?;
+    let mut child = spawn_jailer(&launch, log_handles)?;
     guard.set_child(&child);
 
-    wait_for_socket(&socket, config.api_socket_timeout, &mut child).await?;
+    wait_for_socket(
+        &socket,
+        config.api_socket_timeout,
+        &mut child,
+        Some(&log_path),
+    )
+    .await?;
 
     let boot_args = build_boot_args(network);
-    configure_vm(&socket, kernel, rootfs, network, &boot_args, config).await?;
+    configure_vm(
+        &socket,
+        &launch.kernel_path_in_jail,
+        &launch.rootfs_path_in_jail,
+        network,
+        &boot_args,
+        config,
+    )
+    .await?;
 
     info!("microVM booted");
     Ok(BootedVm { guard, child })
@@ -217,17 +283,296 @@ fn check_kvm() -> Result<(), FirecrackerError> {
     }
 }
 
-fn resolve_firecracker_binary(config: &RoomsConfig) -> Result<(), FirecrackerError> {
-    if config.firecracker_binary.is_absolute() {
-        if config.firecracker_binary.exists() {
-            return Ok(());
+fn resolve_firecracker_binary(config: &RoomsConfig) -> Result<PathBuf, FirecrackerError> {
+    resolve_binary_on_path(&config.firecracker_binary, |path| {
+        FirecrackerError::BinaryNotFound {
+            path: path.to_path_buf(),
         }
-        return Err(FirecrackerError::BinaryNotFound {
-            path: config.firecracker_binary.clone(),
+    })
+}
+
+fn resolve_jailer_binary(config: &RoomsConfig) -> Result<PathBuf, FirecrackerError> {
+    resolve_binary_on_path(&config.jailer_binary, |path| {
+        FirecrackerError::JailerNotFound {
+            path: path.to_path_buf(),
+        }
+    })
+}
+
+fn resolve_binary_on_path<F>(binary: &Path, not_found: F) -> Result<PathBuf, FirecrackerError>
+where
+    F: FnOnce(&Path) -> FirecrackerError,
+{
+    if binary.is_absolute() || binary.components().count() > 1 {
+        if binary.exists() {
+            return Ok(binary.to_path_buf());
+        }
+        return Err(not_found(binary));
+    }
+    let path_var = env::var_os("PATH").ok_or_else(|| FirecrackerError::JailPrepareFailed {
+        reason: "PATH unset".to_owned(),
+    })?;
+    env::split_paths(&path_var)
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| not_found(binary))
+}
+
+fn jailer_chroot_base(config: &RoomsConfig) -> Result<PathBuf, FirecrackerError> {
+    if let Some(base) = &config.jailer_chroot_base {
+        return Ok(base.clone());
+    }
+    let home = env::var("HOME").map_err(|_| FirecrackerError::HomeUnset)?;
+    Ok(PathBuf::from(home)
+        .join(".local/state/rooms")
+        .join("jailer"))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct JailLayout {
+    instance_dir: PathBuf,
+    host_socket: PathBuf,
+}
+
+fn jail_instance_dir(chroot_base: &Path, room_id: &str) -> PathBuf {
+    chroot_base.join("firecracker").join(room_id)
+}
+
+fn jail_root_dir(chroot_base: &Path, room_id: &str) -> PathBuf {
+    jail_instance_dir(chroot_base, room_id).join("root")
+}
+
+/// Inputs for [`build_jailer_launch_plan`].
+pub(crate) struct JailerLaunchInput<'a> {
+    pub jailer_binary: &'a Path,
+    pub firecracker_binary: &'a Path,
+    pub chroot_base: &'a Path,
+    pub room_id: &'a str,
+    pub fc_uid: u32,
+    pub fc_gid: u32,
+    pub layout: &'a JailLayout,
+}
+
+fn build_jailer_launch_plan(input: &JailerLaunchInput<'_>) -> JailerLaunchPlan {
+    let JailerLaunchInput {
+        jailer_binary,
+        firecracker_binary,
+        chroot_base,
+        room_id,
+        fc_uid,
+        fc_gid,
+        layout,
+    } = input;
+    let jailer_args = vec![
+        "--id".to_owned(),
+        (*room_id).to_owned(),
+        "--uid".to_owned(),
+        fc_uid.to_string(),
+        "--gid".to_owned(),
+        fc_gid.to_string(),
+        "--exec-file".to_owned(),
+        firecracker_binary.to_string_lossy().into_owned(),
+        "--chroot-base-dir".to_owned(),
+        chroot_base.to_string_lossy().into_owned(),
+    ];
+    let firecracker_args = vec!["--api-sock".to_owned(), JAIL_API_SOCK.to_owned()];
+    let kernel_path_in_jail = PathBuf::from(format!("/{JAIL_KERNEL}"));
+    let rootfs_path_in_jail = PathBuf::from(format!("/{JAIL_ROOTFS}"));
+
+    JailerLaunchPlan {
+        jailer_binary: jailer_binary.to_path_buf(),
+        jailer_args,
+        firecracker_args,
+        host_socket: layout.host_socket.clone(),
+        kernel_path_in_jail,
+        rootfs_path_in_jail,
+    }
+}
+
+#[cfg(unix)]
+fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
+    use std::process::Command;
+
+    let output = Command::new("getent")
+        .args(["passwd", FIRECRACKER_USER])
+        .output()
+        .map_err(FirecrackerError::Io)?;
+    if !output.status.success() {
+        return Err(FirecrackerError::FirecrackerUserMissing {
+            user: FIRECRACKER_USER.to_owned(),
         });
     }
-    // Relative name: rely on PATH at spawn time; doctor validates separately.
+    parse_getent_passwd(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        FirecrackerError::FirecrackerUserMissing {
+            user: FIRECRACKER_USER.to_owned(),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
+    Err(FirecrackerError::FirecrackerUserMissing {
+        user: FIRECRACKER_USER.to_owned(),
+    })
+}
+
+/// Parse `getent passwd` output into `(uid, gid)`.
+pub fn parse_getent_passwd(line: &str) -> Option<(u32, u32)> {
+    let line = line.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut fields = line.split(':');
+    let _name = fields.next()?;
+    let _passwd = fields.next()?;
+    let uid: u32 = fields.next()?.parse().ok()?;
+    let gid: u32 = fields.next()?.parse().ok()?;
+    Some((uid, gid))
+}
+
+async fn prepare_jail_layout(
+    chroot_base: &Path,
+    room_id: &str,
+    kernel: &Path,
+    rootfs: &Path,
+    fc_uid: u32,
+    fc_gid: u32,
+) -> Result<JailLayout, FirecrackerError> {
+    let kernel = kernel
+        .canonicalize()
+        .map_err(|e| FirecrackerError::JailPrepareFailed {
+            reason: format!("kernel path {}: {e}", kernel.display()),
+        })?;
+    let rootfs = rootfs
+        .canonicalize()
+        .map_err(|e| FirecrackerError::JailPrepareFailed {
+            reason: format!("rootfs path {}: {e}", rootfs.display()),
+        })?;
+    let instance_dir = jail_instance_dir(chroot_base, room_id);
+    let jail_root = jail_root_dir(chroot_base, room_id);
+    let host_socket = jail_root.join(JAIL_API_SOCK);
+
+    let chroot_base = chroot_base.to_path_buf();
+    let room_id = room_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        stage_jail_sync(&chroot_base, &room_id, &kernel, &rootfs, fc_uid, fc_gid)
+    })
+    .await
+    .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))?
+    .map(|()| JailLayout {
+        instance_dir,
+        host_socket,
+    })
+}
+
+#[cfg(unix)]
+fn stage_jail_sync(
+    chroot_base: &Path,
+    room_id: &str,
+    kernel: &Path,
+    rootfs: &Path,
+    _fc_uid: u32,
+    _fc_gid: u32,
+) -> Result<(), FirecrackerError> {
+    let jail_root = jail_root_dir(chroot_base, room_id);
+    std::fs::create_dir_all(&jail_root).map_err(|e| FirecrackerError::JailPrepareFailed {
+        reason: format!("create jail root {}: {e}", jail_root.display()),
+    })?;
+
+    let jail_kernel = jail_root.join(JAIL_KERNEL);
+    let jail_rootfs = jail_root.join(JAIL_ROOTFS);
+    for target in [&jail_kernel, &jail_rootfs] {
+        if !target.exists() {
+            std::fs::File::create(target).map_err(|e| FirecrackerError::JailPrepareFailed {
+                reason: format!("create mount target {}: {e}", target.display()),
+            })?;
+        }
+    }
+
+    bind_mount(kernel, &jail_kernel)?;
+    bind_mount(rootfs, &jail_rootfs)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn bind_mount(source: &Path, target: &Path) -> Result<(), FirecrackerError> {
+    use std::process::Command;
+
+    let output = Command::new("mount")
+        .args([
+            "--bind",
+            &source.to_string_lossy(),
+            &target.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| FirecrackerError::JailPrepareFailed {
+            reason: format!(
+                "mount --bind {} -> {}: {e}",
+                source.display(),
+                target.display()
+            ),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(FirecrackerError::JailPrepareFailed {
+        reason: format!(
+            "mount --bind {} -> {} failed (need root?): {stderr}",
+            source.display(),
+            target.display()
+        ),
+    })
+}
+
+#[cfg(not(unix))]
+fn stage_jail_sync(
+    _chroot_base: &Path,
+    _room_id: &str,
+    _kernel: &Path,
+    _rootfs: &Path,
+    _fc_uid: u32,
+    _fc_gid: u32,
+) -> Result<(), FirecrackerError> {
+    Err(FirecrackerError::KvmUnavailable)
+}
+
+#[cfg(unix)]
+fn teardown_jail_sync(instance_dir: &Path) {
+    use std::process::Command;
+
+    let jail_root = instance_dir.join("root");
+    for name in [JAIL_KERNEL, JAIL_ROOTFS] {
+        let target = jail_root.join(name);
+        if target.exists() {
+            let _ = Command::new("umount").arg(&target).output();
+        }
+    }
+    let _ = std::fs::remove_dir_all(instance_dir);
+}
+
+#[cfg(not(unix))]
+fn teardown_jail_sync(_instance_dir: &Path) {}
+
+fn spawn_jailer(
+    plan: &JailerLaunchPlan,
+    (log_file, log_stderr): (std::fs::File, std::fs::File),
+) -> Result<Child, FirecrackerError> {
+    info!(socket = %plan.host_socket.display(), "spawning firecracker via jailer");
+    Command::new(&plan.jailer_binary)
+        .args(&plan.jailer_args)
+        .arg("--")
+        .args(&plan.firecracker_args)
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_stderr))
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => FirecrackerError::JailerNotFound {
+                path: plan.jailer_binary.clone(),
+            },
+            _ => FirecrackerError::Io(err),
+        })
 }
 
 fn room_state_dir(room_id: &RoomId) -> Result<PathBuf, FirecrackerError> {
@@ -274,27 +619,6 @@ async fn open_log_file(
     })
     .await
     .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))?
-}
-
-fn spawn_firecracker(
-    binary: &Path,
-    socket: &Path,
-    (log_file, log_stderr): (std::fs::File, std::fs::File),
-) -> Result<Child, FirecrackerError> {
-    info!(socket = %socket.display(), "spawning firecracker");
-    Command::new(binary)
-        .arg("--api-sock")
-        .arg(socket)
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_stderr))
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => FirecrackerError::BinaryNotFound {
-                path: binary.to_path_buf(),
-            },
-            _ => FirecrackerError::Io(err),
-        })
 }
 
 fn build_boot_args(network: Option<&NetworkConfig>) -> String {
@@ -384,14 +708,15 @@ async fn wait_for_socket(
     socket: &Path,
     timeout: Duration,
     child: &mut Child,
+    log_path: Option<&Path>,
 ) -> Result<(), FirecrackerError> {
     #[cfg(unix)]
     {
-        wait_for_socket_unix(socket, timeout, child).await
+        wait_for_socket_unix(socket, timeout, child, log_path).await
     }
     #[cfg(not(unix))]
     {
-        let _ = (socket, timeout, child);
+        let _ = (socket, timeout, child, log_path);
         std::future::ready(Err(FirecrackerError::KvmUnavailable)).await
     }
 }
@@ -401,6 +726,7 @@ async fn wait_for_socket_unix(
     socket: &Path,
     timeout: Duration,
     child: &mut Child,
+    log_path: Option<&Path>,
 ) -> Result<(), FirecrackerError> {
     use std::time::Instant;
 
@@ -410,7 +736,7 @@ async fn wait_for_socket_unix(
 
     while start.elapsed() < timeout {
         if let Some(status) = child.try_wait().map_err(FirecrackerError::Io)? {
-            let stderr_tail = read_log_tail(socket).await;
+            let stderr_tail = read_log_tail(log_path, socket).await;
             return Err(FirecrackerError::ProcessExitedEarly {
                 exit_code: status.code().unwrap_or(-1),
                 stderr_tail,
@@ -429,10 +755,15 @@ async fn wait_for_socket_unix(
 }
 
 #[cfg(unix)]
-async fn read_log_tail(socket: &Path) -> String {
-    let log_path = socket
-        .parent()
-        .map_or_else(|| socket.to_path_buf(), |p| p.join("firecracker.log"));
+async fn read_log_tail(log_path: Option<&Path>, socket: &Path) -> String {
+    let log_path = log_path.map_or_else(
+        || {
+            socket
+                .parent()
+                .map_or_else(|| socket.to_path_buf(), |p| p.join("firecracker.log"))
+        },
+        Path::to_path_buf,
+    );
 
     let content = tokio::fs::read_to_string(&log_path)
         .await
@@ -539,7 +870,7 @@ mod tests {
                 .arg("60")
                 .spawn()
                 .expect("spawn sleep");
-            let err = wait_for_socket(&socket_path, Duration::from_millis(300), &mut child)
+            let err = wait_for_socket(&socket_path, Duration::from_millis(300), &mut child, None)
                 .await
                 .expect_err("file without listener should time out");
             assert!(
@@ -559,15 +890,75 @@ mod tests {
                 .arg("60")
                 .spawn()
                 .expect("spawn sleep");
-            wait_for_socket(&socket_path, Duration::from_millis(300), &mut child2)
+            wait_for_socket(&socket_path, Duration::from_millis(300), &mut child2, None)
                 .await
                 .expect("listening socket should be ready");
             let _ = child2.kill().await;
         }
     }
 
-    use super::RoomGuard;
+    use super::{
+        build_jailer_launch_plan, parse_getent_passwd, JailLayout, JailerLaunchInput, RoomGuard,
+        FIRECRACKER_USER,
+    };
     use crate::config::RoomsConfig;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn parse_getent_passwd_extracts_uid_gid() {
+        assert_eq!(
+            parse_getent_passwd(
+                "firecracker:x:995:995:Firecracker microVM:/nonexistent:/usr/sbin/nologin\n"
+            ),
+            Some((995, 995))
+        );
+        assert_eq!(parse_getent_passwd(""), None);
+    }
+
+    #[test]
+    fn jailer_launch_plan_assembles_expected_argv() {
+        let room_id = "01abc123def456";
+        let chroot_base = PathBuf::from("/tmp/rooms-jailer");
+        let jail_root = chroot_base.join("firecracker").join(room_id).join("root");
+        let layout = JailLayout {
+            instance_dir: chroot_base.join("firecracker").join(room_id),
+            host_socket: jail_root.join("api.sock"),
+        };
+        let plan = build_jailer_launch_plan(&JailerLaunchInput {
+            jailer_binary: Path::new("/usr/local/bin/jailer"),
+            firecracker_binary: Path::new("/usr/local/bin/firecracker"),
+            chroot_base: &chroot_base,
+            room_id,
+            fc_uid: 995,
+            fc_gid: 995,
+            layout: &layout,
+        });
+
+        assert_eq!(plan.jailer_binary, PathBuf::from("/usr/local/bin/jailer"));
+        assert_eq!(
+            plan.jailer_args,
+            vec![
+                "--id".to_owned(),
+                room_id.to_owned(),
+                "--uid".to_owned(),
+                "995".to_owned(),
+                "--gid".to_owned(),
+                "995".to_owned(),
+                "--exec-file".to_owned(),
+                "/usr/local/bin/firecracker".to_owned(),
+                "--chroot-base-dir".to_owned(),
+                "/tmp/rooms-jailer".to_owned(),
+            ]
+        );
+        assert_eq!(
+            plan.firecracker_args,
+            vec!["--api-sock".to_owned(), "api.sock".to_owned()]
+        );
+        assert_eq!(plan.host_socket, jail_root.join("api.sock"));
+        assert_eq!(plan.kernel_path_in_jail, PathBuf::from("/kernel"));
+        assert_eq!(plan.rootfs_path_in_jail, PathBuf::from("/rootfs"));
+        assert_eq!(FIRECRACKER_USER, "firecracker");
+    }
 
     #[test]
     fn room_guard_cleans_up_on_drop_when_not_dismissed() {

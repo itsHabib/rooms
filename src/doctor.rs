@@ -7,6 +7,7 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::config::RoomsConfig;
+use crate::firecracker::{parse_getent_passwd, FIRECRACKER_USER};
 use crate::rootfs::{kernel_sibling, validate_kernel, validate_rootfs};
 
 /// Embedded checksum pins (same source as `scripts/checksums.txt`).
@@ -50,10 +51,14 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
     let checks = vec![
         check_kvm(),
         check_firecracker_version(config),
+        check_jailer(config),
+        check_firecracker_user(),
+        check_jailer_file_access(image),
+        check_tap(),
+        check_tap_openable(),
         check_kernel(image, config),
         check_rootfs(image, config),
         check_anthropic_api_key(),
-        check_tap(),
         check_nested_virt(),
         check_sha_drift(config, image),
     ];
@@ -158,6 +163,274 @@ fn check_firecracker_version(config: &RoomsConfig) -> CheckResult {
             ),
         },
     }
+}
+
+fn check_jailer(config: &RoomsConfig) -> CheckResult {
+    let name = "jailer".to_owned();
+    let Some(path) = resolve_in_path(&config.jailer_binary) else {
+        return CheckResult {
+            name,
+            ok: false,
+            message: format!(
+                "jailer not found on PATH (looked for {}); run scripts/setup-rooms-host.sh",
+                config.jailer_binary.display()
+            ),
+        };
+    };
+
+    CheckResult {
+        name,
+        ok: true,
+        message: format!("jailer present at {}", path.display()),
+    }
+}
+
+fn check_firecracker_user() -> CheckResult {
+    let name = "firecracker_user".to_owned();
+    #[cfg(unix)]
+    {
+        let output = Command::new("getent")
+            .args(["passwd", FIRECRACKER_USER])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let line = String::from_utf8_lossy(&out.stdout);
+                match parse_getent_passwd(&line) {
+                    Some((uid, gid)) => CheckResult {
+                        name,
+                        ok: true,
+                        message: format!(
+                            "{FIRECRACKER_USER} system user exists (uid {uid}, gid {gid})"
+                        ),
+                    },
+                    None => CheckResult {
+                        name,
+                        ok: false,
+                        message: format!(
+                            "getent returned unexpected passwd line for {FIRECRACKER_USER}"
+                        ),
+                    },
+                }
+            }
+            Ok(_) => CheckResult {
+                name,
+                ok: false,
+                message: format!(
+                    "system user {FIRECRACKER_USER} missing; run scripts/setup-rooms-host.sh"
+                ),
+            },
+            Err(e) => CheckResult {
+                name,
+                ok: false,
+                message: format!("could not run getent passwd {FIRECRACKER_USER}: {e}"),
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        CheckResult {
+            name,
+            ok: false,
+            message: "firecracker user checks require a Unix host".to_owned(),
+        }
+    }
+}
+
+fn check_jailer_file_access(image: Option<&Path>) -> CheckResult {
+    let name = "jailer_file_access".to_owned();
+    #[cfg(unix)]
+    {
+        let Some(uid) = firecracker_uid() else {
+            return CheckResult {
+                name,
+                ok: false,
+                message: format!("cannot verify file access: {FIRECRACKER_USER} user missing"),
+            };
+        };
+
+        let kernel = resolve_kernel_path(image);
+        let rootfs = image.map_or_else(default_rootfs_path, Path::to_path_buf);
+
+        let mut failures = Vec::new();
+        if let Some(path) = kernel {
+            if !path.exists() {
+                failures.push(format!("kernel missing at {}", path.display()));
+            } else if !path_readable_by_uid(&path, uid) {
+                failures.push(format!(
+                    "{FIRECRACKER_USER} cannot read kernel at {} (check group/other permissions)",
+                    path.display()
+                ));
+            }
+        } else {
+            failures.push(
+                "no kernel path configured; pass --image or set $HOME/rooms/images/vmlinux.bin"
+                    .to_owned(),
+            );
+        }
+
+        if !rootfs.exists() {
+            failures.push(format!("rootfs missing at {}", rootfs.display()));
+        } else if !path_readable_by_uid(&rootfs, uid) {
+            failures.push(format!(
+                "{FIRECRACKER_USER} cannot read rootfs at {} (check group/other permissions)",
+                rootfs.display()
+            ));
+        }
+
+        if failures.is_empty() {
+            return CheckResult {
+                name,
+                ok: true,
+                message: format!("{FIRECRACKER_USER} can read kernel and rootfs images"),
+            };
+        }
+
+        CheckResult {
+            name,
+            ok: false,
+            message: failures.join("; "),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        CheckResult {
+            name,
+            ok: false,
+            message: "jailer file access checks require a Unix host".to_owned(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn firecracker_uid() -> Option<u32> {
+    let output = Command::new("getent")
+        .args(["passwd", FIRECRACKER_USER])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_getent_passwd(&String::from_utf8_lossy(&output.stdout)).map(|(uid, _gid)| uid)
+}
+
+#[cfg(unix)]
+fn path_readable_by_uid(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mode = meta.mode();
+    if meta.uid() == uid {
+        return mode & 0o400 != 0;
+    }
+    if meta.gid() == current_primary_gid(uid) {
+        return mode & 0o040 != 0;
+    }
+    mode & 0o004 != 0
+}
+
+#[cfg(unix)]
+fn current_primary_gid(uid: u32) -> u32 {
+    let output = Command::new("getent")
+        .args(["passwd", &uid.to_string()])
+        .output();
+    let Ok(out) = output else {
+        return u32::MAX;
+    };
+    if !out.status.success() {
+        return u32::MAX;
+    }
+    parse_getent_passwd(&String::from_utf8_lossy(&out.stdout)).map_or(u32::MAX, |(_uid, gid)| gid)
+}
+
+fn check_tap_openable() -> CheckResult {
+    let name = "tap_openable".to_owned();
+    #[cfg(unix)]
+    {
+        let Some(uid) = firecracker_uid() else {
+            return CheckResult {
+                name,
+                ok: false,
+                message: format!("cannot verify TAP access: {FIRECRACKER_USER} user missing"),
+            };
+        };
+
+        let tun = Path::new("/dev/net/tun");
+        if !tun.exists() {
+            return CheckResult {
+                name,
+                ok: false,
+                message: "/dev/net/tun missing; load the tun kernel module (sudo modprobe tun)"
+                    .to_owned(),
+            };
+        }
+
+        if !path_readable_by_uid(tun, uid) {
+            return CheckResult {
+                name,
+                ok: false,
+                message: format!(
+                    "{FIRECRACKER_USER} cannot open /dev/net/tun; recreate TAP with scripts/setup-tap.sh"
+                ),
+            };
+        }
+
+        let show = Command::new("ip")
+            .args(["tuntap", "show", "tap-fc0"])
+            .output();
+        match show {
+            Ok(out) if out.status.success() => {
+                let line = String::from_utf8_lossy(&out.stdout);
+                if tap_owned_by_user(&line, FIRECRACKER_USER) {
+                    CheckResult {
+                        name,
+                        ok: true,
+                        message: format!("tap-fc0 exists and is owned by {FIRECRACKER_USER}"),
+                    }
+                } else {
+                    CheckResult {
+                        name,
+                        ok: false,
+                        message: format!(
+                            "tap-fc0 is not owned by {FIRECRACKER_USER}; run sudo bash scripts/setup-tap.sh"
+                        ),
+                    }
+                }
+            }
+            Ok(out) => CheckResult {
+                name,
+                ok: false,
+                message: format!(
+                    "tap-fc0 not found (ip link exit {}: {}); run `sudo bash scripts/setup-tap.sh`",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            },
+            Err(e) => CheckResult {
+                name,
+                ok: false,
+                message: format!("could not run `ip link show tap-fc0`: {e}"),
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        CheckResult {
+            name,
+            ok: false,
+            message: "TAP openability checks require a Unix host".to_owned(),
+        }
+    }
+}
+
+/// Returns true when `ip tuntap show` output assigns the TAP to `user`.
+pub fn tap_owned_by_user(tuntap_output: &str, user: &str) -> bool {
+    tuntap_output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair.first() == Some(&"user") && pair.get(1) == Some(&user))
 }
 
 fn parse_firecracker_version(output: &str) -> Option<(u32, u32)> {
@@ -478,9 +751,21 @@ mod tests {
 
     use super::{
         check_sha_drift, default_rootfs_path, drift_target_path, parse_checksums,
-        parse_firecracker_version, version_meets_min, RoomsConfig,
+        parse_firecracker_version, tap_owned_by_user, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn tap_owned_by_user_detects_tuntap_owner() {
+        assert!(tap_owned_by_user(
+            "tap-fc0: tap persist user firecracker\n",
+            "firecracker"
+        ));
+        assert!(!tap_owned_by_user(
+            "tap-fc0: tap persist user mh\n",
+            "firecracker"
+        ));
+    }
 
     #[test]
     fn parses_firecracker_version_string() {

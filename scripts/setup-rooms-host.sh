@@ -103,6 +103,17 @@ sudo apt-get install -y -qq \
     iproute2 iputils-ping bridge-utils \
     e2fsprogs
 
+# --- Firecracker system user ---
+
+log "ensuring dedicated ${FIRECRACKER_USER:-firecracker} system user"
+FIRECRACKER_USER="${FIRECRACKER_USER:-firecracker}"
+if id "$FIRECRACKER_USER" >/dev/null 2>&1; then
+    log "$FIRECRACKER_USER user already exists"
+else
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$FIRECRACKER_USER"
+    log "created system user $FIRECRACKER_USER"
+fi
+
 # --- Firecracker ---
 
 if command -v firecracker >/dev/null 2>&1; then
@@ -154,6 +165,17 @@ else
     curl -fSL "$QUICKSTART_ROOTFS_URL" -o "$IMAGES_DIR/rootfs.ext4.tmp"
     verify_sha256 "$IMAGES_DIR/rootfs.ext4.tmp" "bionic.rootfs.ext4"
     mv "$IMAGES_DIR/rootfs.ext4.tmp" "$IMAGES_DIR/rootfs.ext4"
+fi
+
+# Kernel + rootfs must be readable by the jailed firecracker user.
+if id "$FIRECRACKER_USER" >/dev/null 2>&1; then
+    for img in "$IMAGES_DIR/vmlinux.bin" "$IMAGES_DIR/rootfs.ext4"; do
+        if [[ -f "$img" ]]; then
+            sudo chgrp "$FIRECRACKER_USER" "$img"
+            sudo chmod g+r "$img"
+        fi
+    done
+    log "kernel/rootfs group-readable by $FIRECRACKER_USER"
 fi
 
 # --- Rust ---
