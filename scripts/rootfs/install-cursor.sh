@@ -38,7 +38,10 @@ cat > "$DEST/package.json" <<EOF
   "dependencies": { "@cursor/sdk": "${CURSOR_SDK_VERSION}" }
 }
 EOF
-( cd "$DEST" && npm install --no-audit --no-fund --omit=dev )
+LOCKFILE="/tmp/package-lock.json"
+[[ -f "$LOCKFILE" ]] || { echo "missing vendored package-lock.json at $LOCKFILE (staged by build-rootfs-alpine.sh --extend)" >&2; exit 1; }
+cp "$LOCKFILE" "$DEST/package-lock.json"
+( cd "$DEST" && npm ci --strict-peer-deps --no-audit --no-fund --omit=dev )
 
 apk del .cursor-build
 

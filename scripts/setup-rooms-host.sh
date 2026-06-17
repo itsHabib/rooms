@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHECKSUMS="${SCRIPT_DIR}/checksums.txt"
+
 # --- config ---
 
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.10.1}"
@@ -39,6 +42,23 @@ require_cmd() {
     command -v "$1" >/dev/null 2>&1 || fatal "missing required command: $1"
 }
 
+lookup_checksum() {
+    local artifact="$1"
+    awk -v name="$artifact" '$1 ~ /^[0-9a-f]{64}$/ && $2 == name { print $1; exit }' "$CHECKSUMS"
+}
+
+verify_sha256() {
+    local file="$1" artifact="$2"
+    [[ -f "$CHECKSUMS" ]] || fatal "checksums file not found: $CHECKSUMS"
+    local expected actual
+    expected="$(lookup_checksum "$artifact")"
+    [[ -n "$expected" ]] || fatal "no sha256 pin for $artifact in $CHECKSUMS"
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+    if [[ "$actual" != "$expected" ]]; then
+        fatal "sha256 mismatch for $artifact: expected $expected, got $actual (see $CHECKSUMS)"
+    fi
+}
+
 # --- preflight ---
 
 log "preflight checks"
@@ -54,6 +74,8 @@ fi
 if ! sudo -n true 2>/dev/null; then
     log "sudo will prompt for your password during install steps"
 fi
+
+require_cmd sha256sum
 
 # --- /dev/kvm ---
 
@@ -90,6 +112,7 @@ else
     tmp="$(mktemp -d)"
     url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
     curl -fSL "$url" -o "$tmp/fc.tgz"
+    verify_sha256 "$tmp/fc.tgz" "firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
     tar -C "$tmp" -xzf "$tmp/fc.tgz"
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/firecracker
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/jailer-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/jailer
@@ -108,6 +131,7 @@ if [[ ! -f "$KERNEL_FILE" ]]; then
     # versioned kernel (a later run would otherwise skip the download and adopt
     # the partial file).
     curl -fSL "$FC_KERNEL_URL" -o "$KERNEL_FILE.tmp"
+    verify_sha256 "$KERNEL_FILE.tmp" "vmlinux-${FC_KERNEL_VERSION}.bin"
     if ! file "$KERNEL_FILE.tmp" | grep -q 'ELF 64-bit'; then
         rm -f "$KERNEL_FILE.tmp"
         fatal "downloaded kernel is not an uncompressed ELF vmlinux: $FC_KERNEL_URL"
@@ -127,7 +151,9 @@ if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
     log "rootfs image already present: $IMAGES_DIR/rootfs.ext4"
 else
     log "downloading quickstart rootfs (throwaway POC image; build-rootfs-alpine.sh replaces it)"
-    curl -fSL "$QUICKSTART_ROOTFS_URL" -o "$IMAGES_DIR/rootfs.ext4"
+    curl -fSL "$QUICKSTART_ROOTFS_URL" -o "$IMAGES_DIR/rootfs.ext4.tmp"
+    verify_sha256 "$IMAGES_DIR/rootfs.ext4.tmp" "bionic.rootfs.ext4"
+    mv "$IMAGES_DIR/rootfs.ext4.tmp" "$IMAGES_DIR/rootfs.ext4"
 fi
 
 # --- Rust ---
@@ -136,7 +162,11 @@ if command -v cargo >/dev/null 2>&1; then
     log "Rust already installed: $(cargo --version)"
 else
     log "installing Rust via rustup ($RUSTUP_TOOLCHAIN)"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN"
+    rustup_tmp="$(mktemp)"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$rustup_tmp"
+    verify_sha256 "$rustup_tmp" "rustup-init.sh"
+    sh "$rustup_tmp" -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN"
+    rm -f "$rustup_tmp"
     # shellcheck disable=SC1090
     source "$HOME/.cargo/env"
 fi
@@ -147,15 +177,29 @@ if command -v node >/dev/null 2>&1 && [[ "$(node -v)" =~ ^v${NODE_MAJOR}\. ]]; t
     log "Node $NODE_MAJOR already installed: $(node -v)"
 else
     log "installing Node $NODE_MAJOR via NodeSource"
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash -
+    nodesource_tmp="$(mktemp)"
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$nodesource_tmp"
+    verify_sha256 "$nodesource_tmp" "nodesource-setup-${NODE_MAJOR}.x.sh"
+    sudo -E bash "$nodesource_tmp"
+    rm -f "$nodesource_tmp"
     sudo apt-get install -y -qq nodejs
 fi
 
 if command -v claude >/dev/null 2>&1; then
     log "claude-code already installed: $(claude --version 2>/dev/null || echo present)"
 else
-    log "installing @anthropic-ai/claude-code globally"
-    sudo npm install -g @anthropic-ai/claude-code
+    log "installing @anthropic-ai/claude-code from vendored package-lock.json"
+    claude_dir="${SCRIPT_DIR}/claude-code"
+    [[ -f "${claude_dir}/package.json" && -f "${claude_dir}/package-lock.json" ]] \
+        || fatal "vendored claude-code npm files missing under ${claude_dir}"
+    claude_install="$(mktemp -d)"
+    cp "${claude_dir}/package.json" "${claude_dir}/package-lock.json" "$claude_install/"
+    ( cd "$claude_install" && npm ci --strict-peer-deps --omit=dev --no-audit --no-fund )
+    sudo install -d -m 0755 /usr/local/lib/rooms/claude-code
+    sudo cp -a "$claude_install/node_modules" /usr/local/lib/rooms/claude-code/
+    sudo cp "$claude_install/package.json" "$claude_install/package-lock.json" /usr/local/lib/rooms/claude-code/
+    sudo ln -sf /usr/local/lib/rooms/claude-code/node_modules/.bin/claude /usr/local/bin/claude
+    rm -rf "$claude_install"
 fi
 
 # --- work dir layout ---
