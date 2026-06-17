@@ -73,15 +73,15 @@ assert_rules_present() {
     assert_grep "$nat" "-A POSTROUTING -s $GUEST_NET -o $OUT_IFACE -j MASQUERADE" "source-restricted MASQUERADE"
     assert_not_grep "$nat" "-A POSTROUTING -o $OUT_IFACE -j MASQUERADE" "legacy unrestricted MASQUERADE"
 
-    assert_grep "$forward" "-A FORWARD -i $TAP -d 192.168.0.0/16 -j DROP" "192.168.0.0/16 drop"
-    assert_grep "$forward" "-A FORWARD -i $TAP -d 10.0.0.0/8 -j DROP" "10.0.0.0/8 drop"
-    assert_grep "$forward" "-A FORWARD -i $TAP -d 172.16.0.0/12 -j DROP" "172.16.0.0/12 drop"
+    assert_grep "$forward" "-A FORWARD -d 192.168.0.0/16 -i $TAP -j DROP" "192.168.0.0/16 drop"
+    assert_grep "$forward" "-A FORWARD -d 10.0.0.0/8 -i $TAP -j DROP" "10.0.0.0/8 drop"
+    assert_grep "$forward" "-A FORWARD -d 172.16.0.0/12 -i $TAP -j DROP" "172.16.0.0/12 drop"
     assert_grep "$forward" "-A FORWARD -i $TAP -o $OUT_IFACE -j ACCEPT" "egress accept"
 
     local drop192 drop10 drop172 accept
-    drop192="$(forward_line "-i $TAP -d 192.168.0.0/16 -j DROP")"
-    drop10="$(forward_line "-i $TAP -d 10.0.0.0/8 -j DROP")"
-    drop172="$(forward_line "-i $TAP -d 172.16.0.0/12 -j DROP")"
+    drop192="$(forward_line "-d 192.168.0.0/16 -i $TAP -j DROP")"
+    drop10="$(forward_line "-d 10.0.0.0/8 -i $TAP -j DROP")"
+    drop172="$(forward_line "-d 172.16.0.0/12 -i $TAP -j DROP")"
     accept="$(forward_line "-i $TAP -o $OUT_IFACE -j ACCEPT")"
 
     assert_rule_before "$drop192" "$accept" "192.168 drop before egress accept"
@@ -108,9 +108,9 @@ assert_rules_absent() {
 
     assert_not_grep "$nat" "-A POSTROUTING -s $GUEST_NET -o $OUT_IFACE -j MASQUERADE" "source-restricted MASQUERADE"
     assert_not_grep "$nat" "-A POSTROUTING -o $OUT_IFACE -j MASQUERADE" "legacy unrestricted MASQUERADE"
-    assert_not_grep "$forward" "-A FORWARD -i $TAP -d 192.168.0.0/16 -j DROP" "192.168.0.0/16 drop"
-    assert_not_grep "$forward" "-A FORWARD -i $TAP -d 10.0.0.0/8 -j DROP" "10.0.0.0/8 drop"
-    assert_not_grep "$forward" "-A FORWARD -i $TAP -d 172.16.0.0/12 -j DROP" "172.16.0.0/12 drop"
+    assert_not_grep "$forward" "-A FORWARD -d 192.168.0.0/16 -i $TAP -j DROP" "192.168.0.0/16 drop"
+    assert_not_grep "$forward" "-A FORWARD -d 10.0.0.0/8 -i $TAP -j DROP" "10.0.0.0/8 drop"
+    assert_not_grep "$forward" "-A FORWARD -d 172.16.0.0/12 -i $TAP -j DROP" "172.16.0.0/12 drop"
     assert_not_grep "$forward" "-A FORWARD -i $TAP -o $OUT_IFACE -j ACCEPT" "egress accept"
     assert_not_grep "$forward" "-A FORWARD -i $OUT_IFACE -o $TAP -m state --state RELATED,ESTABLISHED -j ACCEPT" "return accept"
 }
