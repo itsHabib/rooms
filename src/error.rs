@@ -34,6 +34,14 @@ pub enum FirecrackerError {
     KvmUnavailable,
     #[error("firecracker binary not found at {path}")]
     BinaryNotFound { path: PathBuf },
+    #[error("jailer binary not found at {path}")]
+    JailerNotFound { path: PathBuf },
+    #[error("system user {user} missing; run scripts/setup-rooms-host.sh")]
+    FirecrackerUserMissing { user: String },
+    #[error("jailer requires root; run rooms via sudo (e.g. `sudo -E rooms run ...`)")]
+    RootRequired,
+    #[error("jail staging failed: {reason}")]
+    JailPrepareFailed { reason: String },
     #[error("firecracker api socket did not appear within {timeout_ms} ms")]
     ApiSocketNeverAppeared { timeout_ms: u64 },
     #[error("firecracker api PUT {endpoint} failed (curl exit {curl_exit_code}): {body}")]

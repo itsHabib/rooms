@@ -20,6 +20,10 @@ pub struct RoomsConfig {
     pub cleanup_grace: Duration,
     /// Path to the firecracker binary (default: `"firecracker"` on PATH).
     pub firecracker_binary: PathBuf,
+    /// Path to the jailer binary (default: `"jailer"` on PATH).
+    pub jailer_binary: PathBuf,
+    /// Base directory for jailer chroot jails (default: `$HOME/.local/state/rooms/jailer`).
+    pub jailer_chroot_base: Option<PathBuf>,
     /// Minimum supported Firecracker semver major.minor.
     pub min_firecracker_version: (u32, u32),
     /// Minimum rootfs image size in bytes.
@@ -44,6 +48,8 @@ impl Default for RoomsConfig {
             guest_reach_poll_interval: Duration::from_secs(2),
             cleanup_grace: Duration::from_secs(5),
             firecracker_binary: PathBuf::from("firecracker"),
+            jailer_binary: PathBuf::from("jailer"),
+            jailer_chroot_base: None,
             min_firecracker_version: (1, 7),
             min_rootfs_bytes: 64 * 1024 * 1024,
         }
