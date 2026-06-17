@@ -170,12 +170,14 @@ fi
 # Kernel + rootfs must be readable by the jailed firecracker user.
 if id "$FIRECRACKER_USER" >/dev/null 2>&1; then
     for img in "$IMAGES_DIR/vmlinux.bin" "$IMAGES_DIR/rootfs.ext4"; do
-        if [[ -f "$img" ]]; then
-            sudo chgrp "$FIRECRACKER_USER" "$img"
-            sudo chmod g+r "$img"
-        fi
+        [[ -f "$img" ]] && sudo chgrp "$FIRECRACKER_USER" "$img"
     done
-    log "kernel/rootfs group-readable by $FIRECRACKER_USER"
+    # Kernel is read-only; the rootfs is opened read-write by the jailed
+    # firecracker user (is_read_only: false in configure_vm), so group read
+    # alone makes the drive attach fail — it needs group write too.
+    [[ -f "$IMAGES_DIR/vmlinux.bin" ]] && sudo chmod g+r "$IMAGES_DIR/vmlinux.bin"
+    [[ -f "$IMAGES_DIR/rootfs.ext4" ]] && sudo chmod g+rw "$IMAGES_DIR/rootfs.ext4"
+    log "kernel group-readable + rootfs group-read-write by $FIRECRACKER_USER"
 fi
 
 # --- Rust ---

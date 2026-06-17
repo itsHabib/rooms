@@ -203,10 +203,13 @@ pub async fn boot(
     network: Option<&NetworkConfig>,
     config: &RoomsConfig,
 ) -> Result<BootedVm, FirecrackerError> {
+    ensure_root()?;
     check_kvm()?;
     let firecracker_binary = resolve_firecracker_binary(config)?;
     let jailer_binary = resolve_jailer_binary(config)?;
-    let (fc_uid, fc_gid) = lookup_firecracker_ids()?;
+    let (fc_uid, fc_gid) = tokio::task::spawn_blocking(lookup_firecracker_ids)
+        .await
+        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))??;
 
     let room_id = RoomId::new();
     let room_id_str = room_id.as_str();
@@ -261,6 +264,26 @@ pub async fn boot(
 
     info!("microVM booted");
     Ok(BootedVm { guard, child })
+}
+
+/// Jailer must run as root: it chroots, bind-mounts the kernel/rootfs into the
+/// jail, and drops to the firecracker uid. Fail early and clearly when not
+/// root rather than cryptically at the first `mount --bind`.
+#[cfg(unix)]
+fn ensure_root() -> Result<(), FirecrackerError> {
+    let output = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(FirecrackerError::Io)?;
+    if String::from_utf8_lossy(&output.stdout).trim() == "0" {
+        return Ok(());
+    }
+    Err(FirecrackerError::RootRequired)
+}
+
+#[cfg(not(unix))]
+fn ensure_root() -> Result<(), FirecrackerError> {
+    Err(FirecrackerError::RootRequired)
 }
 
 fn check_kvm() -> Result<(), FirecrackerError> {
@@ -490,7 +513,13 @@ fn stage_jail_sync(
     }
 
     bind_mount(kernel, &jail_kernel)?;
-    bind_mount(rootfs, &jail_rootfs)?;
+    if let Err(e) = bind_mount(rootfs, &jail_rootfs) {
+        // Roll back the kernel bind + the partial jail tree so a failed boot
+        // doesn't strand an active mount and directory behind it.
+        unmount_quiet(&jail_kernel);
+        let _ = std::fs::remove_dir_all(jail_instance_dir(chroot_base, room_id));
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -525,6 +554,23 @@ fn bind_mount(source: &Path, target: &Path) -> Result<(), FirecrackerError> {
     })
 }
 
+#[cfg(unix)]
+fn unmount(target: &Path) -> Result<(), String> {
+    let output = std::process::Command::new("umount")
+        .arg(target)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+}
+
+#[cfg(unix)]
+fn unmount_quiet(target: &Path) {
+    let _ = unmount(target);
+}
+
 #[cfg(not(unix))]
 fn stage_jail_sync(
     _chroot_base: &Path,
@@ -539,16 +585,18 @@ fn stage_jail_sync(
 
 #[cfg(unix)]
 fn teardown_jail_sync(instance_dir: &Path) {
-    use std::process::Command;
-
     let jail_root = instance_dir.join("root");
     for name in [JAIL_KERNEL, JAIL_ROOTFS] {
         let target = jail_root.join(name);
         if target.exists() {
-            let _ = Command::new("umount").arg(&target).output();
+            if let Err(e) = unmount(&target) {
+                tracing::warn!(target = %target.display(), error = %e, "failed to unmount jail bind; may leak");
+            }
         }
     }
-    let _ = std::fs::remove_dir_all(instance_dir);
+    if let Err(e) = std::fs::remove_dir_all(instance_dir) {
+        tracing::warn!(dir = %instance_dir.display(), error = %e, "failed to remove jail instance dir");
+    }
 }
 
 #[cfg(not(unix))]

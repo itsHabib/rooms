@@ -7,6 +7,7 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::config::RoomsConfig;
+#[cfg(unix)]
 use crate::firecracker::{parse_getent_passwd, FIRECRACKER_USER};
 use crate::rootfs::{kernel_sibling, validate_kernel, validate_rootfs};
 
@@ -236,6 +237,8 @@ fn check_firecracker_user() -> CheckResult {
     }
 }
 
+// `image` is only consulted by the unix jail-access checks in this fn body.
+#[cfg_attr(not(unix), allow(unused_variables, reason = "image used only on unix"))]
 fn check_jailer_file_access(image: Option<&Path>) -> CheckResult {
     let name = "jailer_file_access".to_owned();
     #[cfg(unix)]
