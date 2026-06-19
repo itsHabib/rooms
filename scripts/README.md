@@ -28,6 +28,12 @@ Pinned by default to Alpine `3.21.7` and `claude-code=2.1.148-r1` (override with
 
 Boots the image under Firecracker and asserts: key-only `rooms@` SSH, DNS resolves (`getent hosts github.com`), `/dev/hwrng` present, `claude`/`git` work, claude links against musl, TLS to the Anthropic API verifies, password auth refused, and size < 300 MB. Uses the private key matching `--ssh-key` (default `~/.ssh/id_rooms`).
 
+### Read-only rootfs + overlay
+
+The Alpine image bakes `/sbin/overlay-init` as the kernel `init=` target. Firecracker mounts the rootfs block device read-only; the wrapper builds a tmpfs-backed overlay so openrc/sshd see a writable `/`. Guest writes evaporate on shutdown — the host rootfs file stays immutable and can be shared across rooms once the jailer opens it read-only.
+
+Gotcha: a smoke test that boots with `is_read_only: false` (as `test-rootfs-alpine.sh` still does for now) will persist guest writes to the image. Use `rooms run` (which sets `is_read_only: true` + `init=/sbin/overlay-init`) for the ephemerality check, or update the smoke script to match production boot args.
+
 ## Rootfs builder (Ubuntu/noble — legacy)
 
 Build the v0 Ubuntu rootfs from scratch (debootstrap). The script is the source of truth; built images are **not** committed (see `images/.gitignore`).

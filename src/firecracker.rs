@@ -669,17 +669,27 @@ async fn open_log_file(
     .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))?
 }
 
+const OVERLAY_INIT: &str = "/sbin/overlay-init";
+
 fn build_boot_args(network: Option<&NetworkConfig>) -> String {
-    let base = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
-    network.map_or_else(
-        || base.to_owned(),
-        |net| {
-            format!(
-                "{base} ip={}::{}:{}::eth0:off",
-                net.guest_ip, net.gateway_ip, net.netmask
-            )
-        },
+    let base =
+        format!("console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on init={OVERLAY_INIT}");
+    let Some(net) = network else {
+        return base;
+    };
+    format!(
+        "{base} ip={}::{}:{}::eth0:off",
+        net.guest_ip, net.gateway_ip, net.netmask
     )
+}
+
+fn rootfs_drive_payload(rootfs: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "drive_id": "rootfs",
+        "path_on_host": rootfs,
+        "is_root_device": true,
+        "is_read_only": true,
+    })
 }
 
 async fn configure_vm(
@@ -704,12 +714,7 @@ async fn configure_vm(
     transport::api_put(
         socket,
         "/drives/rootfs",
-        &serde_json::json!({
-            "drive_id": "rootfs",
-            "path_on_host": rootfs,
-            "is_root_device": true,
-            "is_read_only": false,
-        }),
+        &rootfs_drive_payload(rootfs),
         config,
     )
     .await?;
@@ -946,11 +951,62 @@ mod tests {
     }
 
     use super::{
-        build_jailer_launch_plan, parse_getent_passwd, JailLayout, JailerLaunchInput, RoomGuard,
-        FIRECRACKER_USER,
+        build_boot_args, build_jailer_launch_plan, parse_getent_passwd, rootfs_drive_payload,
+        JailLayout, JailerLaunchInput, NetworkConfig, RoomGuard, FIRECRACKER_USER,
     };
     use crate::config::RoomsConfig;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn build_boot_args_includes_overlay_init_without_network() {
+        let args = build_boot_args(None);
+        assert!(
+            args.contains("init=/sbin/overlay-init"),
+            "boot args must hand off to overlay-init: {args}"
+        );
+        assert!(
+            !args.contains(" ip="),
+            "no network suffix without config: {args}"
+        );
+    }
+
+    #[test]
+    fn build_boot_args_includes_overlay_init_with_network() {
+        let net = NetworkConfig {
+            tap_name: "tap-fc0".to_owned(),
+            guest_ip: "172.16.0.2".to_owned(),
+            gateway_ip: "172.16.0.1".to_owned(),
+            netmask: "255.255.255.0".to_owned(),
+        };
+        let args = build_boot_args(Some(&net));
+        assert!(
+            args.contains("init=/sbin/overlay-init"),
+            "boot args must hand off to overlay-init: {args}"
+        );
+        assert!(
+            args.contains("ip=172.16.0.2::172.16.0.1:255.255.255.0::eth0:off"),
+            "network suffix must follow overlay init: {args}"
+        );
+    }
+
+    #[test]
+    fn rootfs_drive_payload_is_read_only() {
+        let payload = rootfs_drive_payload(Path::new("/tmp/rootfs.ext4"));
+        assert_eq!(payload.get("drive_id"), Some(&serde_json::json!("rootfs")));
+        assert_eq!(
+            payload.get("is_root_device"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            payload.get("is_read_only"),
+            Some(&serde_json::json!(true)),
+            "rootfs must mount read-only at the block level"
+        );
+        assert_eq!(
+            payload.get("path_on_host"),
+            Some(&serde_json::json!("/tmp/rootfs.ext4"))
+        );
+    }
 
     #[test]
     fn parse_getent_passwd_extracts_uid_gid() {

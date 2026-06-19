@@ -166,6 +166,10 @@ apk update
 apk add --no-cache "claude-code=$CLAUDE_VERSION"
 CHROOT_INSTALL
 
+log "installing overlay-init (read-only rootfs + tmpfs overlay at boot)"
+install -d -m 0755 "$MNT/mnt" "$MNT/oldroot"
+install -m 0755 "${SCRIPT_DIR}/lib/overlay-init.sh" "$MNT/sbin/overlay-init"
+
 log "writing guest config (init, dns, hostname, settings)"
 # ttyS0-only inittab — Firecracker never offers a VT, so the six default gettys
 # would only burn spawns. openrc drives sysinit/boot/default runlevels.
