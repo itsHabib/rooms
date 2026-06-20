@@ -1,6 +1,6 @@
 # rooms — vision
 
-What `rooms` is, why it exists, what it is explicitly not building, and where it sits in the portfolio.
+What `rooms` is, why it exists, what it focuses on (and what it leaves to other layers), and where it sits in the portfolio.
 
 ## What rooms is
 
@@ -33,20 +33,20 @@ The first real consumer is an LLM agent: `rooms exec <id> -- claude -p < task.md
 
 The substrate does not know about agents. It sees `exec a command` — same as it would for a test suite, a linter, or a human shell script. Agent-specific logic (prompt format, SDK wiring, streaming events) lives in the runner script inside the rootfs, not in the Rust binary. That layering is intentional: ship's `RoomCursorRunner`, manual operator use, and future replay all compose the same primitive.
 
-## What rooms is NOT
+## What rooms focuses on (and what it leaves to other layers)
 
-Explicit non-goals. Resist the gravity well.
+`rooms` does one thing well — disposable microVMs — and stays out of the way of jobs that belong elsewhere. These aren't forbidden forever; they're where the work sits today, revisited when a real need shows up.
 
-- **Codespaces-but-local** — not a persistent dev workspace with editor integration, port forwarding, or "open in browser."
-- **Dev workspace UX** — no interactive shell-as-product, no multi-tab terminal, no file watcher syncing back to the host in real time.
-- **Web preview** — no tunneling guest ports to the operator's browser.
-- **Multi-tenant** — one operator, one host, one room at a time in v0. No control plane, no shared pool.
+- **Codespaces-but-local** — `rooms` is execution substrate, not a persistent dev workspace with editor integration or "open in browser." That's a different product shape.
+- **Dev workspace UX** — no interactive shell-as-product, no multi-tab terminal, no real-time file-watcher sync. Rooms run a command and collect the result.
+- **Web preview** — no tunneling guest ports to the operator's browser today.
+- **Multi-tenant** — one operator, one host, one room at a time in v0. A control plane / shared pool lands if and when parallel demand is real.
 - **Port forwarding** — guest network is for egress (API calls), not for exposing services.
-- **Persistent rooms across reboots** — rooms are ephemeral. Snapshot/fork lands in v0.2; until then, a room dies when the command finishes or the host reboots.
-- **Docker / devcontainer / generic container runtime** — Firecracker microVMs only. If you want a container, use a container tool.
-- **Cross-host control** — v0 runs `rooms` on the same Linux+KVM host that runs Firecracker. Remote orchestration is a later concern.
+- **Persistent rooms across reboots** — rooms are ephemeral by design. Snapshot/fork lands in v0.2; until then a room dies when the command finishes or the host reboots.
+- **Docker / devcontainer / generic container runtime** — the isolation primitive is Firecracker microVMs. If a container is the better fit for a job, reach for a container tool; `rooms` doesn't try to be one.
+- **Cross-host control** — v0 runs `rooms` on the same Linux+KVM host as Firecracker. Remote orchestration is a later concern, sequenced when a consumer needs it.
 
-The opinion: **your-laptop-first ephemeral microVMs, Nix-described deps, portfolio tool not protocol.**
+These are lines about where a job is best done, drawn deliberately and revisited as the work demands — not a standing veto. The opinion holds: **your-laptop-first ephemeral microVMs, Nix-described deps, portfolio tool not protocol.**
 
 ## Where this sits in the portfolio
 

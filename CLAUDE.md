@@ -295,7 +295,7 @@ Adapted from ship's workflow:
 - **Behavior contract unclear** → read the spec doc for that task (`docs/features/<slug>/spec.md`), then v0 spec.
 - **Clippy warning** → `make lint` locally, read the suggestion.
 - **"I want the runner to know about the agent"** → stop. Runner contract is substrate-side; agent logic lives in the rootfs runner script ([`docs/features/cursor-sdk-runner/spec.md`](docs/features/cursor-sdk-runner/spec.md)).
-- **"Add Docker / devcontainer / web preview"** → stop. Non-goals. Re-read [`docs/vision.md`](docs/vision.md).
+- **"Add Docker / devcontainer / web preview"** → pause; these belong to other layers or a different product shape, while `rooms` owns the microVM lifecycle. Re-read [`docs/vision.md`](docs/vision.md); if a real consumer keeps needing one here, that's a design conversation, not an automatic no.
 - **Firecracker misbehaving** → check per-room log under work dir, serial output, `tap-fc0` exists (`scripts/setup-tap.sh`).
 - **Out-of-scope discovery during implementation** → add a one-line entry to [`docs/follow-ups.md`](docs/follow-ups.md); defer depth to the originating PR.
 
