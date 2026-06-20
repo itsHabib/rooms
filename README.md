@@ -24,13 +24,13 @@ In flight / not yet built: a Nix flake as the deps spec (`--flake`), ship's `bac
 
 Every portfolio tool that needs isolation — an agent runner firing `claude -p`, crash recovery rebuilding a clean checkout, future replay comparing two runs — should not reinvent "boot a VM, run something, collect results." That belongs in one place. `rooms` owns Firecracker control, rootfs preparation, guest transport, command execution, and artifact collection. Callers own *what* runs inside the room; the substrate owns *how* the room exists.
 
-Everything else stays out of scope on purpose:
+The rest is another layer's job, on purpose — `rooms` stays focused on the microVM lifecycle:
 
 - **Agent logic** — prompt format, SDK wiring, streaming events — lives in the runner script baked into the rootfs, not in the Rust binary. The binary selects a command shape; it does not introspect runners.
 - **What "done" means** — the runner contract ([`docs/runner-contract.md`](docs/runner-contract.md)) defines the artifact layout and exit-code → status mapping; runners satisfy it.
 - **Orchestration** — fan-out, scheduling, and review live in the consumer (ship / `/work-driver`), which calls `rooms`. `rooms` does not import them; dependency flows one way.
 
-Explicit non-goals (full list in [`docs/vision.md`](docs/vision.md)): not Codespaces-but-local, no persistent dev workspace or interactive shell-as-product, no web preview / port forwarding, no Docker / devcontainer / generic container runtime, no multi-tenant control plane, no cross-host orchestration. Rooms are ephemeral — a room dies when the command finishes.
+Where the focus ends today (full list + rationale in [`docs/vision.md`](docs/vision.md)): not Codespaces-but-local, no persistent dev workspace or interactive shell-as-product, no web preview / port forwarding, no Docker / devcontainer / generic container runtime, no multi-tenant control plane, no cross-host orchestration. Those are layers other tools own, or that `rooms` adds when a real need shows up — not permanent vetoes. Rooms are ephemeral — a room dies when the command finishes.
 
 ## CLI surface
 
