@@ -497,10 +497,10 @@ async fn diff_changeset(from: &Path, json: bool) -> Result<u8, RoomsError> {
     Ok(changeset_exit_code(&changeset))
 }
 
-/// Exit 3 when the run wrote outside `/workspace` (the lane-escape tripwire), so
-/// `rooms diff` composes as a gate; 0 otherwise.
+/// Exit 3 when the run escaped its lane (wrote outside `/workspace` to a
+/// persistent path), so `rooms diff` composes as a gate; 0 otherwise.
 fn changeset_exit_code(changeset: &artifacts::Changeset) -> u8 {
-    if changeset.overlay_active && !changeset.outside_workspace().is_empty() {
+    if changeset.overlay_active && !changeset.lane_escapes().is_empty() {
         3
     } else {
         0
@@ -524,20 +524,51 @@ fn render_changeset(changeset: &artifacts::Changeset, raw: &str, json: bool) {
         );
         return;
     }
-    let outside = changeset.outside_workspace();
-    if !outside.is_empty() {
+    let escapes = changeset.lane_escapes();
+    if !escapes.is_empty() {
         println!(
-            "[!] {} write(s) outside /workspace (lane escape):",
-            outside.len()
+            "[!] {} lane escape(s) — writes outside /workspace to persistent paths:",
+            escapes.len()
         );
-        for path in &outside {
-            println!("    /{path}");
-        }
+        print_escapes_by_op(changeset);
     }
     let (added, modified, deleted) = changeset.workspace_counts();
     println!("/workspace: +{added} ~{modified} -{deleted}");
+    let ephemeral = changeset.ephemeral_count();
+    if ephemeral > 0 {
+        println!("({ephemeral} runtime write(s) under /run, /var/log, ... filtered)");
+    }
     if changeset.is_empty() {
         println!("(no changes)");
+    }
+}
+
+// Same stdout contract as `render_changeset`.
+#[allow(
+    clippy::print_stdout,
+    reason = "diff output is the documented stdout contract"
+)]
+fn print_escapes_by_op(changeset: &artifacts::Changeset) {
+    for path in changeset
+        .added
+        .iter()
+        .filter(|path| artifacts::is_lane_escape(path.as_str()))
+    {
+        println!("    A /{path}");
+    }
+    for path in changeset
+        .modified
+        .iter()
+        .filter(|path| artifacts::is_lane_escape(path.as_str()))
+    {
+        println!("    M /{path}");
+    }
+    for path in changeset
+        .deleted
+        .iter()
+        .filter(|path| artifacts::is_lane_escape(path.as_str()))
+    {
+        println!("    D /{path}");
     }
 }
 

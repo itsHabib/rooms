@@ -88,8 +88,38 @@ pub const CHANGESET_JSON: &str = "changeset.json";
 pub const CHANGESET_SCHEMA_VERSION: u32 = 1;
 
 /// Guest path prefix (sans leading `/`) that holds the agent's expected work.
-/// Changes outside it are the lane-escape tripwire.
 const WORKSPACE_PREFIX: &str = "workspace/";
+
+/// Runtime / log / temp prefixes (sans leading `/`) the OS writes on every boot.
+/// The overlay captures *everything* written since boot, so these would drown
+/// the real signal; they're filtered out of the lane-escape tripwire.
+const EPHEMERAL_PREFIXES: &[&str] = &[
+    "run/",
+    "var/run/",
+    "var/log/",
+    "var/cache/",
+    "var/tmp/",
+    "tmp/",
+    "dev/",
+    "proc/",
+    "sys/",
+];
+
+/// True when `path` is a lane escape: a change outside `/workspace`.
+///
+/// Excludes the OS's expected ephemeral churn (`/run`, `/var/log`, `/tmp`, ...),
+/// so it flags only writes to persistent locations (`/etc`, `/usr`, `/root`,
+/// ...) the agent had no business touching — the writes a `git diff` of the
+/// repo structurally cannot see.
+#[must_use]
+pub fn is_lane_escape(path: &str) -> bool {
+    if path.starts_with(WORKSPACE_PREFIX) {
+        return false;
+    }
+    !EPHEMERAL_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
 
 /// The filesystem changes an overlay run made, derived from the tmpfs upperdir.
 ///
@@ -97,7 +127,7 @@ const WORKSPACE_PREFIX: &str = "workspace/";
 /// `etc/hosts`). `overlay_active` is false for a writable-rootfs run, where
 /// there is no overlay to read. The set is *everything* written since boot —
 /// on the cursor path that includes the repo clone — so the sharp signal is
-/// [`Changeset::outside_workspace`], the writes a git diff can't see.
+/// [`Changeset::lane_escapes`], the persistent writes a git diff can't see.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changeset {
     pub schema_version: u32,
@@ -126,17 +156,30 @@ impl Changeset {
         self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
     }
 
-    /// Every changed path (any op) outside `/workspace` — the lane-escape
-    /// tripwire. The agent's own `git diff` structurally cannot see these.
+    /// The lane-escape tripwire: changed paths (any op) outside `/workspace` to
+    /// a persistent location, excluding expected OS churn (see
+    /// [`is_lane_escape`]). The sharp signal `rooms diff` leads with.
     #[must_use]
-    pub fn outside_workspace(&self) -> Vec<&str> {
+    pub fn lane_escapes(&self) -> Vec<&str> {
         self.added
             .iter()
             .chain(&self.modified)
             .chain(&self.deleted)
             .map(String::as_str)
-            .filter(|path| !path.starts_with(WORKSPACE_PREFIX))
+            .filter(|path| is_lane_escape(path))
             .collect()
+    }
+
+    /// Count of outside-`/workspace` writes filtered as expected OS churn
+    /// (`/run`, `/var/log`, `/tmp`, ...) — surfaced as a quiet note, not hidden.
+    #[must_use]
+    pub fn ephemeral_count(&self) -> usize {
+        self.added
+            .iter()
+            .chain(&self.modified)
+            .chain(&self.deleted)
+            .filter(|path| !path.starts_with(WORKSPACE_PREFIX) && !is_lane_escape(path))
+            .count()
     }
 
     /// `(added, modified, deleted)` counts under `/workspace` — the agent's
@@ -494,18 +537,24 @@ mod tests {
     }
 
     #[test]
-    fn outside_workspace_is_the_tripwire_and_counts_partition() {
+    fn lane_escapes_exclude_workspace_and_ephemeral_churn() {
         let cs = Changeset {
             schema_version: CHANGESET_SCHEMA_VERSION,
             overlay_active: true,
-            added: vec!["workspace/repo/a.rs".to_owned(), "root/.bashrc".to_owned()],
+            added: vec![
+                "workspace/repo/a.rs".to_owned(),
+                "root/.bashrc".to_owned(),
+                "var/log/dmesg".to_owned(),
+            ],
             modified: vec!["etc/hosts".to_owned()],
-            deleted: vec!["workspace/repo/old.rs".to_owned()],
+            deleted: vec!["workspace/repo/old.rs".to_owned(), "run/lock".to_owned()],
         };
-        let mut outside = cs.outside_workspace();
-        outside.sort_unstable();
-        assert_eq!(outside, vec!["etc/hosts", "root/.bashrc"]);
-        // under /workspace: a.rs added, old.rs deleted, nothing modified.
+        let mut escapes = cs.lane_escapes();
+        escapes.sort_unstable();
+        // /var/log + /run are expected OS churn -> filtered; /etc + /root persist -> flagged.
+        assert_eq!(escapes, vec!["etc/hosts", "root/.bashrc"]);
+        assert_eq!(cs.ephemeral_count(), 2); // var/log/dmesg + run/lock
+                                             // under /workspace: a.rs added, old.rs deleted, nothing modified.
         assert_eq!(cs.workspace_counts(), (1, 0, 1));
     }
 

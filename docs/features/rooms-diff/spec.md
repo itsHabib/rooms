@@ -40,7 +40,11 @@ Classification, per entry under `/oldroot/mnt/upper` (relative path `R`):
 The overlay only exists when `readonly_rootfs` is true, which #45 gated to the cursor path (which needs a key). That makes the change set both **untestable without a key** and **unusable for a dev `--command` run**. Add an explicit `rooms run --readonly-rootfs` boolean (default off) and widen the gate to `args.readonly_rootfs || matches!(args.runner, Cursor)`. Now any `--command` run against an overlay-init image (the cursor image, or any built by `build-rootfs-alpine.sh`) can boot read-only + overlay, which makes `rooms diff` demoable and host-testable end to end without a cursor agent. (Caveat: the flag requires an image carrying `/sbin/overlay-init`; against a plain image the kernel panics — same constraint the cursor path already lives under.)
 
 ### What the change set actually contains (and the sharp part)
-The upperdir is **everything written since boot**, not a curated agent diff: on the cursor path that includes the `git clone` into `/workspace`, so the change set is *noisy inside `/workspace`*. The unique, high-signal part is the partition: **writes outside `/workspace`** — files the agent (or its `sudo`) touched in `/etc`, `/root`, system binaries — which the agent's own `git diff` (`result.patch`) structurally cannot see. So `rooms diff` **leads with the out-of-lane tripwire** and summarizes the `/workspace` churn (counts + `--json` for the full list), rather than pretending the raw upperdir is a clean diff.
+The upperdir is **everything written since boot**, not a curated agent diff, with noise on two sides:
+- *Inside `/workspace`*: on the cursor path the `git clone` lands here, so the workspace side is churny by design — `rooms diff` summarizes it as counts (`--json` for the full list).
+- *Outside `/workspace`*: the **OS itself writes every boot** — `/run/lock`, `/run/sudo`, `/var/log/dmesg`, `/var/log/wtmp` showed up on a *clean* run during host-e2e. So a naive "outside /workspace" tripwire fires on every run.
+
+The sharp signal is therefore **writes outside `/workspace` to *persistent* paths** (`/etc`, `/usr`, `/root`, ...) — the lane escape — with the OS's expected ephemeral churn (`is_lane_escape` filters `/run`, `/var/log`, `/var/cache`, `/tmp`, `/dev`, `/proc`, `/sys`) excluded. That's the write the agent's own `git diff` (`result.patch`) structurally cannot see. `rooms diff` **leads with the lane escapes** (per-op `A`/`M`/`D`), notes the filtered runtime-write count, and exits **3** when any escape fired so it composes as a gate.
 
 ### Enumeration (mechanism — `src/runner.rs`)
 A new `collect_changeset_to_host(guest_ip, key, host_dir)`, called from `main` right after `collect_out_to_host` (both best-effort; a failure logs + is non-fatal, never blocks the run result). It runs **one** SSH command over the channel the runner already holds — a small POSIX `find`/`stat` walk of `/oldroot/mnt/upper` (via the guest's NOPASSWD `sudo`, since upper subdirs may be root-owned) emitting a NUL-delimited `op\0relpath` record stream. The **host** parses that stream into a typed `Changeset` and serializes `changeset.json` with serde (no shell-side JSON). Guest stays dumb; the host owns the contract.
@@ -50,15 +54,14 @@ If `/oldroot/mnt/upper` does not exist (a `--command` run — no overlay), the w
 ### Changeset type (`src/artifacts.rs`)
 ```rust
 pub struct Changeset {
-    pub schema_version: u32,        // own version, mirrors SCHEMA_VERSION discipline
-    pub overlay_active: bool,       // false on a --command run
-    pub added: Vec<String>,         // workspace-relative-agnostic; absolute guest paths sans leading /
+    pub schema_version: u32,   // own version, mirrors SCHEMA_VERSION discipline
+    pub overlay_active: bool,  // false on a writable-rootfs run
+    pub added: Vec<String>,    // guest-absolute paths sans leading / (workspace/repo/x, etc/hosts)
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
-    pub outside_workspace: Vec<String>,  // the tripwire: entries not under workspace/
 }
 ```
-Plain data, no I/O, no upward import. `changeset.json` is a **standalone** artifact in `out/` — it is NOT referenced from `result.json` (which the guest writes before the host enumerates), so no `result.json` schema bump and no contract coupling.
+Plain data, no I/O, no upward import. The tripwire is *derived* not stored — `lane_escapes()` / `is_lane_escape()` partition the three lists at read time, so the on-disk artifact stays minimal. `changeset.json` is a **standalone** artifact in `out/` — NOT referenced from `result.json` (which the guest writes before the host enumerates), so no `result.json` schema bump and no contract coupling.
 
 ### CLI verb (`src/main.rs`)
 `rooms diff --from <out-dir> [--json]`, mirroring `rooms collect --from`:
