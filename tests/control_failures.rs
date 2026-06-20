@@ -83,7 +83,7 @@ async fn firecracker_exits_early_is_caught() {
     };
 
     let before = room_dirs_glob();
-    let err = firecracker::boot(&kernel, &rootfs, None, &config)
+    let err = firecracker::boot(&kernel, &rootfs, None, &config, false)
         .await
         .expect_err("stub should exit early");
 
@@ -122,7 +122,7 @@ async fn api_socket_never_appears() {
         ..RoomsConfig::default()
     };
 
-    let err = firecracker::boot(&kernel, &rootfs, None, &config)
+    let err = firecracker::boot(&kernel, &rootfs, None, &config, false)
         .await
         .expect_err("stub should never open socket");
 
@@ -151,7 +151,7 @@ async fn guest_unreachable() {
     };
 
     // Boot without network so SSH can never succeed.
-    let vm = firecracker::boot(&kernel, &rootfs, None, &config)
+    let vm = firecracker::boot(&kernel, &rootfs, None, &config, false)
         .await
         .expect("boot without network should succeed");
 

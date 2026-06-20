@@ -202,6 +202,7 @@ pub async fn boot(
     rootfs: &Path,
     network: Option<&NetworkConfig>,
     config: &RoomsConfig,
+    readonly_rootfs: bool,
 ) -> Result<BootedVm, FirecrackerError> {
     ensure_root()?;
     check_kvm()?;
@@ -251,11 +252,12 @@ pub async fn boot(
     )
     .await?;
 
-    let boot_args = build_boot_args(network);
+    let boot_args = build_boot_args(network, readonly_rootfs);
+    let rootfs_drive = rootfs_drive_payload(&launch.rootfs_path_in_jail, readonly_rootfs);
     configure_vm(
         &socket,
         &launch.kernel_path_in_jail,
-        &launch.rootfs_path_in_jail,
+        &rootfs_drive,
         network,
         &boot_args,
         config,
@@ -669,23 +671,40 @@ async fn open_log_file(
     .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))?
 }
 
-fn build_boot_args(network: Option<&NetworkConfig>) -> String {
-    let base = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
-    network.map_or_else(
-        || base.to_owned(),
-        |net| {
-            format!(
-                "{base} ip={}::{}:{}::eth0:off",
-                net.guest_ip, net.gateway_ip, net.netmask
-            )
-        },
+const OVERLAY_INIT: &str = "/sbin/overlay-init";
+
+fn build_boot_args(network: Option<&NetworkConfig>, readonly_rootfs: bool) -> String {
+    // `init=/sbin/overlay-init` only ships in images built by
+    // build-rootfs-alpine.sh; force it (and the read-only drive) only when the
+    // caller opts in, so a plain `rooms run --command` against any image still
+    // boots rather than panicking on a missing init.
+    let mut base = String::from("console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on");
+    if readonly_rootfs {
+        base.push_str(" init=");
+        base.push_str(OVERLAY_INIT);
+    }
+    let Some(net) = network else {
+        return base;
+    };
+    format!(
+        "{base} ip={}::{}:{}::eth0:off",
+        net.guest_ip, net.gateway_ip, net.netmask
     )
+}
+
+fn rootfs_drive_payload(rootfs: &Path, readonly_rootfs: bool) -> serde_json::Value {
+    serde_json::json!({
+        "drive_id": "rootfs",
+        "path_on_host": rootfs,
+        "is_root_device": true,
+        "is_read_only": readonly_rootfs,
+    })
 }
 
 async fn configure_vm(
     socket: &Path,
     kernel: &Path,
-    rootfs: &Path,
+    rootfs_drive: &serde_json::Value,
     network: Option<&NetworkConfig>,
     boot_args: &str,
     config: &RoomsConfig,
@@ -701,18 +720,7 @@ async fn configure_vm(
     )
     .await?;
 
-    transport::api_put(
-        socket,
-        "/drives/rootfs",
-        &serde_json::json!({
-            "drive_id": "rootfs",
-            "path_on_host": rootfs,
-            "is_root_device": true,
-            "is_read_only": false,
-        }),
-        config,
-    )
-    .await?;
+    transport::api_put(socket, "/drives/rootfs", rootfs_drive, config).await?;
 
     transport::api_put(
         socket,
@@ -946,11 +954,72 @@ mod tests {
     }
 
     use super::{
-        build_jailer_launch_plan, parse_getent_passwd, JailLayout, JailerLaunchInput, RoomGuard,
-        FIRECRACKER_USER,
+        build_boot_args, build_jailer_launch_plan, parse_getent_passwd, rootfs_drive_payload,
+        JailLayout, JailerLaunchInput, NetworkConfig, RoomGuard, FIRECRACKER_USER,
     };
     use crate::config::RoomsConfig;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn build_boot_args_overlay_init_only_when_readonly() {
+        let on = build_boot_args(None, true);
+        assert!(
+            on.contains("init=/sbin/overlay-init"),
+            "readonly boot args must hand off to overlay-init: {on}"
+        );
+        assert!(
+            !on.contains(" ip="),
+            "no network suffix without config: {on}"
+        );
+
+        let off = build_boot_args(None, false);
+        assert!(
+            !off.contains("init="),
+            "non-readonly boot must not force an init= (any image boots): {off}"
+        );
+    }
+
+    #[test]
+    fn build_boot_args_includes_overlay_init_with_network() {
+        let net = NetworkConfig {
+            tap_name: "tap-fc0".to_owned(),
+            guest_ip: "172.16.0.2".to_owned(),
+            gateway_ip: "172.16.0.1".to_owned(),
+            netmask: "255.255.255.0".to_owned(),
+        };
+        let args = build_boot_args(Some(&net), true);
+        assert!(
+            args.contains("init=/sbin/overlay-init"),
+            "boot args must hand off to overlay-init: {args}"
+        );
+        assert!(
+            args.contains("ip=172.16.0.2::172.16.0.1:255.255.255.0::eth0:off"),
+            "network suffix must follow overlay init: {args}"
+        );
+    }
+
+    #[test]
+    fn rootfs_drive_payload_read_only_tracks_flag() {
+        let ro = rootfs_drive_payload(Path::new("/tmp/rootfs.ext4"), true);
+        assert_eq!(ro.get("drive_id"), Some(&serde_json::json!("rootfs")));
+        assert_eq!(ro.get("is_root_device"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            ro.get("is_read_only"),
+            Some(&serde_json::json!(true)),
+            "readonly path must mount the drive read-only"
+        );
+        assert_eq!(
+            ro.get("path_on_host"),
+            Some(&serde_json::json!("/tmp/rootfs.ext4"))
+        );
+
+        let rw = rootfs_drive_payload(Path::new("/tmp/rootfs.ext4"), false);
+        assert_eq!(
+            rw.get("is_read_only"),
+            Some(&serde_json::json!(false)),
+            "non-readonly path must keep the drive writable"
+        );
+    }
 
     #[test]
     fn parse_getent_passwd_extracts_uid_gid() {
@@ -1133,7 +1202,7 @@ mod e2e_tests {
         assert!(kernel.exists(), "kernel missing at {kernel:?}");
         assert!(rootfs.exists(), "rootfs missing at {rootfs:?}");
 
-        let mut vm = boot(&kernel, &rootfs, None, &config)
+        let mut vm = boot(&kernel, &rootfs, None, &config, false)
             .await
             .expect("boot should succeed");
 

@@ -241,7 +241,18 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     // Resolve the post-boot action before booting so a missing --task file (or
     // other host-side input error) fails fast without spending a microVM boot.
     let action = resolve_action(&args).await?;
-    let mut vm = firecracker::boot(&kernel, &args.image, Some(&network), config).await?;
+    // Read-only rootfs + tmpfs overlay only on the cursor agent path (it runs
+    // untrusted code); a plain `rooms run --command` keeps a writable rootfs so
+    // any image — including ones without /sbin/overlay-init — still boots.
+    let readonly_rootfs = matches!(args.runner, RunnerKind::Cursor);
+    let mut vm = firecracker::boot(
+        &kernel,
+        &args.image,
+        Some(&network),
+        config,
+        readonly_rootfs,
+    )
+    .await?;
 
     if args.keep {
         vm.guard_mut().set_suppress_cleanup(true);
