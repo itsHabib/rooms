@@ -63,6 +63,12 @@ enum Command {
         /// and cleared each run) so `rooms collect --from <dir>` can read it.
         #[arg(long = "out", conflicts_with = "keep")]
         out_dir: Option<PathBuf>,
+        /// Mount the rootfs read-only with a tmpfs overlay (needs an image
+        /// carrying `/sbin/overlay-init`). Auto-enabled for `--runner cursor`;
+        /// set it on a `--command` run to make the change set visible to
+        /// `rooms diff`.
+        #[arg(long = "readonly-rootfs")]
+        readonly_rootfs: bool,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -76,6 +82,15 @@ enum Command {
         #[arg(long)]
         image: Option<PathBuf>,
         /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the overlay change set from a run's collected `out/` directory.
+    Diff {
+        /// Path to the collected `out/` directory (the `--out` target of a run).
+        #[arg(long)]
+        from: PathBuf,
+        /// Emit the raw `changeset.json` instead of a human summary.
         #[arg(long)]
         json: bool,
     },
@@ -104,6 +119,7 @@ struct RunArgs {
     base_sha: Option<String>,
     push_branch: Option<String>,
     out_dir: Option<PathBuf>,
+    readonly_rootfs: bool,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -154,6 +170,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             base_sha,
             push_branch,
             out_dir,
+            readonly_rootfs,
         } => {
             run_room(
                 RunArgs {
@@ -167,6 +184,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     base_sha,
                     push_branch,
                     out_dir,
+                    readonly_rootfs,
                 },
                 &config,
             )
@@ -174,6 +192,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
         }
         Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
+        Command::Diff { from, json } => diff_changeset(&from, json).await,
     }
 }
 
@@ -241,10 +260,11 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     // Resolve the post-boot action before booting so a missing --task file (or
     // other host-side input error) fails fast without spending a microVM boot.
     let action = resolve_action(&args).await?;
-    // Read-only rootfs + tmpfs overlay only on the cursor agent path (it runs
-    // untrusted code); a plain `rooms run --command` keeps a writable rootfs so
-    // any image — including ones without /sbin/overlay-init — still boots.
-    let readonly_rootfs = matches!(args.runner, RunnerKind::Cursor);
+    // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
+    // untrusted code) or when the operator opts in with --readonly-rootfs; a
+    // plain `rooms run --command` otherwise keeps a writable rootfs so any
+    // image — including ones without /sbin/overlay-init — still boots.
+    let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
     let mut vm = firecracker::boot(
         &kernel,
         &args.image,
@@ -287,6 +307,12 @@ async fn collect_if_exec(guest_ip: &str, key: &Path, action: &Action, out_dir: &
         Err(e) => {
             warn!(error = %e, out = %out_dir.display(), "collect /workspace/out to host failed");
         }
+    }
+    // The overlay change set (cursor / --readonly-rootfs runs only). Best-effort:
+    // an absent overlay or a read failure never affects the run's result.
+    match runner::collect_changeset_to_host(guest_ip, key, out_dir).await {
+        Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
+        Err(e) => warn!(error = %e, "collect overlay changeset failed"),
     }
 }
 
@@ -445,6 +471,76 @@ async fn collect_artifacts(from: PathBuf) -> Result<u8, RoomsError> {
     Ok(0)
 }
 
+async fn diff_changeset(from: &Path, json: bool) -> Result<u8, RoomsError> {
+    info!(from = %from.display(), "rooms diff");
+    let path = from.join(artifacts::CHANGESET_JSON);
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "no {} in {}: collect the run with --out, under --runner cursor or --readonly-rootfs",
+                artifacts::CHANGESET_JSON,
+                from.display()
+            );
+            return Ok(0);
+        }
+        Err(e) => {
+            return Err(RoomsError::Internal(format!(
+                "read {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    let changeset: artifacts::Changeset = serde_json::from_str(&raw)
+        .map_err(|e| RoomsError::Internal(format!("parse changeset: {e}")))?;
+    render_changeset(&changeset, &raw, json);
+    Ok(changeset_exit_code(&changeset))
+}
+
+/// Exit 3 when the run wrote outside `/workspace` (the lane-escape tripwire), so
+/// `rooms diff` composes as a gate; 0 otherwise.
+fn changeset_exit_code(changeset: &artifacts::Changeset) -> u8 {
+    if changeset.overlay_active && !changeset.outside_workspace().is_empty() {
+        3
+    } else {
+        0
+    }
+}
+
+// stdout is the documented data surface for `rooms diff` (logs stay on stderr),
+// mirroring `rooms doctor --json`.
+#[allow(
+    clippy::print_stdout,
+    reason = "diff output is the documented stdout contract"
+)]
+fn render_changeset(changeset: &artifacts::Changeset, raw: &str, json: bool) {
+    if json {
+        println!("{raw}");
+        return;
+    }
+    if !changeset.overlay_active {
+        eprintln!(
+            "no overlay change set: this run used a writable rootfs (only --runner cursor or --readonly-rootfs produce an overlay)"
+        );
+        return;
+    }
+    let outside = changeset.outside_workspace();
+    if !outside.is_empty() {
+        println!(
+            "[!] {} write(s) outside /workspace (lane escape):",
+            outside.len()
+        );
+        for path in &outside {
+            println!("    /{path}");
+        }
+    }
+    let (added, modified, deleted) = changeset.workspace_counts();
+    println!("/workspace: +{added} ~{modified} -{deleted}");
+    if changeset.is_empty() {
+        println!("(no changes)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -457,12 +553,64 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use super::{resolve_action, Cli, Command, RoomsError, RunArgs, RunnerKind};
+    use super::{
+        changeset_exit_code, resolve_action, Cli, Command, RoomsError, RunArgs, RunnerKind,
+    };
+    use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn readonly_rootfs_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "id",
+            "--readonly-rootfs",
+        ])
+        .expect("--readonly-rootfs should parse");
+        match cli.command {
+            Command::Run {
+                readonly_rootfs, ..
+            } => assert!(readonly_rootfs),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_verb_parses_from_and_json() {
+        let cli = Cli::try_parse_from(["rooms", "diff", "--from", "/tmp/out", "--json"])
+            .expect("diff should parse");
+        match cli.command {
+            Command::Diff { from, json } => {
+                assert_eq!(from, PathBuf::from("/tmp/out"));
+                assert!(json);
+            }
+            other => panic!("expected Diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn changeset_exit_code_flags_lane_escape() {
+        let mut cs = Changeset {
+            schema_version: 1,
+            overlay_active: true,
+            added: vec!["workspace/a".to_owned()],
+            modified: Vec::new(),
+            deleted: Vec::new(),
+        };
+        assert_eq!(changeset_exit_code(&cs), 0);
+        cs.added.push("etc/hosts".to_owned());
+        assert_eq!(changeset_exit_code(&cs), 3);
+        cs.overlay_active = false;
+        assert_eq!(changeset_exit_code(&cs), 0);
     }
 
     #[test]
@@ -575,6 +723,7 @@ mod tests {
             base_sha: None,
             push_branch: Some("feature".to_owned()),
             out_dir: None,
+            readonly_rootfs: false,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(

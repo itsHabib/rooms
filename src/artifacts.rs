@@ -81,6 +81,125 @@ impl ResultJson {
     }
 }
 
+/// Relative path of the overlay change-set artifact under an `out/` directory.
+pub const CHANGESET_JSON: &str = "changeset.json";
+
+/// Schema version for `changeset.json` (independent of `result.json`).
+pub const CHANGESET_SCHEMA_VERSION: u32 = 1;
+
+/// Guest path prefix (sans leading `/`) that holds the agent's expected work.
+/// Changes outside it are the lane-escape tripwire.
+const WORKSPACE_PREFIX: &str = "workspace/";
+
+/// The filesystem changes an overlay run made, derived from the tmpfs upperdir.
+///
+/// Paths are guest-absolute without the leading `/` (e.g. `workspace/repo/x.rs`,
+/// `etc/hosts`). `overlay_active` is false for a writable-rootfs run, where
+/// there is no overlay to read. The set is *everything* written since boot —
+/// on the cursor path that includes the repo clone — so the sharp signal is
+/// [`Changeset::outside_workspace`], the writes a git diff can't see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Changeset {
+    pub schema_version: u32,
+    pub overlay_active: bool,
+    pub added: Vec<String>,
+    pub modified: Vec<String>,
+    pub deleted: Vec<String>,
+}
+
+impl Changeset {
+    /// An inactive change set (a writable-rootfs run has no overlay to read).
+    #[must_use]
+    pub const fn inactive() -> Self {
+        Self {
+            schema_version: CHANGESET_SCHEMA_VERSION,
+            overlay_active: false,
+            added: Vec::new(),
+            modified: Vec::new(),
+            deleted: Vec::new(),
+        }
+    }
+
+    /// No files changed (whether or not the overlay was active).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+    }
+
+    /// Every changed path (any op) outside `/workspace` — the lane-escape
+    /// tripwire. The agent's own `git diff` structurally cannot see these.
+    #[must_use]
+    pub fn outside_workspace(&self) -> Vec<&str> {
+        self.added
+            .iter()
+            .chain(&self.modified)
+            .chain(&self.deleted)
+            .map(String::as_str)
+            .filter(|path| !path.starts_with(WORKSPACE_PREFIX))
+            .collect()
+    }
+
+    /// `(added, modified, deleted)` counts under `/workspace` — the agent's
+    /// expected lane (noisy: includes the repo clone on the cursor path).
+    #[must_use]
+    pub fn workspace_counts(&self) -> (usize, usize, usize) {
+        let under = |paths: &[String]| {
+            paths
+                .iter()
+                .filter(|path| path.starts_with(WORKSPACE_PREFIX))
+                .count()
+        };
+        (
+            under(&self.added),
+            under(&self.modified),
+            under(&self.deleted),
+        )
+    }
+}
+
+/// Parse the guest upperdir enumeration into a [`Changeset`].
+///
+/// The guest emits NUL-delimited `<op>\t<relpath>` records, where `op` is
+/// `A` (added) / `M` (modified) / `D` (deleted). A stream that begins with the
+/// `NOOVERLAY` sentinel (no upperdir — a writable-rootfs run) yields an
+/// inactive set. Malformed records are skipped rather than failing the parse;
+/// this reads attacker-influenceable guest output, so it stays total.
+#[must_use]
+pub fn parse_changeset_stream(raw: &[u8]) -> Changeset {
+    if raw.starts_with(b"NOOVERLAY") {
+        return Changeset::inactive();
+    }
+    let mut changeset = Changeset {
+        schema_version: CHANGESET_SCHEMA_VERSION,
+        overlay_active: true,
+        added: Vec::new(),
+        modified: Vec::new(),
+        deleted: Vec::new(),
+    };
+    for record in raw.split(|&byte| byte == 0) {
+        let Some((&op, rest)) = record.split_first() else {
+            continue;
+        };
+        let Some(path_bytes) = rest.strip_prefix(b"\t") else {
+            continue;
+        };
+        let path = String::from_utf8_lossy(path_bytes).into_owned();
+        if path.is_empty() {
+            continue;
+        }
+        match op {
+            b'A' => changeset.added.push(path),
+            b'M' => changeset.modified.push(path),
+            b'D' => changeset.deleted.push(path),
+            _ => {}
+        }
+    }
+    changeset.added.sort();
+    changeset.modified.sort();
+    changeset.deleted.sort();
+    changeset
+}
+
 /// Validated artifact bundle loaded from an `out/` directory on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerArtifacts {
@@ -275,8 +394,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ArtifactsError, ResultJson, RunStatus, RunnerArtifacts, RESULT_JSON, SCHEMA_VERSION,
-        STDERR_LOG, STDOUT_LOG,
+        parse_changeset_stream, ArtifactsError, Changeset, ResultJson, RunStatus, RunnerArtifacts,
+        CHANGESET_SCHEMA_VERSION, RESULT_JSON, SCHEMA_VERSION, STDERR_LOG, STDOUT_LOG,
     };
 
     fn sample_result() -> ResultJson {
@@ -343,6 +462,51 @@ mod tests {
     fn status_from_exit_code_maps_zero_and_nonzero() {
         assert_eq!(ResultJson::status_from_exit_code(0), RunStatus::Succeeded);
         assert_eq!(ResultJson::status_from_exit_code(1), RunStatus::Failed);
+    }
+
+    #[test]
+    fn parse_changeset_classifies_ops_and_sorts() {
+        let raw = b"M\tworkspace/repo/b.rs\0A\tworkspace/repo/a.rs\0D\tworkspace/repo/old.rs\0A\tetc/hosts\0";
+        let cs = parse_changeset_stream(raw);
+        assert!(cs.overlay_active);
+        assert_eq!(cs.added, vec!["etc/hosts", "workspace/repo/a.rs"]);
+        assert_eq!(cs.modified, vec!["workspace/repo/b.rs"]);
+        assert_eq!(cs.deleted, vec!["workspace/repo/old.rs"]);
+    }
+
+    #[test]
+    fn parse_changeset_nooverlay_sentinel_is_inactive() {
+        let cs = parse_changeset_stream(b"NOOVERLAY");
+        assert!(!cs.overlay_active);
+        assert!(cs.is_empty());
+        assert_eq!(cs.schema_version, CHANGESET_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn parse_changeset_skips_malformed_records() {
+        // no tab, unknown op, empty path, empty record — each skipped, the one
+        // valid record survives.
+        let raw = b"Xnotab\0Z\tunknown-op\0A\t\0\0M\tworkspace/keep\0";
+        let cs = parse_changeset_stream(raw);
+        assert_eq!(cs.modified, vec!["workspace/keep"]);
+        assert!(cs.added.is_empty());
+        assert!(cs.deleted.is_empty());
+    }
+
+    #[test]
+    fn outside_workspace_is_the_tripwire_and_counts_partition() {
+        let cs = Changeset {
+            schema_version: CHANGESET_SCHEMA_VERSION,
+            overlay_active: true,
+            added: vec!["workspace/repo/a.rs".to_owned(), "root/.bashrc".to_owned()],
+            modified: vec!["etc/hosts".to_owned()],
+            deleted: vec!["workspace/repo/old.rs".to_owned()],
+        };
+        let mut outside = cs.outside_workspace();
+        outside.sort_unstable();
+        assert_eq!(outside, vec!["etc/hosts", "root/.bashrc"]);
+        // under /workspace: a.rs added, old.rs deleted, nothing modified.
+        assert_eq!(cs.workspace_counts(), (1, 0, 1));
     }
 
     #[tokio::test]

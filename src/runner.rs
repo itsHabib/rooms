@@ -14,7 +14,7 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::artifacts::{ResultJson, RunStatus};
+use crate::artifacts::{parse_changeset_stream, ResultJson, RunStatus, CHANGESET_JSON};
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
 
@@ -203,6 +203,62 @@ pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Pat
         );
     }
     Ok(())
+}
+
+/// One `sudo bash` over the upperdir: emit NUL-delimited `<op>\t<relpath>`
+/// records (op `A`/`M`/`D`) for every changed file, or the `NOOVERLAY` sentinel
+/// when there is no overlay (a writable-rootfs run). Runs as root in-process
+/// (not per-file sudo) so it also sees root-owned escapes. `/oldroot` is the RO
+/// lower, `/oldroot/mnt/upper` the tmpfs upper (see `scripts/lib/overlay-init.sh`).
+const ENUMERATE_OVERLAY: &str = r#"sudo bash -c 'UP=/oldroot/mnt/upper; LOW=/oldroot
+if [ ! -d "$UP" ]; then printf NOOVERLAY; exit 0; fi
+find "$UP" \( -type f -o -type c \) -print0 | while IFS= read -r -d "" p; do
+  rel=${p#"$UP"/}
+  if [ -c "$p" ]; then
+    if [ "$(stat -c %t "$p" 2>/dev/null)" = 0 ] && [ "$(stat -c %T "$p" 2>/dev/null)" = 0 ]; then printf "D\t%s\0" "$rel"; fi
+  elif [ -e "$LOW/$rel" ]; then printf "M\t%s\0" "$rel"
+  else printf "A\t%s\0" "$rel"; fi
+done'"#;
+
+/// Enumerate the overlay change set in the guest and write `changeset.json` into
+/// `host_dir`. Best-effort and read-only: callers run this after
+/// `collect_out_to_host` and never fail a run on its error.
+pub async fn collect_changeset_to_host(
+    guest_ip: &str,
+    key_path: &Path,
+    host_dir: &Path,
+) -> Result<()> {
+    let ssh_out = ssh_command(guest_ip, key_path, ENUMERATE_OVERLAY, false)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to enumerate overlay over ssh")?;
+    if !ssh_out.status.success() {
+        let stderr = String::from_utf8_lossy(&ssh_out.stderr);
+        anyhow::bail!(
+            "guest overlay enumeration failed (exit {}): {stderr}",
+            ssh_out.status
+        );
+    }
+    let changeset = parse_changeset_stream(&ssh_out.stdout);
+    let json = serde_json::to_string_pretty(&changeset).context("serialize changeset")?;
+    write_host_artifact_atomic(host_dir, CHANGESET_JSON, json.as_bytes()).await
+}
+
+/// Atomic artifact write: temp file in the same dir, then rename. A crash
+/// mid-write leaves no half-written `changeset.json` for a reader to choke on.
+async fn write_host_artifact_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let final_path = dir.join(name);
+    let tmp_path = dir.join(format!("{name}.tmp"));
+    tokio::fs::write(&tmp_path, bytes)
+        .await
+        .with_context(|| format!("write {}", tmp_path.display()))?;
+    tokio::fs::rename(&tmp_path, &final_path)
+        .await
+        .with_context(|| format!("rename into {}", final_path.display()))
 }
 
 /// Reject any unsafe member (link, device, `..`, absolute path) in a guest tar before extraction.
