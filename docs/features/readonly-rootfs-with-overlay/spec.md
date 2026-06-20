@@ -75,8 +75,8 @@ Notes for the implementer:
 - Keep the wrapper dependency-free (BusyBox builtins only): `mount`, `mkdir`, `pivot_root`, `chroot`, `exec`. Confirm the guest kernel has `CONFIG_OVERLAY_FS=y` (the FC CI 6.1.155 kernel does; assert in the host-e2e).
 
 ### `src/firecracker.rs`
-- `configure_vm`: `/drives/rootfs` → `"is_read_only": true`.
-- `build_boot_args`: append `init=/sbin/overlay-init`.
+- `boot` gains a `readonly_rootfs: bool`; `rootfs_drive_payload` and `build_boot_args` take it. When true: `/drives/rootfs` → `"is_read_only": true` and boot args append `init=/sbin/overlay-init`. When false: writable drive, no forced init — any image (incl. ones without the wrapper) boots unchanged.
+- **Opt-in gating (policy in `main`):** `run_room` sets `readonly_rootfs = matches!(args.runner, RunnerKind::Cursor)` — the RO+overlay hardening applies to the untrusted **cursor agent** path only; a plain `rooms run --command` (dev, quickstart/legacy images, the `--features e2e` boot test) keeps a writable rootfs. `firecracker` is mechanism; it just obeys the bool. (Resolves codex's PR #45 review: forcing the wrapper on every image panics any image that lacks it.)
 - Layered discipline: this is `firecracker` mechanism; no policy leaks in. (Jailer interaction: with `is_read_only: true` the jailer/firecracker opens the rootfs RO — the `g+rw` requirement from #44 relaxes to read+shared; note it, but the jail-staging perms change is a follow-on, not required for this PR's acceptance.)
 
 ### `scripts/build-rootfs-alpine.sh`
