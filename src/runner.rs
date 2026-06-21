@@ -206,17 +206,20 @@ pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Pat
 }
 
 /// One `sudo bash` over the upperdir: emit NUL-delimited `<op>\t<relpath>`
-/// records (op `A`/`M`/`D`) for every changed file, or the `NOOVERLAY` sentinel
-/// when there is no overlay (a writable-rootfs run). Runs as root in-process
-/// (not per-file sudo) so it also sees root-owned escapes. `/oldroot` is the RO
-/// lower, `/oldroot/mnt/upper` the tmpfs upper (see `scripts/lib/overlay-init.sh`).
+/// records (op `A`/`M`/`D`) for every changed file or symlink, or the
+/// `NOOVERLAY` sentinel when there is no overlay (a writable-rootfs run). Runs as
+/// root in-process (not per-file sudo) so it also sees root-owned escapes.
+/// Symlinks are walked too (`-type l`): a symlink dropped outside `/workspace`
+/// (e.g. `ln -s target /etc/foo`) is itself a persistent-path lane escape, and
+/// `find -type f` alone would miss it. `/oldroot` is the RO lower,
+/// `/oldroot/mnt/upper` the tmpfs upper (see `scripts/lib/overlay-init.sh`).
 const ENUMERATE_OVERLAY: &str = r#"sudo bash -c 'UP=/oldroot/mnt/upper; LOW=/oldroot
 if [ ! -d "$UP" ]; then printf NOOVERLAY; exit 0; fi
-find "$UP" \( -type f -o -type c \) -print0 | while IFS= read -r -d "" p; do
+find "$UP" \( -type f -o -type l -o -type c \) -print0 | while IFS= read -r -d "" p; do
   rel=${p#"$UP"/}
   if [ -c "$p" ]; then
     if [ "$(stat -c %t "$p" 2>/dev/null)" = 0 ] && [ "$(stat -c %T "$p" 2>/dev/null)" = 0 ]; then printf "D\t%s\0" "$rel"; fi
-  elif [ -e "$LOW/$rel" ]; then printf "M\t%s\0" "$rel"
+  elif [ -e "$LOW/$rel" ] || [ -L "$LOW/$rel" ]; then printf "M\t%s\0" "$rel"
   else printf "A\t%s\0" "$rel"; fi
 done'"#;
 
