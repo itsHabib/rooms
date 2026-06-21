@@ -86,6 +86,11 @@ enum Command {
         json: bool,
     },
     /// Show the overlay change set from a run's collected `out/` directory.
+    ///
+    /// Exit codes: 0 = verified, no lane escape; 3 = a write escaped /workspace
+    /// to a persistent path; 2 = indeterminate — couldn't verify the lane (no
+    /// out-dir, an unreadable/foreign changeset, or a run with no overlay). A
+    /// gate never reads "couldn't verify" as "clean".
     Diff {
         /// Path to the collected `out/` directory (the `--out` target of a run).
         #[arg(long)]
@@ -473,6 +478,14 @@ async fn collect_artifacts(from: PathBuf) -> Result<u8, RoomsError> {
 
 async fn diff_changeset(from: &Path, json: bool) -> Result<u8, RoomsError> {
     info!(from = %from.display(), "rooms diff");
+    // A gate must never read "couldn't verify" as "clean": a missing out-dir or
+    // an absent changeset.json exits 2 (indeterminate), distinct from 0 (verified)
+    // and 3 (lane escape). A best-effort collect failure leaves no changeset.json,
+    // so without this an exit-code gate would pass an unverified run.
+    if !matches!(tokio::fs::metadata(from).await, Ok(m) if m.is_dir()) {
+        eprintln!("--from is not an existing directory: {}", from.display());
+        return Ok(2);
+    }
     let path = from.join(artifacts::CHANGESET_JSON);
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(raw) => raw,
@@ -482,7 +495,7 @@ async fn diff_changeset(from: &Path, json: bool) -> Result<u8, RoomsError> {
                 artifacts::CHANGESET_JSON,
                 from.display()
             );
-            return Ok(0);
+            return Ok(2);
         }
         Err(e) => {
             return Err(RoomsError::Internal(format!(
@@ -493,18 +506,33 @@ async fn diff_changeset(from: &Path, json: bool) -> Result<u8, RoomsError> {
     };
     let changeset: artifacts::Changeset = serde_json::from_str(&raw)
         .map_err(|e| RoomsError::Internal(format!("parse changeset: {e}")))?;
+    // A changeset written by a different schema version can't be read under v1
+    // lane-escape semantics — treat it as indeterminate rather than risk a v2
+    // escape reading as a v1 "clean" (mirrors result.json's version discipline).
+    if changeset.schema_version != artifacts::CHANGESET_SCHEMA_VERSION {
+        eprintln!(
+            "changeset.json schema_version {} != supported {}: regenerate with this rooms build",
+            changeset.schema_version,
+            artifacts::CHANGESET_SCHEMA_VERSION
+        );
+        return Ok(2);
+    }
     render_changeset(&changeset, &raw, json);
     Ok(changeset_exit_code(&changeset))
 }
 
-/// Exit 3 when the run escaped its lane (wrote outside `/workspace` to a
-/// persistent path), so `rooms diff` composes as a gate; 0 otherwise.
+/// The gate's exit code: **3** when the run escaped its lane (wrote outside
+/// `/workspace` to a persistent path), **2** when the overlay was inactive — a
+/// writable-rootfs run has no lane to check, so the question is unanswerable and
+/// a gate must not read it as clean — **0** when an active overlay shows no escape.
 fn changeset_exit_code(changeset: &artifacts::Changeset) -> u8 {
-    if changeset.overlay_active && !changeset.lane_escapes().is_empty() {
-        3
-    } else {
-        0
+    if !changeset.overlay_active {
+        return 2;
     }
+    if changeset.lane_escapes().is_empty() {
+        return 0;
+    }
+    3
 }
 
 // stdout is the documented data surface for `rooms diff` (logs stay on stderr),
@@ -538,6 +566,8 @@ fn render_changeset(changeset: &artifacts::Changeset, raw: &str, json: bool) {
     if ephemeral > 0 {
         println!("({ephemeral} runtime write(s) under /run, /var/log, ... filtered)");
     }
+    // is_empty() is false whenever an escape fired (escapes live in the three
+    // lists), so "(no changes)" can't print alongside a lane-escape block above.
     if changeset.is_empty() {
         println!("(no changes)");
     }
@@ -582,13 +612,15 @@ mod tests {
         reason = "test module"
     )]
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
-        changeset_exit_code, resolve_action, Cli, Command, RoomsError, RunArgs, RunnerKind,
+        changeset_exit_code, diff_changeset, resolve_action, Cli, Command, RoomsError, RunArgs,
+        RunnerKind,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
+    use tempfile::tempdir;
 
     #[test]
     fn cli_definition_is_valid() {
@@ -641,7 +673,56 @@ mod tests {
         cs.added.push("etc/hosts".to_owned());
         assert_eq!(changeset_exit_code(&cs), 3);
         cs.overlay_active = false;
-        assert_eq!(changeset_exit_code(&cs), 0);
+        // inactive overlay -> indeterminate (no lane to check), never a clean 0.
+        assert_eq!(changeset_exit_code(&cs), 2);
+    }
+
+    #[tokio::test]
+    async fn diff_from_missing_dir_is_indeterminate() {
+        // A typo'd / non-existent --from must not read as exit 0 ("clean").
+        let code = diff_changeset(Path::new("rooms-no-such-dir-xyz"), false)
+            .await
+            .expect("diff on a missing dir returns a code, not an error");
+        assert_eq!(code, 2);
+    }
+
+    #[tokio::test]
+    async fn diff_dir_without_changeset_is_indeterminate() {
+        // out-dir exists but collection produced no changeset.json (e.g. a
+        // best-effort collect failure) -> indeterminate, never a silent exit 0.
+        let dir = tempdir().expect("tempdir");
+        let code = diff_changeset(dir.path(), false)
+            .await
+            .expect("diff returns a code, not an error");
+        assert_eq!(code, 2);
+    }
+
+    #[tokio::test]
+    async fn diff_unreadable_changeset_is_not_clean() {
+        // A changeset.json that can't be read (here: it is a directory) must not
+        // read as a clean exit 0 -> diff_changeset errors, which main maps to
+        // exit 2. Locks "couldn't read/parse" out of the verified-clean path.
+        let dir = tempdir().expect("tempdir");
+        tokio::fs::create_dir(dir.path().join(crate::artifacts::CHANGESET_JSON))
+            .await
+            .expect("create a directory in place of changeset.json");
+        let result = diff_changeset(dir.path(), false).await;
+        assert!(result.is_err(), "an unreadable changeset must not be Ok(0)");
+    }
+
+    #[tokio::test]
+    async fn diff_unknown_schema_version_is_indeterminate() {
+        // A foreign schema_version must not be read under v1 lane-escape
+        // semantics: even with an escape-shaped path, it exits 2, not 3 or 0.
+        let dir = tempdir().expect("tempdir");
+        let raw = r#"{"schema_version":999,"overlay_active":true,"added":["etc/hosts"],"modified":[],"deleted":[]}"#;
+        tokio::fs::write(dir.path().join(crate::artifacts::CHANGESET_JSON), raw)
+            .await
+            .expect("write changeset.json");
+        let code = diff_changeset(dir.path(), false)
+            .await
+            .expect("diff returns a code, not an error");
+        assert_eq!(code, 2);
     }
 
     #[test]
