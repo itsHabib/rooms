@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
 use rooms::{
@@ -21,6 +21,10 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Run aggregates every `rooms run` clap flag so it dwarfs the other subcommands; the enum is parsed once on the stack, so boxing would only complicate the derive for no real gain"
+)]
 enum Command {
     /// Boot a microVM and optionally run a single command in it via SSH.
     Run {
@@ -69,6 +73,12 @@ enum Command {
         /// `rooms diff`.
         #[arg(long = "readonly-rootfs")]
         readonly_rootfs: bool,
+        /// Hard wall-clock cap on the run: when reached, the exec is aborted, a
+        /// `timed_out` result.json is written, and the room is torn down. An
+        /// integer with an optional `s`/`m`/`h` suffix (bare = seconds): `90s`,
+        /// `30m`, `2h`. Omit for no cap (unbounded). Not valid with `--keep`.
+        #[arg(long = "max-wall", value_parser = parse_max_wall, conflicts_with = "keep")]
+        max_wall: Option<Duration>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -125,6 +135,7 @@ struct RunArgs {
     push_branch: Option<String>,
     out_dir: Option<PathBuf>,
     readonly_rootfs: bool,
+    max_wall: Option<Duration>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -140,6 +151,35 @@ fn non_empty_command(s: &str) -> Result<String, String> {
     } else {
         Ok(s.to_owned())
     }
+}
+
+/// Parse a wall-clock cap: an integer with an optional `s`/`m`/`h` suffix
+/// (bare = seconds), e.g. `90s`, `30m`, `2h`, `1800`. Zero is rejected.
+fn parse_max_wall(s: &str) -> Result<Duration, String> {
+    let trimmed = s.trim();
+    let (digits, secs_per_unit) = split_duration_unit(trimmed);
+    let value: u64 = digits.parse().map_err(|_| {
+        format!("invalid --max-wall '{s}': want an integer with an optional s/m/h suffix")
+    })?;
+    if value == 0 {
+        return Err("--max-wall must be greater than zero".to_owned());
+    }
+    Ok(Duration::from_secs(value.saturating_mul(secs_per_unit)))
+}
+
+/// Split a duration string into `(digits, seconds-per-unit)`; a bare number is
+/// seconds.
+fn split_duration_unit(s: &str) -> (&str, u64) {
+    if let Some(digits) = s.strip_suffix('h') {
+        return (digits, 3600);
+    }
+    if let Some(digits) = s.strip_suffix('m') {
+        return (digits, 60);
+    }
+    if let Some(digits) = s.strip_suffix('s') {
+        return (digits, 1);
+    }
+    (s, 1)
 }
 
 #[tokio::main]
@@ -176,6 +216,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             push_branch,
             out_dir,
             readonly_rootfs,
+            max_wall,
         } => {
             run_room(
                 RunArgs {
@@ -190,6 +231,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     push_branch,
                     out_dir,
                     readonly_rootfs,
+                    max_wall,
                 },
                 &config,
             )
@@ -283,7 +325,7 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
         vm.guard_mut().set_suppress_cleanup(true);
     }
 
-    let outcome = post_boot(&network, &key, &action, &mut vm, config).await;
+    let outcome = post_boot(&network, &key, &action, &mut vm, config, args.max_wall).await;
     if let Some(out_dir) = args.out_dir.as_deref() {
         collect_if_exec(&network.guest_ip, &key, &action, out_dir).await;
     }
@@ -379,6 +421,7 @@ async fn post_boot(
     action: &Action,
     vm: &mut firecracker::BootedVm,
     config: &RoomsConfig,
+    max_wall: Option<Duration>,
 ) -> Result<u8, RoomsError> {
     match action {
         Action::Keep => {
@@ -409,31 +452,31 @@ async fn post_boot(
             };
             // started_at captures when rooms began attempting exec (SSH probe,
             // then runner). Exec writes its own started_at into result.json on
-            // the success path; this outer one only surfaces in the cancel
-            // branch below, where the guest command may never have begun.
+            // the success path; this outer one only surfaces in the abort
+            // (cancel / timeout) branches below, where the guest command may
+            // never have begun.
             let started_at = Utc::now();
             tokio::pin!(work);
+            // Fires at the wall-clock cap, or never when there's no cap — so an
+            // unset --max-wall leaves the select racing only work vs ctrl_c.
+            let cap = async {
+                match max_wall {
+                    Some(limit) => tokio::time::sleep(limit).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(cap);
             tokio::select! {
                 res = &mut work => res,
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl-c received during exec setup or run; aborting and shutting down");
-                    // Ensure the artifact dir + empty log files exist before
-                    // writing result.json so `rooms collect` validation still
-                    // passes for a cancelled run.
-                    if let Err(err) = runner::ensure_guest_artifact_skeleton(&guest_ip, key).await {
-                        warn!(error = %err, "failed to create cancelled-run artifact skeleton");
-                    }
-                    let result = ResultJson::from_exec(
-                        130,
-                        RunStatus::Cancelled,
-                        started_at,
-                        Utc::now(),
-                        run.command_argv(),
-                    );
-                    if let Err(err) = runner::write_guest_result_json(&guest_ip, key, &result).await {
-                        warn!(error = %err, "failed to write cancelled result.json");
-                    }
+                    record_aborted_run(&guest_ip, key, 130, RunStatus::Cancelled, started_at, run.command_argv()).await;
                     Ok(130)
+                }
+                () = &mut cap => {
+                    warn!(?max_wall, "max wall-clock cap reached during exec; aborting and shutting down");
+                    record_aborted_run(&guest_ip, key, 124, RunStatus::TimedOut, started_at, run.command_argv()).await;
+                    Ok(124)
                 }
             }
         }
@@ -451,6 +494,46 @@ async fn post_boot(
                 ))
             }
         }
+    }
+}
+
+/// How long to spend recording an aborted run before abandoning it so teardown
+/// can proceed: the guest may be the unresponsive one a wall cap just fired on
+/// (it can accept TCP yet never service the request — `ConnectTimeout` bounds
+/// only the connect), and `vm.shutdown()` must never wait on a best-effort SSH
+/// to it.
+const ABORT_RECORD_GRACE: Duration = Duration::from_secs(10);
+
+/// Record an aborted run (cancel / timeout): ensure the guest artifact skeleton
+/// exists so `rooms collect` validation passes, then write a `result.json` with
+/// the override status + exit code. Best-effort AND time-bounded — a stalled
+/// guest can't block the caller's teardown; failures and the grace expiry are
+/// logged, never fatal.
+async fn record_aborted_run(
+    guest_ip: &str,
+    key: &Path,
+    exit_code: i32,
+    status: RunStatus,
+    started_at: DateTime<Utc>,
+    command_argv: Vec<String>,
+) {
+    let write = async move {
+        if let Err(err) = runner::ensure_guest_artifact_skeleton(guest_ip, key).await {
+            warn!(error = %err, "failed to create aborted-run artifact skeleton");
+        }
+        let result = ResultJson::from_exec(exit_code, status, started_at, Utc::now(), command_argv);
+        if let Err(err) = runner::write_guest_result_json(guest_ip, key, &result).await {
+            warn!(error = %err, "failed to write aborted-run result.json");
+        }
+    };
+    if tokio::time::timeout(ABORT_RECORD_GRACE, write)
+        .await
+        .is_err()
+    {
+        warn!(
+            grace = ?ABORT_RECORD_GRACE,
+            "aborted-run record timed out (guest unresponsive); tearing down without it"
+        );
     }
 }
 
@@ -613,10 +696,11 @@ mod tests {
     )]
 
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use super::{
-        changeset_exit_code, diff_changeset, resolve_action, Cli, Command, RoomsError, RunArgs,
-        RunnerKind,
+        changeset_exit_code, diff_changeset, parse_max_wall, resolve_action, Cli, Command,
+        RoomsError, RunArgs, RunnerKind,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
@@ -645,6 +729,63 @@ mod tests {
             } => assert!(readonly_rootfs),
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_max_wall_accepts_units_and_bare_seconds() {
+        // Compare seconds (not constructed Durations) so the input -> N-seconds
+        // intent stays explicit and clippy's duration-units lint stays quiet.
+        let secs = |s: &str| parse_max_wall(s).map(|d| d.as_secs());
+        assert_eq!(secs("90s"), Ok(90));
+        assert_eq!(secs("30m"), Ok(1800));
+        assert_eq!(secs("2h"), Ok(7200));
+        assert_eq!(secs("1800"), Ok(1800));
+    }
+
+    #[test]
+    fn parse_max_wall_rejects_zero_and_junk() {
+        // uppercase suffixes are intentionally NOT accepted — the grammar is
+        // lowercase s/m/h (matches --help + the spec).
+        for bad in ["0", "0s", "abc", "10x", "m", "", "2H", "90S"] {
+            assert!(parse_max_wall(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn max_wall_flag_parses_onto_run() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "id",
+            "--max-wall",
+            "45s",
+        ])
+        .expect("--max-wall should parse");
+        match cli.command {
+            Command::Run { max_wall, .. } => assert_eq!(max_wall, Some(Duration::from_secs(45))),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_wall_conflicts_with_keep() {
+        let err = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--keep",
+            "--max-wall",
+            "30s",
+        ])
+        .expect_err("--max-wall + --keep should fail to parse");
+        assert!(
+            err.to_string().contains("cannot be used with") || err.to_string().contains("--keep"),
+            "expected a conflict error naming --keep; got: {err}"
+        );
     }
 
     #[test]
@@ -836,6 +977,7 @@ mod tests {
             push_branch: Some("feature".to_owned()),
             out_dir: None,
             readonly_rootfs: false,
+            max_wall: None,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
