@@ -63,6 +63,12 @@ enum Command {
         /// and cleared each run) so `rooms collect --from <dir>` can read it.
         #[arg(long = "out", conflicts_with = "keep")]
         out_dir: Option<PathBuf>,
+        /// Mount the rootfs read-only with a tmpfs overlay (needs an image
+        /// carrying `/sbin/overlay-init`). Auto-enabled for `--runner cursor`;
+        /// set it on a `--command` run to make the change set visible to
+        /// `rooms diff`.
+        #[arg(long = "readonly-rootfs")]
+        readonly_rootfs: bool,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -76,6 +82,20 @@ enum Command {
         #[arg(long)]
         image: Option<PathBuf>,
         /// Emit structured JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the overlay change set from a run's collected `out/` directory.
+    ///
+    /// Exit codes: 0 = verified, no lane escape; 3 = a write escaped /workspace
+    /// to a persistent path; 2 = indeterminate — couldn't verify the lane (no
+    /// out-dir, an unreadable/foreign changeset, or a run with no overlay). A
+    /// gate never reads "couldn't verify" as "clean".
+    Diff {
+        /// Path to the collected `out/` directory (the `--out` target of a run).
+        #[arg(long)]
+        from: PathBuf,
+        /// Emit the raw `changeset.json` instead of a human summary.
         #[arg(long)]
         json: bool,
     },
@@ -104,6 +124,7 @@ struct RunArgs {
     base_sha: Option<String>,
     push_branch: Option<String>,
     out_dir: Option<PathBuf>,
+    readonly_rootfs: bool,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -154,6 +175,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             base_sha,
             push_branch,
             out_dir,
+            readonly_rootfs,
         } => {
             run_room(
                 RunArgs {
@@ -167,6 +189,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     base_sha,
                     push_branch,
                     out_dir,
+                    readonly_rootfs,
                 },
                 &config,
             )
@@ -174,6 +197,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
         }
         Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
+        Command::Diff { from, json } => diff_changeset(&from, json).await,
     }
 }
 
@@ -241,10 +265,11 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     // Resolve the post-boot action before booting so a missing --task file (or
     // other host-side input error) fails fast without spending a microVM boot.
     let action = resolve_action(&args).await?;
-    // Read-only rootfs + tmpfs overlay only on the cursor agent path (it runs
-    // untrusted code); a plain `rooms run --command` keeps a writable rootfs so
-    // any image — including ones without /sbin/overlay-init — still boots.
-    let readonly_rootfs = matches!(args.runner, RunnerKind::Cursor);
+    // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
+    // untrusted code) or when the operator opts in with --readonly-rootfs; a
+    // plain `rooms run --command` otherwise keeps a writable rootfs so any
+    // image — including ones without /sbin/overlay-init — still boots.
+    let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
     let mut vm = firecracker::boot(
         &kernel,
         &args.image,
@@ -287,6 +312,12 @@ async fn collect_if_exec(guest_ip: &str, key: &Path, action: &Action, out_dir: &
         Err(e) => {
             warn!(error = %e, out = %out_dir.display(), "collect /workspace/out to host failed");
         }
+    }
+    // The overlay change set (cursor / --readonly-rootfs runs only). Best-effort:
+    // an absent overlay or a read failure never affects the run's result.
+    match runner::collect_changeset_to_host(guest_ip, key, out_dir).await {
+        Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
+        Err(e) => warn!(error = %e, "collect overlay changeset failed"),
     }
 }
 
@@ -445,6 +476,132 @@ async fn collect_artifacts(from: PathBuf) -> Result<u8, RoomsError> {
     Ok(0)
 }
 
+async fn diff_changeset(from: &Path, json: bool) -> Result<u8, RoomsError> {
+    info!(from = %from.display(), "rooms diff");
+    // A gate must never read "couldn't verify" as "clean": a missing out-dir or
+    // an absent changeset.json exits 2 (indeterminate), distinct from 0 (verified)
+    // and 3 (lane escape). A best-effort collect failure leaves no changeset.json,
+    // so without this an exit-code gate would pass an unverified run.
+    if !matches!(tokio::fs::metadata(from).await, Ok(m) if m.is_dir()) {
+        eprintln!("--from is not an existing directory: {}", from.display());
+        return Ok(2);
+    }
+    let path = from.join(artifacts::CHANGESET_JSON);
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "no {} in {}: collect the run with --out, under --runner cursor or --readonly-rootfs",
+                artifacts::CHANGESET_JSON,
+                from.display()
+            );
+            return Ok(2);
+        }
+        Err(e) => {
+            return Err(RoomsError::Internal(format!(
+                "read {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    let changeset: artifacts::Changeset = serde_json::from_str(&raw)
+        .map_err(|e| RoomsError::Internal(format!("parse changeset: {e}")))?;
+    // A changeset written by a different schema version can't be read under v1
+    // lane-escape semantics — treat it as indeterminate rather than risk a v2
+    // escape reading as a v1 "clean" (mirrors result.json's version discipline).
+    if changeset.schema_version != artifacts::CHANGESET_SCHEMA_VERSION {
+        eprintln!(
+            "changeset.json schema_version {} != supported {}: regenerate with this rooms build",
+            changeset.schema_version,
+            artifacts::CHANGESET_SCHEMA_VERSION
+        );
+        return Ok(2);
+    }
+    render_changeset(&changeset, &raw, json);
+    Ok(changeset_exit_code(&changeset))
+}
+
+/// The gate's exit code: **3** when the run escaped its lane (wrote outside
+/// `/workspace` to a persistent path), **2** when the overlay was inactive — a
+/// writable-rootfs run has no lane to check, so the question is unanswerable and
+/// a gate must not read it as clean — **0** when an active overlay shows no escape.
+fn changeset_exit_code(changeset: &artifacts::Changeset) -> u8 {
+    if !changeset.overlay_active {
+        return 2;
+    }
+    if changeset.lane_escapes().is_empty() {
+        return 0;
+    }
+    3
+}
+
+// stdout is the documented data surface for `rooms diff` (logs stay on stderr),
+// mirroring `rooms doctor --json`.
+#[allow(
+    clippy::print_stdout,
+    reason = "diff output is the documented stdout contract"
+)]
+fn render_changeset(changeset: &artifacts::Changeset, raw: &str, json: bool) {
+    if json {
+        println!("{raw}");
+        return;
+    }
+    if !changeset.overlay_active {
+        eprintln!(
+            "no overlay change set: this run used a writable rootfs (only --runner cursor or --readonly-rootfs produce an overlay)"
+        );
+        return;
+    }
+    let escapes = changeset.lane_escapes();
+    if !escapes.is_empty() {
+        println!(
+            "[!] {} lane escape(s) — writes outside /workspace to persistent paths:",
+            escapes.len()
+        );
+        print_escapes_by_op(changeset);
+    }
+    let (added, modified, deleted) = changeset.workspace_counts();
+    println!("/workspace: +{added} ~{modified} -{deleted}");
+    let ephemeral = changeset.ephemeral_count();
+    if ephemeral > 0 {
+        println!("({ephemeral} runtime write(s) under /run, /var/log, ... filtered)");
+    }
+    // is_empty() is false whenever an escape fired (escapes live in the three
+    // lists), so "(no changes)" can't print alongside a lane-escape block above.
+    if changeset.is_empty() {
+        println!("(no changes)");
+    }
+}
+
+// Same stdout contract as `render_changeset`.
+#[allow(
+    clippy::print_stdout,
+    reason = "diff output is the documented stdout contract"
+)]
+fn print_escapes_by_op(changeset: &artifacts::Changeset) {
+    for path in changeset
+        .added
+        .iter()
+        .filter(|path| artifacts::is_lane_escape(path.as_str()))
+    {
+        println!("    A /{path}");
+    }
+    for path in changeset
+        .modified
+        .iter()
+        .filter(|path| artifacts::is_lane_escape(path.as_str()))
+    {
+        println!("    M /{path}");
+    }
+    for path in changeset
+        .deleted
+        .iter()
+        .filter(|path| artifacts::is_lane_escape(path.as_str()))
+    {
+        println!("    D /{path}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -455,14 +612,117 @@ mod tests {
         reason = "test module"
     )]
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    use super::{resolve_action, Cli, Command, RoomsError, RunArgs, RunnerKind};
+    use super::{
+        changeset_exit_code, diff_changeset, resolve_action, Cli, Command, RoomsError, RunArgs,
+        RunnerKind,
+    };
+    use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
+    use tempfile::tempdir;
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn readonly_rootfs_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "id",
+            "--readonly-rootfs",
+        ])
+        .expect("--readonly-rootfs should parse");
+        match cli.command {
+            Command::Run {
+                readonly_rootfs, ..
+            } => assert!(readonly_rootfs),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_verb_parses_from_and_json() {
+        let cli = Cli::try_parse_from(["rooms", "diff", "--from", "/tmp/out", "--json"])
+            .expect("diff should parse");
+        match cli.command {
+            Command::Diff { from, json } => {
+                assert_eq!(from, PathBuf::from("/tmp/out"));
+                assert!(json);
+            }
+            other => panic!("expected Diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn changeset_exit_code_flags_lane_escape() {
+        let mut cs = Changeset {
+            schema_version: 1,
+            overlay_active: true,
+            added: vec!["workspace/a".to_owned()],
+            modified: Vec::new(),
+            deleted: Vec::new(),
+        };
+        assert_eq!(changeset_exit_code(&cs), 0);
+        cs.added.push("etc/hosts".to_owned());
+        assert_eq!(changeset_exit_code(&cs), 3);
+        cs.overlay_active = false;
+        // inactive overlay -> indeterminate (no lane to check), never a clean 0.
+        assert_eq!(changeset_exit_code(&cs), 2);
+    }
+
+    #[tokio::test]
+    async fn diff_from_missing_dir_is_indeterminate() {
+        // A typo'd / non-existent --from must not read as exit 0 ("clean").
+        let code = diff_changeset(Path::new("rooms-no-such-dir-xyz"), false)
+            .await
+            .expect("diff on a missing dir returns a code, not an error");
+        assert_eq!(code, 2);
+    }
+
+    #[tokio::test]
+    async fn diff_dir_without_changeset_is_indeterminate() {
+        // out-dir exists but collection produced no changeset.json (e.g. a
+        // best-effort collect failure) -> indeterminate, never a silent exit 0.
+        let dir = tempdir().expect("tempdir");
+        let code = diff_changeset(dir.path(), false)
+            .await
+            .expect("diff returns a code, not an error");
+        assert_eq!(code, 2);
+    }
+
+    #[tokio::test]
+    async fn diff_unreadable_changeset_is_not_clean() {
+        // A changeset.json that can't be read (here: it is a directory) must not
+        // read as a clean exit 0 -> diff_changeset errors, which main maps to
+        // exit 2. Locks "couldn't read/parse" out of the verified-clean path.
+        let dir = tempdir().expect("tempdir");
+        tokio::fs::create_dir(dir.path().join(crate::artifacts::CHANGESET_JSON))
+            .await
+            .expect("create a directory in place of changeset.json");
+        let result = diff_changeset(dir.path(), false).await;
+        assert!(result.is_err(), "an unreadable changeset must not be Ok(0)");
+    }
+
+    #[tokio::test]
+    async fn diff_unknown_schema_version_is_indeterminate() {
+        // A foreign schema_version must not be read under v1 lane-escape
+        // semantics: even with an escape-shaped path, it exits 2, not 3 or 0.
+        let dir = tempdir().expect("tempdir");
+        let raw = r#"{"schema_version":999,"overlay_active":true,"added":["etc/hosts"],"modified":[],"deleted":[]}"#;
+        tokio::fs::write(dir.path().join(crate::artifacts::CHANGESET_JSON), raw)
+            .await
+            .expect("write changeset.json");
+        let code = diff_changeset(dir.path(), false)
+            .await
+            .expect("diff returns a code, not an error");
+        assert_eq!(code, 2);
     }
 
     #[test]
@@ -575,6 +835,7 @@ mod tests {
             base_sha: None,
             push_branch: Some("feature".to_owned()),
             out_dir: None,
+            readonly_rootfs: false,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
