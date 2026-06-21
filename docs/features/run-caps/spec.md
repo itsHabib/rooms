@@ -1,4 +1,4 @@
-**Status**: draft
+**Status**: implemented
 **Owner**: @michael (human:mh)
 **Date**: 2026-06-21
 **Related**: `src/main.rs` (`post_boot`), `src/artifacts.rs` (`RunStatus`), [rooms-diff/spec.md](../rooms-diff/spec.md)
@@ -39,33 +39,39 @@ trivial to relocate if review prefers otherwise.)
 The exec already runs inside a `tokio::select!` racing the work future against
 `ctrl_c`. Add a third arm: a timeout future that sleeps for the cap, or
 `std::future::pending()` (never resolves) when there's no cap — so an unset cap
-adds no arm-behavior and needs no guard. When the timeout wins it mirrors the
-existing `Cancelled` arm exactly:
+adds no arm-behavior and needs no guard. The select is `biased` (work → ctrl_c →
+cap), so a run that completes the same instant the cap fires keeps its real
+result rather than a spurious 124. When the timeout wins it mirrors the existing
+`Cancelled` arm exactly:
 - ensure the guest artifact skeleton exists (so `rooms collect` validation passes),
 - write a `result.json` with `RunStatus::TimedOut` and exit code **124** (the GNU
   `timeout` convention; distinct from 130 = cancelled, 2 = substrate error),
 - return `Ok(124)`.
 
-The `TimedOut`/`Cancelled` recording is **best-effort and time-bounded**: a wall
-cap fires precisely on a runaway guest, which can accept TCP yet never service a
-request (so SSH `ConnectTimeout` alone doesn't bound it). The record is therefore
-capped by a short grace (`ABORT_RECORD_GRACE`); on expiry the room is torn down
-*without* the artifact rather than letting a stalled guest block teardown forever.
+Both pre-teardown guest I/O steps — the `TimedOut`/`Cancelled` **record** and the
+`--out` **collection** — are best-effort and **time-bounded** (`PRE_TEARDOWN_GRACE`):
+a wall cap fires precisely on a runaway guest, which can accept TCP yet never
+service a request (so SSH `ConnectTimeout` alone doesn't bound either). On grace
+expiry the room is torn down *without* the artifact rather than letting a stalled
+guest block teardown. This matters because both run *before* `vm.shutdown()`, so
+without the bound a hung guest would leak the VM + `tap-fc0` — the exact runaway
+the cap exists to reclaim.
 
 Dropping the `work` future cascades `kill_on_drop` across the spawned SSH clients
-(host side), and `run_room`'s existing `vm.shutdown()` — which runs regardless of
-the record's outcome — tears the microVM down, so the cap actually reclaims the
-room. `--out` collection still runs (the `TimedOut` `result.json` + partial
-artifacts are collected like any other run).
+(host side), and `run_room`'s `vm.shutdown()` — which runs regardless of the
+record/collection outcome — tears the microVM down, so the cap actually reclaims
+the room. `--out` collection still runs on the success path (the `TimedOut`
+`result.json` + partial artifacts are collected like any other run).
 
 ## Acceptance
 - `rooms run --command <c> --max-wall 1s` against a command that sleeps longer
   exits **124**, writes a `result.json` with `status: "timed_out"`, and the
   microVM is shut down.
 - Even if the guest is **unresponsive** when the cap fires, the room is still torn
-  down within a bounded grace — the `timed_out` record is best-effort and
-  time-capped, so teardown never waits on a hung guest.
-- A run that finishes before the cap is unaffected (exit code + status unchanged).
+  down within a bounded grace — both the `timed_out` record and `--out` collection
+  are time-capped, so teardown never waits on a hung guest.
+- A run that finishes before the cap is unaffected (exit code + status unchanged),
+  including the exact-tie case (completed work wins the `biased` select over the cap).
 - `--max-wall` omitted = unbounded (no behavior change from today).
 - `--max-wall 0` and a non-numeric value are rejected at parse time; `--max-wall`
   + `--keep` is rejected by clap.

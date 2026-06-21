@@ -42,6 +42,10 @@ Surfaced 2026-06-20 by `rooms diff` review ([#47](https://github.com/itsHabib/ro
 - 2026-06-20 — **opaque-directory whiteouts aren't surfaced.** A delete-then-recreate dir carries `trusted.overlay.opaque=y` on the upper dir; the walk skips directories, so the removed entries aren't reported (the recreated dir's new files show as added). Narrow; acknowledged in the rooms-diff spec. Reading the xattr needs `getfattr`/`attr` in the Alpine image + a representation decision (how to express "these lower entries were dropped"). (claude review on [#47](https://github.com/itsHabib/rooms/pull/47))
 - 2026-06-20 — **`rooms diff` trusts agent-controllable output (adversarial-guest hole).** The enumeration runs in-guest over SSH as the same NOPASSWD-root `rooms` user the agent runs as, so a compromised guest can forge the `NOOVERLAY` sentinel or omit its own escape records. Exit 0 is therefore a forensic signal against a non-adversarial guest, not a containment boundary (now documented in the spec's *Trust boundary* section). Closing it means enumerating the upperdir **host-side** via the firecracker drive instead of guest SSH — a bigger re-arch, out of scope for #47. (gate-soundness review on [#47](https://github.com/itsHabib/rooms/pull/47))
 
+Surfaced 2026-06-21 by `rooms run --max-wall` review ([#48](https://github.com/itsHabib/rooms/pull/48)):
+
+- 2026-06-21 — **a timed-out / cancelled run truncates partial guest logs.** `record_aborted_run` → `ensure_guest_artifact_skeleton` does `: > logs/stdout.log` / `logs/stderr.log`, so a run that produced partial stdout/stderr before the cap fired loses it just before `--out` collection. Pre-exists on the cancel path; `--max-wall` makes timeouts (hence partial output) routine. Make the skeleton non-truncating (create-if-missing) or skip it when the logs already exist, in `src/runner.rs`. Forensic-quality, not a correctness/teardown issue. (codex P2 on [#48](https://github.com/itsHabib/rooms/pull/48))
+
 ## Closed
 
 Resolved by the `--out` transport-out work ([#40](https://github.com/itsHabib/rooms/pull/40) `973534b`):

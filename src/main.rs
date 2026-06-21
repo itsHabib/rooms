@@ -327,7 +327,16 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
 
     let outcome = post_boot(&network, &key, &action, &mut vm, config, args.max_wall).await;
     if let Some(out_dir) = args.out_dir.as_deref() {
-        collect_if_exec(&network.guest_ip, &key, &action, out_dir).await;
+        // Bound collection too: its SSH is only `ConnectTimeout`-bounded, and a
+        // wall cap fires precisely when the guest may be unresponsive, so an
+        // unbounded collect could hang teardown — force it past the grace.
+        let collect = collect_if_exec(&network.guest_ip, &key, &action, out_dir);
+        if tokio::time::timeout(PRE_TEARDOWN_GRACE, collect)
+            .await
+            .is_err()
+        {
+            warn!("artifact collection timed out (guest unresponsive); proceeding to teardown");
+        }
     }
     if args.keep {
         vm.guard_mut().dismiss();
@@ -467,6 +476,9 @@ async fn post_boot(
             };
             tokio::pin!(cap);
             tokio::select! {
+                // Bias toward completed work: if the exec finished the same instant
+                // the cap fired, honor its real result instead of a spurious 124.
+                biased;
                 res = &mut work => res,
                 _ = tokio::signal::ctrl_c() => {
                     info!("ctrl-c received during exec setup or run; aborting and shutting down");
@@ -481,6 +493,9 @@ async fn post_boot(
             }
         }
         Action::Idle => {
+            if max_wall.is_some() {
+                warn!("--max-wall set but no exec to bound (idle run); the cap has no effect");
+            }
             tokio::time::sleep(Duration::from_secs(3)).await;
             if vm.is_alive().map_err(RoomsError::Firecracker)? {
                 info!("microVM is up; shutting down (POC: no exec yet)");
@@ -497,12 +512,12 @@ async fn post_boot(
     }
 }
 
-/// How long to spend recording an aborted run before abandoning it so teardown
-/// can proceed: the guest may be the unresponsive one a wall cap just fired on
-/// (it can accept TCP yet never service the request — `ConnectTimeout` bounds
-/// only the connect), and `vm.shutdown()` must never wait on a best-effort SSH
-/// to it.
-const ABORT_RECORD_GRACE: Duration = Duration::from_secs(10);
+/// Upper bound on best-effort guest I/O (recording an aborted run, collecting
+/// `--out`) before teardown is forced. The guest may be the unresponsive one a
+/// wall cap just fired on — it can accept TCP yet never service the request, and
+/// SSH `ConnectTimeout` bounds only the connect — so `vm.shutdown()` must never
+/// wait on it indefinitely.
+const PRE_TEARDOWN_GRACE: Duration = Duration::from_secs(15);
 
 /// Record an aborted run (cancel / timeout): ensure the guest artifact skeleton
 /// exists so `rooms collect` validation passes, then write a `result.json` with
@@ -526,12 +541,12 @@ async fn record_aborted_run(
             warn!(error = %err, "failed to write aborted-run result.json");
         }
     };
-    if tokio::time::timeout(ABORT_RECORD_GRACE, write)
+    if tokio::time::timeout(PRE_TEARDOWN_GRACE, write)
         .await
         .is_err()
     {
         warn!(
-            grace = ?ABORT_RECORD_GRACE,
+            grace = ?PRE_TEARDOWN_GRACE,
             "aborted-run record timed out (guest unresponsive); tearing down without it"
         );
     }
