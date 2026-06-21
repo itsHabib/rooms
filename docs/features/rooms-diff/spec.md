@@ -30,9 +30,13 @@ Classification, per entry under `/oldroot/mnt/upper` (relative path `R`):
 | upper entry | meaning |
 | --- | --- |
 | char device `0:0` | **deleted** (`R` removed) |
-| regular file, `/oldroot/R` exists in lower | **modified** |
-| regular file, `/oldroot/R` absent in lower | **added** |
+| regular file or symlink, `/oldroot/R` exists in lower | **modified** |
+| regular file or symlink, `/oldroot/R` absent in lower | **added** |
 | directory | structural (carried for path context; opaque dirs noted) |
+
+Symlinks are walked (`find … -type l`) and classified by lower presence like
+regular files — a symlink written outside `/workspace` (e.g. `ln -s t /etc/foo`)
+is itself a persistent-path lane escape, so a `-type f`-only walk would miss it.
 
 ## Design
 
