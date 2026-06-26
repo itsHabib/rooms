@@ -210,9 +210,10 @@ pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Pat
 /// when there is no overlay (a writable-rootfs run). Runs as root in-process (not
 /// per-file sudo) so it also sees root-owned escapes.
 ///
-/// Walks regular files, symlinks, and every special file an agent can `mknod`
-/// (block/char devices, FIFOs, sockets) — each is a persistent-path lane escape
-/// when written outside `/workspace`, and a `-type f`-only walk would miss it. A
+/// Walks regular files, symlinks, and every special file an agent can leave on
+/// the filesystem (block/char devices via `mknod`, FIFOs, a bound socket) — each
+/// is a persistent-path lane escape when written outside `/workspace`, and a
+/// `-type f`-only walk would miss it. A
 /// char device that is `0:0` is an overlayfs **whiteout** (a deletion marker →
 /// `D`); any other char device (a real `mknod c`) classifies as a normal escape
 /// (→ `A`/`M`), so flattening that check is what stops a non-`0:0` device from
