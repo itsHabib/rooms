@@ -29,14 +29,18 @@ Classification, per entry under `/oldroot/mnt/upper` (relative path `R`):
 
 | upper entry | meaning |
 | --- | --- |
-| char device `0:0` | **deleted** (`R` removed) |
-| regular file or symlink, `/oldroot/R` exists in lower | **modified** |
-| regular file or symlink, `/oldroot/R` absent in lower | **added** |
+| char device `0:0` (whiteout) | **deleted** (`R` removed) |
+| any other entry (file / symlink / special file), `/oldroot/R` exists in lower | **modified** |
+| any other entry, `/oldroot/R` absent in lower | **added** |
 | directory | structural (carried for path context; opaque dirs noted) |
 
-Symlinks are walked (`find … -type l`) and classified by lower presence like
-regular files — a symlink written outside `/workspace` (e.g. `ln -s t /etc/foo`)
-is itself a persistent-path lane escape, so a `-type f`-only walk would miss it.
+The walk covers `-type f/l/b/p/s/c` — regular files, symlinks, and every special
+file an agent can `mknod` (block/char devices, FIFOs, sockets). A special file
+written outside `/workspace` (e.g. `mknod /etc/x c 1 3`, `ln -s t /etc/foo`) is
+itself a persistent-path lane escape, so a `-type f`-only walk would miss it. A
+`0:0` char device is a whiteout (delete); any *other* char device is a real
+`mknod` and classifies by lower presence like a file — flattening that check is
+what stops a non-`0:0` device from being silently dropped.
 
 ## Design
 
