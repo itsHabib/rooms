@@ -5,7 +5,8 @@
 //! ├── Firecracker(FirecrackerError)
 //! ├── Rootfs(RootfsError)
 //! ├── Transport(TransportError)
-//! └── Runner(RunnerError)
+//! ├── Runner(RunnerError)
+//! └── Registry(RegistryError)
 //! ```
 
 use std::path::PathBuf;
@@ -23,8 +24,25 @@ pub enum RoomsError {
     Transport(#[from] TransportError),
     #[error(transparent)]
     Runner(#[from] RunnerError),
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
     #[error("internal: {0}")]
     Internal(String),
+}
+
+/// Errors from the room registry (`rooms ls` / `rooms gc`).
+#[derive(Debug, Error)]
+pub enum RegistryError {
+    #[error("invalid room id: {id}")]
+    InvalidRoomId { id: String },
+    #[error("refusing to remove a path outside the state base: {path}")]
+    PathEscape { path: PathBuf },
+    #[error("home env var unset; cannot locate the rooms state base")]
+    HomeUnset,
+    #[error(transparent)]
+    Firecracker(#[from] FirecrackerError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Errors from Firecracker process control and guest lifecycle.

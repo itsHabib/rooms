@@ -9,13 +9,14 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::Utc;
 use tokio::process::{Child, Command};
 use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
-use crate::transport;
+use crate::{room, transport};
 
 /// Dedicated unprivileged user Firecracker runs as inside the jailer.
 pub const FIRECRACKER_USER: &str = "firecracker";
@@ -80,6 +81,23 @@ impl RoomGuard {
 
     fn set_jail_instance_dir(&mut self, path: PathBuf) {
         self.jail_instance_dir = Some(path);
+    }
+
+    /// Construct a guard over an already-dead room's paths, for orphan reaping
+    /// (`rooms gc`). No child pid — the process is *confirmed dead* before gc
+    /// reaps it, so there's nothing to kill (which also sidesteps signalling a
+    /// reused pid) — and no tap ownership (v0's `tap-fc0` is shared). `cleanup`
+    /// then only unmounts the jail binds, removes the socket, and removes both
+    /// dirs: the exact teardown the live drop runs.
+    pub fn for_orphan(
+        room_dir: PathBuf,
+        socket: PathBuf,
+        jail_instance_dir: PathBuf,
+        config: &RoomsConfig,
+    ) -> Self {
+        let mut guard = Self::new(room_dir, socket, config);
+        guard.set_jail_instance_dir(jail_instance_dir);
+        guard
     }
 
     fn set_child(&mut self, child: &Child) {
@@ -203,6 +221,7 @@ pub async fn boot(
     network: Option<&NetworkConfig>,
     config: &RoomsConfig,
     readonly_rootfs: bool,
+    descriptor: &room::RoomDescriptor,
 ) -> Result<BootedVm, FirecrackerError> {
     ensure_root()?;
     check_kvm()?;
@@ -214,7 +233,9 @@ pub async fn boot(
 
     let room_id = RoomId::new();
     let room_id_str = room_id.as_str();
-    let per_room_dir = room_state_dir(&room_id)?;
+    let per_room_dir = config
+        .room_dir(&room_id_str)
+        .ok_or(FirecrackerError::HomeUnset)?;
     prepare_room_dir(&per_room_dir).await?;
 
     let chroot_base = jailer_chroot_base(config)?;
@@ -243,6 +264,7 @@ pub async fn boot(
     let log_handles = open_log_file(&log_path).await?;
     let mut child = spawn_jailer(&launch, log_handles)?;
     guard.set_child(&child);
+    write_room_meta(&per_room_dir, &room_id_str, descriptor, child.id());
 
     wait_for_socket(
         &socket,
@@ -344,13 +366,23 @@ where
 }
 
 fn jailer_chroot_base(config: &RoomsConfig) -> Result<PathBuf, FirecrackerError> {
-    if let Some(base) = &config.jailer_chroot_base {
-        return Ok(base.clone());
+    config.chroot_base().ok_or(FirecrackerError::HomeUnset)
+}
+
+/// Persist the room's metadata (`room.json`) as early as the pid is known, so a
+/// later crash strands as little as possible. Best-effort: a write failure only
+/// hides the room from `rooms ls`, never aborts an otherwise-successful boot.
+fn write_room_meta(room_dir: &Path, id: &str, descriptor: &room::RoomDescriptor, pid: Option<u32>) {
+    let meta = room::RoomMeta::new(
+        id.to_owned(),
+        descriptor.command.clone(),
+        pid,
+        descriptor.keep,
+        Utc::now(),
+    );
+    if let Err(e) = room::write_atomic(room_dir, &meta) {
+        warn!(error = %e, "failed to write room.json; room will be invisible to `rooms ls`");
     }
-    let home = env::var("HOME").map_err(|_| FirecrackerError::HomeUnset)?;
-    Ok(PathBuf::from(home)
-        .join(".local/state/rooms")
-        .join("jailer"))
 }
 
 #[derive(Debug, Clone)]
@@ -604,6 +636,42 @@ fn teardown_jail_sync(instance_dir: &Path) {
 #[cfg(not(unix))]
 fn teardown_jail_sync(_instance_dir: &Path) {}
 
+/// Tear down an orphaned room — one whose live `RoomGuard` is gone.
+///
+/// A crash, a killed launcher, or a `--keep` room whose firecracker later died.
+/// Reconstructs a guard over the room's paths and runs the same cleanup the live
+/// drop uses; the caller (gc) guarantees the firecracker process is already
+/// dead. Returns an error if either dir survives, so `rooms gc` reports an
+/// honest outcome rather than a silent leak.
+pub fn reap_orphan(
+    room_dir: &Path,
+    jail_instance_dir: &Path,
+    socket: &Path,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    let mut guard = RoomGuard::for_orphan(
+        room_dir.to_path_buf(),
+        socket.to_path_buf(),
+        jail_instance_dir.to_path_buf(),
+        config,
+    );
+    guard.cleanup();
+    guard.dismiss(); // cleanup already ran; don't let Drop run it again.
+    if room_dir.exists() {
+        return Err(FirecrackerError::Internal(format!(
+            "room dir survived reap: {}",
+            room_dir.display()
+        )));
+    }
+    if jail_instance_dir.exists() {
+        return Err(FirecrackerError::Internal(format!(
+            "jail instance dir survived reap: {}",
+            jail_instance_dir.display()
+        )));
+    }
+    Ok(())
+}
+
 fn spawn_jailer(
     plan: &JailerLaunchPlan,
     (log_file, log_stderr): (std::fs::File, std::fs::File),
@@ -623,13 +691,6 @@ fn spawn_jailer(
             },
             _ => FirecrackerError::Io(err),
         })
-}
-
-fn room_state_dir(room_id: &RoomId) -> Result<PathBuf, FirecrackerError> {
-    let home = env::var("HOME").map_err(|_| FirecrackerError::HomeUnset)?;
-    Ok(PathBuf::from(home)
-        .join(".local/state/rooms")
-        .join(room_id.0.to_string().to_lowercase()))
 }
 
 async fn prepare_room_dir(per_room_dir: &Path) -> Result<(), FirecrackerError> {
@@ -1202,9 +1263,16 @@ mod e2e_tests {
         assert!(kernel.exists(), "kernel missing at {kernel:?}");
         assert!(rootfs.exists(), "rootfs missing at {rootfs:?}");
 
-        let mut vm = boot(&kernel, &rootfs, None, &config, false)
-            .await
-            .expect("boot should succeed");
+        let mut vm = boot(
+            &kernel,
+            &rootfs,
+            None,
+            &config,
+            false,
+            &crate::room::RoomDescriptor::default(),
+        )
+        .await
+        .expect("boot should succeed");
 
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(vm.is_alive().expect("is_alive probe"));

@@ -49,6 +49,13 @@ Surfaced 2026-06-21 by `rooms run --max-wall` review ([#48](https://github.com/i
 
 - 2026-06-21 — **a timed-out / cancelled run truncates partial guest logs.** `record_aborted_run` → `ensure_guest_artifact_skeleton` does `: > logs/stdout.log` / `logs/stderr.log`, so a run that produced partial stdout/stderr before the cap fired loses it just before `--out` collection. Pre-exists on the cancel path; `--max-wall` makes timeouts (hence partial output) routine. Make the skeleton non-truncating (create-if-missing) or skip it when the logs already exist, in `src/runner.rs`. Forensic-quality, not a correctness/teardown issue. (codex P2 on [#48](https://github.com/itsHabib/rooms/pull/48))
 
+Surfaced 2026-06-28 by `rooms-registry` (the `rooms ls` + `rooms gc` registry; spec [`docs/features/rooms-registry/spec.md`](features/rooms-registry/spec.md)); deferred to keep the PR a sharp v0:
+
+- 2026-06-28 — **`rooms kill <id>`** (terminate a *live* room) isn't built. An orphaned-but-*alive* firecracker — the launching `rooms run` died but firecracker is still up — shows in `rooms ls` as `running` and is never reaped by gc (gc reaps only confirmed-dead orphans). Reclaiming it needs an explicit `kill` verb (signal the fc pid, then reap). Its own follow-on.
+- 2026-06-28 — **gc doesn't free a TAP.** v0 uses one shared `tap-fc0` (every room attaches it; `tap_owned` is always false), so there's nothing per-room to release. When the multi-room pool retires `tap-fc0` for per-room TAPs, `rooms gc` must `ip tuntap del` the orphan's TAP as part of the reap. Pool-era concern; noted, not built.
+- 2026-06-28 — **`gc --json`** not implemented. `rooms ls --json` ships (the `doctor`/`diff` stdout contract); `gc` prints a human summary to stderr. A `GcReport` JSON surface is a trivial parity add when a consumer (cloud driver) needs machine-readable reap results.
+- 2026-06-28 — **liveness can't see an orphaned-but-alive fc whose launcher renamed it.** `room::probe` keys on `/proc/<pid>/comm ∈ {firecracker, jailer}`; if a future launch path changed the process name, a live room would read `Dead`. The pid is the jailer child that `exec`s firecracker, so this holds today — but a host-side cross-check (the room's `/proc/<pid>/cwd` resolving into its jail root) would make liveness identity-proof if it ever matters.
+
 ## Closed
 
 Resolved by the `--out` transport-out work ([#40](https://github.com/itsHabib/rooms/pull/40) `973534b`):
