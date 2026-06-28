@@ -151,10 +151,24 @@ impl RoomGuard {
         if self.socket.exists() {
             let _ = std::fs::remove_file(&self.socket);
         }
-        if let Some(jail_dir) = self.jail_instance_dir.take() {
-            teardown_jail_sync(&jail_dir);
+        let jail_torn_down = self
+            .jail_instance_dir
+            .take()
+            .is_none_or(|jail_dir| teardown_jail_sync(&jail_dir));
+        // Keep the room dir (gc's only handle on this room) if the jail tree
+        // didn't fully tear down: a stuck bind-mount leaves the jail dir behind,
+        // and deleting the room dir here would orphan that mount invisibly (the
+        // registry scans the per-room state dir, not the chroot subtree). With
+        // the room dir preserved and the process dead, the room re-classifies as
+        // orphaned-dead, so a later `rooms gc` retries the unmount and reaps it.
+        if jail_torn_down {
+            let _ = std::fs::remove_dir_all(&self.room_dir);
+            return;
         }
-        let _ = std::fs::remove_dir_all(&self.room_dir);
+        warn!(
+            room_dir = %self.room_dir.display(),
+            "jail teardown incomplete (stranded mount?); keeping room dir so `rooms gc` can reap it"
+        );
     }
 }
 
@@ -369,9 +383,14 @@ fn jailer_chroot_base(config: &RoomsConfig) -> Result<PathBuf, FirecrackerError>
     config.chroot_base().ok_or(FirecrackerError::HomeUnset)
 }
 
-/// Persist the room's metadata (`room.json`) as early as the pid is known, so a
-/// later crash strands as little as possible. Best-effort: a write failure only
-/// hides the room from `rooms ls`, never aborts an otherwise-successful boot.
+/// Persist the room's metadata (`room.json`) as early as the pid is known.
+///
+/// Best-effort: a write failure only hides the room from `rooms ls`, never
+/// aborts an otherwise-successful boot. The recorded pid is the jailer child,
+/// which `exec`s firecracker in place (no `--daemonize` in the launch plan), so
+/// it stays the firecracker pid for the room's life — `room::probe` liveness
+/// depends on that. If a `--daemonize` jailer is ever adopted, capture the
+/// firecracker pid the jailer writes instead.
 fn write_room_meta(room_dir: &Path, id: &str, descriptor: &room::RoomDescriptor, pid: Option<u32>) {
     let meta = room::RoomMeta::new(
         id.to_owned(),
@@ -617,24 +636,32 @@ fn stage_jail_sync(
     Err(FirecrackerError::KvmUnavailable)
 }
 
+/// Unmount a room's jail binds and remove its instance dir. Returns `true` only
+/// when the jail fully tore down — i.e. the instance dir is gone. A still-active
+/// bind mount fails the `remove_dir_all` (EBUSY) and leaves the dir behind, so
+/// the dir-gone check is the authoritative signal; the `unmount` exit codes are
+/// advisory (a "not mounted" error on a plain file is harmless).
 #[cfg(unix)]
-fn teardown_jail_sync(instance_dir: &Path) {
+fn teardown_jail_sync(instance_dir: &Path) -> bool {
     let jail_root = instance_dir.join("root");
     for name in [JAIL_KERNEL, JAIL_ROOTFS] {
         let target = jail_root.join(name);
         if target.exists() {
             if let Err(e) = unmount(&target) {
-                tracing::warn!(target = %target.display(), error = %e, "failed to unmount jail bind; may leak");
+                tracing::warn!(target = %target.display(), error = %e, "umount reported an error; relying on dir removal");
             }
         }
     }
     if let Err(e) = std::fs::remove_dir_all(instance_dir) {
-        tracing::warn!(dir = %instance_dir.display(), error = %e, "failed to remove jail instance dir");
+        tracing::warn!(dir = %instance_dir.display(), error = %e, "failed to remove jail instance dir (active mount?)");
     }
+    !instance_dir.exists()
 }
 
 #[cfg(not(unix))]
-fn teardown_jail_sync(_instance_dir: &Path) {}
+const fn teardown_jail_sync(_instance_dir: &Path) -> bool {
+    true
+}
 
 /// Tear down an orphaned room — one whose live `RoomGuard` is gone.
 ///
@@ -657,16 +684,19 @@ pub fn reap_orphan(
     );
     guard.cleanup();
     guard.dismiss(); // cleanup already ran; don't let Drop run it again.
+                     // cleanup keeps the room dir when the jail tree didn't fully tear down, so a
+                     // surviving jail dir is the primary signal of an incomplete reap (a stranded
+                     // bind-mount). Report it honestly; the room stays listed for a retry.
+    if jail_instance_dir.exists() {
+        return Err(FirecrackerError::Internal(format!(
+            "jail instance dir survived reap (stranded mount?): {}",
+            jail_instance_dir.display()
+        )));
+    }
     if room_dir.exists() {
         return Err(FirecrackerError::Internal(format!(
             "room dir survived reap: {}",
             room_dir.display()
-        )));
-    }
-    if jail_instance_dir.exists() {
-        return Err(FirecrackerError::Internal(format!(
-            "jail instance dir survived reap: {}",
-            jail_instance_dir.display()
         )));
     }
     Ok(())
@@ -1160,6 +1190,57 @@ mod tests {
         drop(guard);
 
         assert!(path.exists(), "dismissed guard should leave the directory");
+    }
+
+    /// Regression for the adversarial finding: when the jail tree can't fully
+    /// tear down (a stuck bind-mount blocking `remove_dir_all`), `cleanup` must
+    /// PRESERVE the room dir — gc's only handle — so the stranded mount stays
+    /// reapable instead of being orphaned invisibly. We inject the failure by
+    /// making the jail dir's parent read-only so the final rmdir can't unlink it
+    /// (no root or real mount required).
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_keeps_room_dir_when_jail_teardown_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let room_dir = tmp.path().join("room");
+        std::fs::create_dir_all(&room_dir).expect("room dir");
+        std::fs::write(room_dir.join("room.json"), b"{}").expect("marker");
+
+        let fc_parent = tmp.path().join("chroot").join("firecracker");
+        let instance = fc_parent.join("01abcdefghijklmnopqrstuvwx");
+        std::fs::create_dir_all(instance.join("root")).expect("jail tree");
+        std::fs::write(instance.join("root").join("kernel"), b"k").expect("kernel");
+        std::fs::write(instance.join("root").join("rootfs"), b"r").expect("rootfs");
+        std::fs::set_permissions(&fc_parent, std::fs::Permissions::from_mode(0o500))
+            .expect("lock parent");
+
+        let config = RoomsConfig::default();
+        let mut guard = RoomGuard::for_orphan(
+            room_dir.clone(),
+            room_dir.join("api.sock"),
+            instance.clone(),
+            &config,
+        );
+        guard.cleanup();
+        guard.dismiss(); // don't let drop re-run cleanup
+
+        let injected = instance.exists();
+        // Restore perms so the tempdir can be cleaned up regardless of outcome.
+        std::fs::set_permissions(&fc_parent, std::fs::Permissions::from_mode(0o700))
+            .expect("restore perms");
+
+        if !injected {
+            // Running as root: the read-only parent didn't block removal, so the
+            // failure couldn't be injected. The preserve-on-failure path is
+            // covered on non-root runners (CI + the rooms-host).
+            return;
+        }
+        assert!(
+            room_dir.exists(),
+            "room dir (gc's handle) must be preserved when the jail tree leaks"
+        );
     }
 
     mod room_guard_properties {

@@ -111,7 +111,7 @@ Enforcement, defense-in-depth:
 
 - **(a)** Reap predicate is `OrphanedDead` only. Liveness is **fail-safe — indeterminate ≠ dead** (mirrors `rooms diff`'s "couldn't verify ≠ clean" → exit 2): a missing pid or an unreadable `/proc` is `Unknown`, never reaped. A `--keep` room shows `Kept` while alive and is never reaped; once its fc is confirmed dead the keep flag no longer protects a corpse (nothing left to inspect) and it becomes reapable — that *is* the leak gc exists to clean.
 - **(b)** Every reap target is derived from a **validated** id (`^[0-9a-z]{26}$`; the `<id>` arg and every scanned dir name pass through the same validator, so `..`, `jailer`, absolute paths, and separators are rejected) and re-checked: `room_dir.parent() == $STATE_BASE` and `jail_instance_dir.parent() == $STATE_BASE/jailer/firecracker` before any umount/rm.
-- **(c)** Reap reuses `teardown_jail_sync`, which unmounts `kernel`+`rootfs` *before* `remove_dir_all` and warns (never silently proceeds) on an umount failure.
+- **(c)** Reap reuses `teardown_jail_sync` — unmount the binds, then `remove_dir_all`; it reports success only when the jail instance dir is actually gone (an active mount fails the removal and leaves it). When a bind is stuck (EBUSY at shutdown), the **live** teardown (`cleanup_sync`) now *preserves the per-room dir* instead of deleting gc's only handle — so the room re-classifies `orphaned-dead` and a later `gc` retries the unmount. `reap_orphan` errors (the room stays listed) if a dir survives. No silent, un-reapable mount leak. *(Hardening from the adversarial pass — the one real finding.)*
 
 ### Errors (`src/error.rs`)
 
@@ -148,3 +148,6 @@ No cycle (`room`/`config` are leaves; `firecracker → {config, room}`; `registr
 - **`rooms kill <id>`** (terminate a *live* room) — an orphaned-but-*alive* fc (launcher gone, fc still up) shows as `running` and is not gc's job. Stretch / follow-on.
 - **Snapshots, replay receipts** — separate v0.2 lines.
 - **`gc --json`** — trivial parity add; ship `ls --json` first, add if a consumer needs it.
+- **Reaping meta-less / pre-feature leaks.** A room with no `room.json` (created before this lands, or a crash before the write) classifies `Unknown` and isn't auto-reaped (fail-safe). A **socket-probe liveness fallback** (the kickoff sanctions "the API socket": a refused/absent `api.sock` ⇒ definitively dead) would let `gc` clean those too — the natural fast-follow. Its own liveness path → its own adversarial pass.
+- **Jail-subtree sweep** — defense-in-depth: have the registry also enumerate `<chroot_base>/firecracker/<id>` for jail dirs whose per-room dir is gone, as a second orphan source (the hardening above prevents *new* such leaks; this would recover historical ones).
+- **Lazy-unmount self-heal** — `umount -l` as a last resort in the reap path so a transient EBUSY clears without waiting for a retry.
