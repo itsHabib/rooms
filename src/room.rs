@@ -111,9 +111,9 @@ pub enum Liveness {
 /// pre-exec window.
 const ROOM_PROC_NAMES: [&str; 2] = ["firecracker", "jailer"];
 
-/// Map a `/proc/<pid>/comm` value to liveness. Pure (the I/O lives in `probe`),
-/// so it's unit-testable everywhere — a pid running *something else* (reuse)
-/// reads as `Dead`, not a false `Alive`.
+/// Map a process name (`comm`) to liveness. Pure (the I/O lives in `probe`), so
+/// it's unit-testable everywhere — a pid running *something else* (reuse) reads
+/// as `Dead`, not a false `Alive`.
 #[must_use]
 pub fn classify_comm(comm: &str) -> Liveness {
     if ROOM_PROC_NAMES.contains(&comm.trim()) {
@@ -122,13 +122,39 @@ pub fn classify_comm(comm: &str) -> Liveness {
     Liveness::Dead
 }
 
-/// Probe a room's liveness via `/proc/<pid>/comm`.
+/// Map a `/proc/<pid>/stat` line to liveness. Pure, so it's unit-testable
+/// everywhere.
+///
+/// The format is `pid (comm) state ...`; `comm` can contain spaces and parens,
+/// so the fields are split on the **last** `)`. A **zombie** (`Z`) or dead
+/// (`X`/`x`) process is `Dead` even though `/proc/<pid>` still lists it — a
+/// killed firecracker whose parent hasn't reaped it lingers as a zombie with
+/// `comm` still `firecracker`, which a comm-only check misreads as alive (caught
+/// by host-e2e: a `--keep` room's fc killed under its still-alive launcher).
+#[must_use]
+pub fn classify_stat(stat: &str) -> Liveness {
+    let Some(close) = stat.rfind(')') else {
+        return Liveness::Unknown;
+    };
+    let Some(open) = stat[..close].find('(') else {
+        return Liveness::Unknown;
+    };
+    let comm = &stat[open + 1..close];
+    let state = stat[close + 1..].trim_start().chars().next();
+    if matches!(state, Some('Z' | 'X' | 'x')) {
+        return Liveness::Dead;
+    }
+    classify_comm(comm)
+}
+
+/// Probe a room's liveness via `/proc/<pid>/stat`.
 ///
 /// Uid-independent and pid-reuse-aware, unlike `kill -0` (which returns EPERM
 /// cross-uid and reads as a false "dead", breaking `rooms ls` run as the
 /// unprivileged operator against a firecracker-uid process). A missing
-/// `/proc/<pid>` is `Dead`; an unreadable one is `Unknown` (fail-safe: never
-/// claim dead when we can't tell — gc won't reap it).
+/// `/proc/<pid>` is `Dead`; a zombie is `Dead` (see `classify_stat`); an
+/// unreadable entry is `Unknown` (fail-safe: never claim dead when we can't tell
+/// — gc won't reap it).
 #[must_use]
 pub fn probe(pid: Option<u32>) -> Liveness {
     let Some(pid) = pid else {
@@ -139,8 +165,8 @@ pub fn probe(pid: Option<u32>) -> Liveness {
 
 #[cfg(target_os = "linux")]
 fn probe_pid(pid: u32) -> Liveness {
-    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        Ok(comm) => classify_comm(&comm),
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => classify_stat(&stat),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Liveness::Dead,
         Err(_) => Liveness::Unknown,
     }
@@ -161,7 +187,7 @@ fn probe_pid(_pid: u32) -> Liveness {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
-    use super::{classify_comm, probe, read, write_atomic, Liveness, RoomMeta};
+    use super::{classify_comm, classify_stat, probe, read, write_atomic, Liveness, RoomMeta};
     use chrono::Utc;
 
     fn sample(pid: Option<u32>) -> RoomMeta {
@@ -221,6 +247,36 @@ mod tests {
         // A pid reused by an unrelated process must NOT read as alive.
         assert_eq!(classify_comm("bash"), Liveness::Dead);
         assert_eq!(classify_comm(""), Liveness::Dead);
+    }
+
+    #[test]
+    fn classify_stat_detects_zombie_reuse_and_identity() {
+        // A running firecracker.
+        assert_eq!(
+            classify_stat("48757 (firecracker) S 1 48757 0"),
+            Liveness::Alive
+        );
+        assert_eq!(
+            classify_stat("48757 (firecracker) R 1 48757 0"),
+            Liveness::Alive
+        );
+        assert_eq!(classify_stat("5 (jailer) S 1 5 0"), Liveness::Alive);
+        // A zombie firecracker (killed; parent hasn't reaped it) is DEAD even
+        // though comm is still "firecracker" — the bug host-e2e caught.
+        assert_eq!(
+            classify_stat("48757 (firecracker) Z 1 48757 0"),
+            Liveness::Dead
+        );
+        assert_eq!(
+            classify_stat("48757 (firecracker) X 1 48757 0"),
+            Liveness::Dead
+        );
+        // pid reused by an unrelated process.
+        assert_eq!(classify_stat("48757 (bash) S 1 48757 0"), Liveness::Dead);
+        // comm containing spaces/parens — fields split on the LAST ')'.
+        assert_eq!(classify_stat("5 (odd ) name) S 1 5 0"), Liveness::Dead);
+        // malformed.
+        assert_eq!(classify_stat("garbage-no-parens"), Liveness::Unknown);
     }
 
     #[test]
