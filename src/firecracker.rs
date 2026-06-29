@@ -397,10 +397,14 @@ fn jailer_chroot_base(config: &RoomsConfig) -> Result<PathBuf, FirecrackerError>
 /// depends on that. If a `--daemonize` jailer is ever adopted, capture the
 /// firecracker pid the jailer writes instead.
 fn write_room_meta(room_dir: &Path, id: &str, descriptor: &room::RoomDescriptor, pid: Option<u32>) {
+    // Record the pid's start time so liveness can later tell *this* incarnation
+    // from a recycled pid (the `rooms kill` identity guard).
+    let pid_starttime = pid.and_then(room::starttime_of);
     let meta = room::RoomMeta::new(
         id.to_owned(),
         descriptor.command.clone(),
         pid,
+        pid_starttime,
         descriptor.keep,
         Utc::now(),
     );
@@ -624,6 +628,38 @@ fn unmount(target: &Path) -> Result<(), String> {
     Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
 }
 
+/// Times a busy unmount is retried, and the wait between tries. A bind-mount can
+/// read EBUSY for a few ms after the firecracker that held the kernel/rootfs files
+/// exits — the kernel's final `fput` is deferred to a workqueue. `rooms kill`
+/// reaps *immediately* after terminating fc (unlike gc, which reaps long-dead
+/// orphans), so it races that window; a short retry clears it. A mount still busy
+/// past the retries falls through to the room-dir-preserved fallback
+/// (`cleanup_sync`) so `rooms gc` can reap it later.
+#[cfg(unix)]
+const UNMOUNT_RETRIES: u32 = 5;
+#[cfg(unix)]
+const UNMOUNT_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Unmount, retrying briefly while the target reads busy (a just-exited process's
+/// deferred `fput` clearing). A non-busy failure (e.g. "not mounted") returns at
+/// once — waiting won't change it.
+#[cfg(unix)]
+fn unmount_settled(target: &Path) -> Result<(), String> {
+    use std::thread;
+
+    let mut result = unmount(target);
+    let mut tries = 0;
+    while let Err(reason) = &result {
+        if tries >= UNMOUNT_RETRIES || !reason.contains("busy") {
+            break;
+        }
+        thread::sleep(UNMOUNT_RETRY_DELAY);
+        tries += 1;
+        result = unmount(target);
+    }
+    result
+}
+
 #[cfg(unix)]
 fn unmount_quiet(target: &Path) {
     let _ = unmount(target);
@@ -652,7 +688,7 @@ fn teardown_jail_sync(instance_dir: &Path) -> bool {
     for name in [JAIL_KERNEL, JAIL_ROOTFS] {
         let target = jail_root.join(name);
         if target.exists() {
-            if let Err(e) = unmount(&target) {
+            if let Err(e) = unmount_settled(&target) {
                 tracing::warn!(target = %target.display(), error = %e, "umount reported an error; relying on dir removal");
             }
         }
@@ -987,58 +1023,65 @@ pub enum KillSignalOutcome {
     /// Still the room's firecracker after SIGTERM + SIGKILL — the kill could not
     /// complete. The caller must NOT reap (the process is still up).
     Survived,
-    /// Liveness was indeterminate at signal time (unreadable `/proc`); refused to
-    /// signal. Never coerced to alive or dead.
+    /// Liveness was indeterminate (unreadable `/proc`) — at the initial probe (no
+    /// signal sent), or after SIGTERM (a signal may have been sent, but death
+    /// could not be confirmed). Never coerced to alive or dead; the caller does
+    /// not reap.
     Indeterminate,
 }
 
 /// Terminate a room's *live* firecracker by pid — the `rooms kill` signal path.
 ///
-/// Re-checks process identity (`/proc/<pid>/stat` via [`room::probe`]) immediately
-/// before every signal so a reused pid is never hit: SIGTERM, poll identity to the
-/// grace deadline, then SIGKILL only while the pid is *still* the room's
-/// firecracker/jailer. A pid that has gone (or been reused
-/// by an unrelated process) reads `Dead` and stops the escalation; success
-/// requires a definitive `Dead` (an `Unknown` is never read as gone). Distinct
-/// from [`kill_child_gracefully`], which guards the Drop path — there we own the
+/// Re-checks process identity (`/proc/<pid>/stat` via [`room::probe`], matching
+/// `comm` *and* the recorded `starttime`) immediately before every signal, so a
+/// recycled pid — even one now hosting *another* firecracker — reads `Dead` and is
+/// never signaled: SIGTERM, poll identity to the grace deadline, then SIGKILL only
+/// while the pid is *still* this room's firecracker/jailer. Success requires a
+/// definitive `Dead` (an `Unknown` is never read as gone). Distinct from
+/// [`kill_child_gracefully`], which guards the Drop path — there we own the
 /// `Child`, so the pid stays at least a zombie and `kill -0` existence suffices;
-/// here the launching process may be gone, so the pid can be recycled and
-/// identity must gate each signal. The residual race — a pid reused by *another*
-/// firecracker/jailer in the sub-millisecond between the final probe and the
-/// syscall — is the irreducible TOCTOU floor without `pidfd`.
+/// here the launching process may be gone, so the pid can be recycled and identity
+/// must gate each signal. With `starttime` recorded, the residual race shrinks to
+/// the pid being recycled to another firecracker/jailer whose start time *also*
+/// collides, within the gap between the final probe and signal delivery — the
+/// irreducible TOCTOU floor without `pidfd`.
 #[must_use]
-pub fn terminate_by_identity(pid: u32, grace: Duration) -> KillSignalOutcome {
+pub fn terminate_by_identity(
+    pid: u32,
+    starttime: Option<u64>,
+    grace: Duration,
+) -> KillSignalOutcome {
     #[cfg(unix)]
     {
         use std::time::Instant;
 
-        match room::probe(Some(pid)) {
+        match room::probe(Some(pid), starttime) {
             room::Liveness::Dead => return KillSignalOutcome::AlreadyExited,
             room::Liveness::Unknown => return KillSignalOutcome::Indeterminate,
             room::Liveness::Alive => {}
         }
         send_signal(pid, "TERM");
         let grace = grace.min(Duration::from_secs(5));
-        match poll_until_dead(pid, Instant::now() + grace) {
+        match poll_until_dead(pid, starttime, Instant::now() + grace) {
             room::Liveness::Dead => KillSignalOutcome::Signaled,
             room::Liveness::Unknown => KillSignalOutcome::Indeterminate,
-            room::Liveness::Alive => sigkill_and_confirm(pid),
+            room::Liveness::Alive => sigkill_and_confirm(pid, starttime),
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = (pid, grace);
+        let _ = (pid, starttime, grace);
         KillSignalOutcome::Indeterminate
     }
 }
 
 /// SIGKILL a still-alive room process, then confirm it died (by identity).
 #[cfg(unix)]
-fn sigkill_and_confirm(pid: u32) -> KillSignalOutcome {
+fn sigkill_and_confirm(pid: u32, starttime: Option<u64>) -> KillSignalOutcome {
     use std::time::Instant;
 
     send_signal(pid, "KILL");
-    match poll_until_dead(pid, Instant::now() + Duration::from_secs(1)) {
+    match poll_until_dead(pid, starttime, Instant::now() + Duration::from_secs(1)) {
         room::Liveness::Dead => KillSignalOutcome::Signaled,
         room::Liveness::Alive => KillSignalOutcome::Survived,
         room::Liveness::Unknown => KillSignalOutcome::Indeterminate,
@@ -1051,12 +1094,16 @@ fn sigkill_and_confirm(pid: u32) -> KillSignalOutcome {
 /// transient unreadable `/proc` is not "gone"); only a definitive `Dead` — or the
 /// deadline — ends the wait.
 #[cfg(unix)]
-fn poll_until_dead(pid: u32, deadline: std::time::Instant) -> room::Liveness {
+fn poll_until_dead(
+    pid: u32,
+    starttime: Option<u64>,
+    deadline: std::time::Instant,
+) -> room::Liveness {
     use std::thread;
     use std::time::Instant;
 
     loop {
-        let live = room::probe(Some(pid));
+        let live = room::probe(Some(pid), starttime);
         if live == room::Liveness::Dead || Instant::now() >= deadline {
             return live;
         }
@@ -1163,7 +1210,7 @@ mod tests {
         // A pid that cannot exist (>= 2^22 on Linux) probes Dead before any
         // signal → AlreadyExited, no signal sent.
         assert_eq!(
-            terminate_by_identity(4_194_305, Duration::from_millis(200)),
+            terminate_by_identity(4_194_305, None, Duration::from_millis(200)),
             KillSignalOutcome::AlreadyExited
         );
     }
@@ -1181,7 +1228,7 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("spawn sleep");
-        let outcome = terminate_by_identity(child.id(), Duration::from_millis(200));
+        let outcome = terminate_by_identity(child.id(), None, Duration::from_millis(200));
         let still_alive = child.try_wait().expect("try_wait").is_none();
         let _ = child.kill();
         let _ = child.wait();

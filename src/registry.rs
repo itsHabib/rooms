@@ -64,6 +64,10 @@ pub struct RoomEntry {
     pub state: RoomState,
     pub label: Option<String>,
     pub pid: Option<u32>,
+    /// Start time of the pid's incarnation, carried for the kill identity guard.
+    /// Internal — kept out of the `ls --json` schema.
+    #[serde(skip)]
+    pub pid_starttime: Option<u64>,
     pub started_at: Option<DateTime<Utc>>,
     pub keep: bool,
 }
@@ -147,12 +151,14 @@ pub fn list_rooms(config: &RoomsConfig) -> Result<Vec<RoomEntry>, RegistryError>
 fn entry_for(config: &RoomsConfig, id: &str) -> RoomEntry {
     let meta = config.room_dir(id).and_then(|dir| load_meta_soft(&dir));
     let pid = meta.as_ref().and_then(|m| m.pid);
+    let pid_starttime = meta.as_ref().and_then(|m| m.pid_starttime);
     let keep = meta.as_ref().is_some_and(|m| m.keep);
     RoomEntry {
         id: id.to_owned(),
-        state: classify(keep, room::probe(pid)),
+        state: classify(keep, room::probe(pid, pid_starttime)),
         label: meta.as_ref().and_then(|m| m.label.clone()),
         pid,
+        pid_starttime,
         started_at: meta.as_ref().map(|m| m.started_at),
         keep,
     }
@@ -382,7 +388,11 @@ pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError>
 /// scanning the state base.
 fn find_entry(config: &RoomsConfig, id: &str) -> Option<RoomEntry> {
     let room_dir = config.room_dir(id)?;
-    room_dir.is_dir().then(|| entry_for(config, id))
+    // symlink_metadata (no-follow) so a symlinked <id> isn't treated as a room —
+    // matching list_rooms' non-following file_type(), and refusing to source a
+    // room's pid/identity from a target outside the state base.
+    let is_dir = std::fs::symlink_metadata(&room_dir).is_ok_and(|m| m.is_dir());
+    is_dir.then(|| entry_for(config, id))
 }
 
 /// Decide and perform the kill for one room from its classified state.
@@ -413,7 +423,7 @@ fn kill_live(config: &RoomsConfig, entry: &RoomEntry) -> Result<KillOutcome, Reg
             "alive but no pid recorded; refusing to kill",
         ));
     };
-    match firecracker::terminate_by_identity(pid, config.cleanup_grace) {
+    match firecracker::terminate_by_identity(pid, entry.pid_starttime, config.cleanup_grace) {
         KillSignalOutcome::Signaled => reap_after_kill(config, entry, "killed"),
         KillSignalOutcome::AlreadyExited => {
             reap_after_kill(config, entry, "already exited; reaped")
@@ -426,7 +436,7 @@ fn kill_live(config: &RoomsConfig, entry: &RoomEntry) -> Result<KillOutcome, Reg
         KillSignalOutcome::Indeterminate => Ok(kill_outcome(
             entry,
             KillDisposition::Refused,
-            "liveness indeterminate at signal time; refused to signal",
+            "liveness indeterminate at signal time; could not confirm death (not reaped)",
         )),
     }
 }
@@ -499,6 +509,7 @@ mod tests {
             id.clone(),
             Some("sleep 600".to_owned()),
             pid,
+            pid.map(u64::from),
             keep,
             Utc::now(),
         );

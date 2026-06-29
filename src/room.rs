@@ -10,8 +10,9 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Schema version for `room.json` (forward-compat, mirrors `result.json`).
-pub const ROOM_META_SCHEMA_VERSION: u32 = 1;
+/// Schema version for `room.json` (forward-compat, mirrors `result.json`). v2
+/// adds `pid_starttime`; v1 files still read (the field defaults to `None`).
+pub const ROOM_META_SCHEMA_VERSION: u32 = 2;
 
 /// Metadata file name inside a room's state dir.
 pub const ROOM_META_FILE: &str = "room.json";
@@ -39,6 +40,12 @@ pub struct RoomMeta {
     pub started_at: DateTime<Utc>,
     /// Jailer→firecracker child pid; `None` leaves liveness `Unknown`.
     pub pid: Option<u32>,
+    /// Start time of the pid's process incarnation (`/proc/<pid>/stat` field 22,
+    /// jiffies since boot). Pins `pid` to a *specific* process so a recycled pid
+    /// reads `Dead`, not a false `Alive`. `None` for a pre-v2 `room.json` (or when
+    /// it couldn't be read at boot); liveness then falls back to comm-only.
+    #[serde(default)]
+    pub pid_starttime: Option<u64>,
     /// Started with `--keep`.
     pub keep: bool,
 }
@@ -50,6 +57,7 @@ impl RoomMeta {
         id: String,
         label: Option<String>,
         pid: Option<u32>,
+        pid_starttime: Option<u64>,
         keep: bool,
         started_at: DateTime<Utc>,
     ) -> Self {
@@ -59,6 +67,7 @@ impl RoomMeta {
             label,
             started_at,
             pid,
+            pid_starttime,
             keep,
         }
     }
@@ -147,6 +156,65 @@ pub fn classify_stat(stat: &str) -> Liveness {
     classify_comm(comm)
 }
 
+/// Classify liveness from a `/proc/<pid>/stat` line AND verify the process
+/// incarnation via its start time. Pure, so the recycled-pid case is
+/// unit-testable.
+///
+/// comm/zombie is checked first (a dead, zombie, or foreign-`comm` pid is `Dead`
+/// regardless of start time). Then, when a start time was recorded, a mismatch
+/// means the pid was recycled to a *different* process incarnation → `Dead`; a
+/// match → `Alive`; an unparseable stat → `Unknown` (fail-safe). With no recorded
+/// start time (a pre-v2 `room.json`), this is comm-only — the prior behavior.
+#[must_use]
+pub fn classify_stat_with_identity(stat: &str, expected_starttime: Option<u64>) -> Liveness {
+    let live = classify_stat(stat);
+    if live != Liveness::Alive {
+        return live;
+    }
+    let Some(expected) = expected_starttime else {
+        return Liveness::Alive;
+    };
+    match parse_starttime(stat) {
+        Some(actual) if actual == expected => Liveness::Alive,
+        Some(_) => Liveness::Dead,
+        None => Liveness::Unknown,
+    }
+}
+
+/// Parse the process start time — field 22 of `/proc/<pid>/stat`, the value that
+/// pins a pid to a specific incarnation. `None` if the line is malformed.
+///
+/// Fields after the (parenthesized, space-permitting) `comm` are space-separated;
+/// counting from `state` (field 3) right after the last `)`, start time is the
+/// 20th token (field 22 overall).
+#[must_use]
+pub fn parse_starttime(stat: &str) -> Option<u64> {
+    let close = stat.rfind(')')?;
+    stat.get(close + 1..)?
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+/// Read the start time (field 22 of `/proc/<pid>/stat`) of a live pid, to record
+/// at boot. `None` off Linux, or if the pid's stat can't be read/parsed.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn starttime_of(pid: u32) -> Option<u64> {
+    parse_starttime(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(
+    clippy::missing_const_for_fn,
+    reason = "kept non-const to match the Linux starttime_of that reads /proc"
+)]
+#[must_use]
+pub fn starttime_of(_pid: u32) -> Option<u64> {
+    None
+}
+
 /// Probe a room's liveness via `/proc/<pid>/stat`.
 ///
 /// Uid-independent and pid-reuse-aware, unlike `kill -0` (which returns EPERM
@@ -154,19 +222,21 @@ pub fn classify_stat(stat: &str) -> Liveness {
 /// unprivileged operator against a firecracker-uid process). A missing
 /// `/proc/<pid>` is `Dead`; a zombie is `Dead` (see `classify_stat`); an
 /// unreadable entry is `Unknown` (fail-safe: never claim dead when we can't tell
-/// — gc won't reap it).
+/// — gc won't reap it). When `expected_starttime` is `Some`, a pid recycled to a
+/// *different* incarnation (even another firecracker) reads `Dead` — the identity
+/// check `rooms kill` relies on before signaling.
 #[must_use]
-pub fn probe(pid: Option<u32>) -> Liveness {
+pub fn probe(pid: Option<u32>, expected_starttime: Option<u64>) -> Liveness {
     let Some(pid) = pid else {
         return Liveness::Unknown;
     };
-    probe_pid(pid)
+    probe_pid(pid, expected_starttime)
 }
 
 #[cfg(target_os = "linux")]
-fn probe_pid(pid: u32) -> Liveness {
+fn probe_pid(pid: u32, expected_starttime: Option<u64>) -> Liveness {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => classify_stat(&stat),
+        Ok(stat) => classify_stat_with_identity(&stat, expected_starttime),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Liveness::Dead,
         Err(_) => Liveness::Unknown,
     }
@@ -179,7 +249,7 @@ fn probe_pid(pid: u32) -> Liveness {
     clippy::missing_const_for_fn,
     reason = "kept non-const to match the Linux probe_pid that reads /proc"
 )]
-fn probe_pid(_pid: u32) -> Liveness {
+fn probe_pid(_pid: u32, _expected_starttime: Option<u64>) -> Liveness {
     Liveness::Unknown
 }
 
@@ -187,7 +257,10 @@ fn probe_pid(_pid: u32) -> Liveness {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
-    use super::{classify_comm, classify_stat, probe, read, write_atomic, Liveness, RoomMeta};
+    use super::{
+        classify_comm, classify_stat, classify_stat_with_identity, parse_starttime, probe, read,
+        write_atomic, Liveness, RoomMeta,
+    };
     use chrono::Utc;
 
     fn sample(pid: Option<u32>) -> RoomMeta {
@@ -195,6 +268,7 @@ mod tests {
             "01abcdefghijklmnopqrstuvwx".to_owned(),
             Some("id".to_owned()),
             pid,
+            pid.map(u64::from),
             false,
             Utc::now(),
         )
@@ -207,6 +281,18 @@ mod tests {
         write_atomic(dir.path(), &meta).expect("write");
         let back = read(dir.path()).expect("read").expect("present");
         assert_eq!(meta, back);
+    }
+
+    #[test]
+    fn v1_meta_without_starttime_still_reads() {
+        // A pre-v2 room.json (no pid_starttime field) must still deserialize, with
+        // the field defaulting to None (comm-only fallback) — back-compat.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let v1 = r#"{"schema_version":1,"id":"01abcdefghijklmnopqrstuvwx","label":null,"started_at":"2026-06-28T00:00:00Z","pid":42,"keep":false}"#;
+        std::fs::write(dir.path().join("room.json"), v1).expect("write v1");
+        let back = read(dir.path()).expect("read").expect("present");
+        assert_eq!(back.pid, Some(42));
+        assert_eq!(back.pid_starttime, None);
     }
 
     #[test]
@@ -279,17 +365,71 @@ mod tests {
         assert_eq!(classify_stat("garbage-no-parens"), Liveness::Unknown);
     }
 
+    // A synthetic /proc/<pid>/stat with 22 fields; start time (field 22) is the
+    // 20th token after the comm's closing `)`.
+    const FC_STAT_ST555: &str =
+        "1234 (firecracker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 555";
+
+    #[test]
+    fn parse_starttime_reads_field_22() {
+        assert_eq!(parse_starttime(FC_STAT_ST555), Some(555));
+        // comm with spaces/parens: still split on the LAST ')'.
+        assert_eq!(
+            parse_starttime("5 (odd ) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 777"),
+            Some(777)
+        );
+        assert_eq!(parse_starttime("garbage-no-parens"), None);
+    }
+
+    #[test]
+    fn identity_check_distinguishes_a_recycled_pid_from_the_same_incarnation() {
+        // The precise hole the adversarial pass found: a recycled pid that IS a
+        // firecracker (comm matches) must read Dead when its start time differs.
+        assert_eq!(
+            classify_stat_with_identity(FC_STAT_ST555, Some(555)),
+            Liveness::Alive,
+            "same incarnation (comm + starttime match) is alive"
+        );
+        assert_eq!(
+            classify_stat_with_identity(FC_STAT_ST555, Some(999)),
+            Liveness::Dead,
+            "a different starttime means the pid was recycled — not this room's fc"
+        );
+        assert_eq!(
+            classify_stat_with_identity(FC_STAT_ST555, None),
+            Liveness::Alive,
+            "no recorded starttime (pre-v2 meta) falls back to comm-only"
+        );
+        // comm/zombie short-circuits before the starttime check.
+        assert_eq!(
+            classify_stat_with_identity(
+                "1234 (firecracker) Z 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 555",
+                Some(555)
+            ),
+            Liveness::Dead,
+            "a zombie is dead regardless of starttime"
+        );
+        assert_eq!(
+            classify_stat_with_identity(
+                "1234 (bash) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 555",
+                Some(555)
+            ),
+            Liveness::Dead,
+            "a foreign comm is dead regardless of starttime"
+        );
+    }
+
     #[test]
     fn probe_without_pid_is_unknown() {
         // No pid recorded ⇒ indeterminate ⇒ never reaped.
-        assert_eq!(probe(None), Liveness::Unknown);
+        assert_eq!(probe(None, None), Liveness::Unknown);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn probe_absent_pid_is_dead() {
         // A pid that cannot exist (>= 2^22 on Linux) has no /proc entry.
-        assert_eq!(probe(Some(4_194_305)), Liveness::Dead);
+        assert_eq!(probe(Some(4_194_305), None), Liveness::Dead);
     }
 
     #[cfg(target_os = "linux")]
@@ -299,6 +439,6 @@ mod tests {
         // pid-reuse case. Liveness keys on the process *identity*, not mere
         // existence, so this must read Dead.
         let me = std::process::id();
-        assert_eq!(probe(Some(me)), Liveness::Dead);
+        assert_eq!(probe(Some(me), None), Liveness::Dead);
     }
 }

@@ -47,24 +47,24 @@ Unlike gc, `kill` **signals a recorded pid**, which opens the pid-reuse race: be
 
 `kill_child_gracefully` (the Drop-path teardown) is **not** sufficient on its own here: its grace poll uses `kill -0` (existence), and it escalates to `SIGKILL` on whatever holds the pid after the grace — exactly the reused-pid hazard. The Drop path can afford that (it owns the `Child`, so the pid stays at least a zombie until reaped); `kill` cannot (the room may have been launched by a since-dead process, so init can reap and recycle the pid).
 
-So `kill` uses an **identity-guarded** terminate (new `firecracker::terminate_by_identity`), built on the same `/proc/<pid>/stat` identity check `room::probe` already encodes:
+So `kill` uses an **identity-guarded** terminate (new `firecracker::terminate_by_identity`), built on `room::probe`'s `/proc/<pid>/stat` check — **strengthened here to match `comm` *and* the process start time** (field 22), not comm alone. `boot` records the pid's start time in `room.json` (`RoomMeta.pid_starttime`); a recycled pid has a different start time, so it reads `Dead` **even if it now runs another firecracker**. (Comm-only was safe for `ls`/`gc` — a false-`Alive` there just means "don't reap" — but `kill` *signals*, so it must pin the pid to *this* incarnation. v1 `room.json` without a start time falls back to comm-only.)
 
 ```
-terminate_by_identity(pid, grace) -> KillSignalOutcome
-  probe(pid):                                  # identity check BEFORE SIGTERM
-    Dead    => AlreadyExited                   # gone or pid reused → no signal
+terminate_by_identity(pid, starttime, grace) -> KillSignalOutcome
+  probe(pid, starttime):                       # comm + starttime, BEFORE SIGTERM
+    Dead    => AlreadyExited                   # gone, or pid recycled → no signal
     Unknown => Indeterminate                   # can't tell → no signal
     Alive   => send SIGTERM
   loop until grace deadline:
-    probe(pid) == Dead => Signaled             # confirmed gone; stop (don't escalate)
-    else               => keep polling         # Alive or transient Unknown → wait
-  probe(pid):                                  # identity check BEFORE SIGKILL
-    Alive   => send SIGKILL; probe again: Dead => Signaled, else => Survived
+    probe == Dead => Signaled                  # confirmed gone; stop (don't escalate)
+    else          => keep polling              # Alive or transient Unknown → wait
+  (terminal liveness, BEFORE SIGKILL):
+    Alive   => send SIGKILL; re-probe: Dead => Signaled, else => Survived
     Dead    => Signaled
     Unknown => Indeterminate                   # never SIGKILL a pid we can't identify
 ```
 
-The invariant: **re-probe `/proc/<pid>/stat` identity immediately before every signal; signal only while the pid is still the room's firecracker/jailer.** Liveness is identity-based (`comm ∈ {firecracker, jailer}`, zombie = dead), never `kill -0` existence — so a reused pid reads `Dead` and we stop rather than escalate. Success (`Signaled`/`AlreadyExited`) requires a **definitive `Dead`**; `Unknown` is never read as success (fail-safe, mirroring `probe`'s own contract). The residual TOCTOU floor — a pid reused by *another firecracker/jailer* in the sub-millisecond between the final probe and the syscall — is irreducible without `pidfd` and is far narrower than existence-based signaling; noted in the code.
+The invariant: **re-probe identity immediately before every signal; signal only while the pid is still this room's firecracker/jailer.** Liveness is identity-based (`comm ∈ {firecracker, jailer}` **and** start time matches; zombie = dead), never `kill -0` existence — so a recycled pid reads `Dead` and we stop rather than escalate. Success (`Signaled`/`AlreadyExited`) requires a **definitive `Dead`**; `Unknown` is never read as success (fail-safe, mirroring `probe`). With the start-time pin, the residual TOCTOU floor shrinks to a pid recycled to *another* firecracker/jailer whose start time *also* collides, in the gap between the final probe and signal delivery — irreducible without `pidfd`, and far narrower than comm-only (let alone existence-based) signaling.
 
 `terminate_by_identity` lives beside `kill_child_gracefully` in `firecracker` (mechanism) and composes `room::probe`; the registry (policy) decides *which* rooms reach it. The Drop path keeps using `kill_child_gracefully` unchanged — different safety needs, so a little structural duplication of the TERM→grace→KILL skeleton is the right call over coupling the two.
 
@@ -86,9 +86,9 @@ No new dependency direction. `firecracker::terminate_by_identity` composes `room
 
 Enforcement, defense-in-depth:
 
-- **(a)** Every signal is preceded by a `room::probe` identity check; only a `comm ∈ {firecracker, jailer}` (non-zombie) pid is signaled. A reused pid reads `Dead` → no signal. (The unit suite proves a *live non-firecracker* pid is never signaled.)
-- **(b)** The id passes `is_valid_room_id` before any work; the room must exist as a state-base subdir (`find_entry`); every reaped path comes from `reap_paths`, which re-checks each dir is a direct child of its expected parent (`ensure_child`) — the same backstop gc uses. kill adds no new path construction.
-- **(c)** Teardown is `reap_orphan` unchanged — it errors (room stays listed) if the jail or room dir survives, so a stuck mount is reported, never silently leaked. kill reaps **only** after a definitive `Dead`; a `Survived` fc is reported `failed` and **not** reaped (never umount/rm a room whose fc is still up).
+- **(a)** Every signal is preceded by a `room::probe` identity check — `comm ∈ {firecracker, jailer}`, non-zombie, **and** the recorded start time matches. A pid that is gone, foreign, or *recycled to a different incarnation (even another firecracker)* reads `Dead` → no signal. (The unit suite proves both a *live non-firecracker* pid and a *comm-matching-but-different-start-time* pid are never treated as alive.)
+- **(b)** The id passes `is_valid_room_id` before any work; `find_entry` requires a **non-symlink** state-base subdir (`symlink_metadata`, no-follow — matching `ls`/`gc`, so a symlinked `<id>` can't source a room's pid from outside the base); every reaped path comes from `reap_paths`, which re-checks each dir is a direct child of its expected parent (`ensure_child`) before any umount/rm. kill adds no new path construction.
+- **(c)** Teardown is `reap_orphan` unchanged — it errors (room stays listed) if the jail or room dir survives, so a stuck mount is reported, never silently leaked. kill reaps **only** after a definitive `Dead`; a `Survived` fc is reported `failed` and **not** reaped (never umount/rm a room whose fc is still up). Because kill reaps *immediately* after termination (unlike gc, which reaps long-dead orphans), the umount races the kernel's deferred `fput` on the bind-mounts; the teardown retries a transient-busy umount, falling back to the room-dir-preserved `gc`-retry net if it stays stuck.
 - **(d)** `Unknown` at classify *or* at the pre-signal re-probe → `refused`, exit 2, no signal. Indeterminate is never coerced to alive *or* dead.
 
 ## Acceptance
