@@ -1081,8 +1081,8 @@ pub fn terminate_by_identity(
 /// widened the window for the recorded pid to be reaped and recycled, so a stale
 /// `Alive` from the grace poll must not authorize a SIGKILL. A pid that now reads
 /// `Dead` (our incarnation gone — including one recycled to *another*
-/// firecracker/jailer, caught by the starttime mismatch) is reaped, never
-/// SIGKILLed; an `Unknown` is left indeterminate. Mirrors the identity gate the
+/// firecracker/jailer, caught by the starttime mismatch) is reaped, never sent
+/// SIGKILL; an `Unknown` is left indeterminate. Mirrors the identity gate the
 /// SIGTERM path applies before *its* signal.
 #[cfg(unix)]
 fn sigkill_and_confirm(pid: u32, starttime: Option<u64>) -> KillSignalOutcome {
