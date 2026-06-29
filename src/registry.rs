@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::config::RoomsConfig;
 use crate::error::RegistryError;
-use crate::firecracker;
+use crate::firecracker::{self, KillSignalOutcome};
 use crate::room::{self, Liveness, RoomMeta};
 
 /// Schema version for `ls --json` stdout (mirrors `doctor`/`diff`).
@@ -64,6 +64,10 @@ pub struct RoomEntry {
     pub state: RoomState,
     pub label: Option<String>,
     pub pid: Option<u32>,
+    /// Start time of the pid's incarnation, carried for the kill identity guard.
+    /// Internal — kept out of the `ls --json` schema.
+    #[serde(skip)]
+    pub pid_starttime: Option<u64>,
     pub started_at: Option<DateTime<Utc>>,
     pub keep: bool,
 }
@@ -147,12 +151,14 @@ pub fn list_rooms(config: &RoomsConfig) -> Result<Vec<RoomEntry>, RegistryError>
 fn entry_for(config: &RoomsConfig, id: &str) -> RoomEntry {
     let meta = config.room_dir(id).and_then(|dir| load_meta_soft(&dir));
     let pid = meta.as_ref().and_then(|m| m.pid);
+    let pid_starttime = meta.as_ref().and_then(|m| m.pid_starttime);
     let keep = meta.as_ref().is_some_and(|m| m.keep);
     RoomEntry {
         id: id.to_owned(),
-        state: classify(keep, room::probe(pid)),
+        state: classify(keep, room::probe(pid, pid_starttime)),
         label: meta.as_ref().and_then(|m| m.label.clone()),
         pid,
+        pid_starttime,
         started_at: meta.as_ref().map(|m| m.started_at),
         keep,
     }
@@ -297,6 +303,197 @@ fn outcome(entry: &RoomEntry, reaped: bool, reason: &str) -> GcOutcome {
     }
 }
 
+/// What `rooms kill` did to a room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KillDisposition {
+    /// Was alive; terminated (or had just exited) and reaped.
+    Killed,
+    /// Already dead — pointed at `rooms gc`, not reaped here.
+    AlreadyDead,
+    /// Refused to signal — indeterminate liveness (indeterminate ≠ alive), or a
+    /// pre-v2 room whose process identity can't be verified.
+    Refused,
+    /// Alive, but the kill couldn't complete: survived SIGKILL, or the reap left
+    /// a dir/mount behind.
+    Failed,
+}
+
+impl KillDisposition {
+    /// Process exit code for this disposition (the script-composition contract):
+    /// **0** killed or already-dead no-op, **1** failed, **2** refused.
+    #[must_use]
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::Killed | Self::AlreadyDead => 0,
+            Self::Failed => 1,
+            Self::Refused => 2,
+        }
+    }
+}
+
+/// What `rooms kill` did to one room.
+#[derive(Debug, Clone, Serialize)]
+pub struct KillOutcome {
+    pub id: String,
+    pub state: RoomState,
+    pub disposition: KillDisposition,
+    pub reason: String,
+}
+
+/// The result of a kill run. A one-element `outcomes` for single-id kill; the
+/// `Vec` shape mirrors [`GcReport`] and makes a future `--all` a non-breaking add.
+#[derive(Debug, Clone, Serialize)]
+pub struct KillReport {
+    pub schema_version: u32,
+    pub outcomes: Vec<KillOutcome>,
+}
+
+impl KillReport {
+    /// The process exit code: the highest (worst) disposition code across
+    /// outcomes — any non-ok outcome makes the run non-zero. **0** when there are
+    /// no outcomes (no such room — already gone).
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        self.outcomes
+            .iter()
+            .map(|o| o.disposition.exit_code())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Kill a *live* room: terminate its firecracker, then reap via the gc teardown.
+///
+/// Only a `Running` or `Kept` room is signaled (symmetry with gc reaping only the
+/// confirmed-dead). An `OrphanedDead` id is pointed at `gc` (not reaped here), an
+/// `Unknown` id is refused (indeterminate ≠ alive), a non-existent id is a no-op
+/// ("already gone"), an invalid id is rejected before any fs or signal work, and
+/// an unresolvable state base (HOME unset) errors rather than reporting the room
+/// gone.
+pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError> {
+    if !is_valid_room_id(id) {
+        return Err(RegistryError::InvalidRoomId { id: id.to_owned() });
+    }
+    // Resolve the state base up front (as `ls`/`gc` do): an unresolvable base
+    // (HOME unset, e.g. under `sudo`) is a loud error, not a silent exit-0
+    // "already gone" — a live room could be running orphaned under a base we
+    // can't see, and reporting it gone would strand it.
+    config
+        .resolved_state_base()
+        .ok_or(RegistryError::HomeUnset)?;
+    let outcomes = match find_entry(config, id) {
+        Some(entry) => vec![kill_entry(config, &entry)?],
+        None => Vec::new(),
+    };
+    Ok(KillReport {
+        schema_version: REGISTRY_SCHEMA_VERSION,
+        outcomes,
+    })
+}
+
+/// Build the entry for a single room id, or `None` if no such room dir exists.
+///
+/// The per-room equivalent of the existence rule [`list_rooms`] applies while
+/// scanning the state base.
+fn find_entry(config: &RoomsConfig, id: &str) -> Option<RoomEntry> {
+    let room_dir = config.room_dir(id)?;
+    // symlink_metadata (no-follow) so a symlinked <id> isn't treated as a room —
+    // matching list_rooms' non-following file_type(), and refusing to source a
+    // room's pid/identity from a target outside the state base.
+    let is_dir = std::fs::symlink_metadata(&room_dir).is_ok_and(|m| m.is_dir());
+    is_dir.then(|| entry_for(config, id))
+}
+
+/// Decide and perform the kill for one room from its classified state.
+fn kill_entry(config: &RoomsConfig, entry: &RoomEntry) -> Result<KillOutcome, RegistryError> {
+    match entry.state {
+        RoomState::OrphanedDead => Ok(kill_outcome(
+            entry,
+            KillDisposition::AlreadyDead,
+            "nothing live to kill; run `rooms gc` to reap it",
+        )),
+        RoomState::Unknown => Ok(kill_outcome(
+            entry,
+            KillDisposition::Refused,
+            "liveness unknown (no pid / unreadable /proc); refusing to kill",
+        )),
+        RoomState::Running | RoomState::Kept => kill_live(config, entry),
+    }
+}
+
+/// Terminate a confirmed-alive room (identity-guarded), then reap it.
+fn kill_live(config: &RoomsConfig, entry: &RoomEntry) -> Result<KillOutcome, RegistryError> {
+    let Some(pid) = entry.pid else {
+        // A Running/Kept room always carries a pid (liveness needs one); guard
+        // the impossible case rather than unwrap.
+        return Ok(kill_outcome(
+            entry,
+            KillDisposition::Refused,
+            "alive but no pid recorded; refusing to kill",
+        ));
+    };
+    let Some(starttime) = entry.pid_starttime else {
+        // A pre-v2 room.json carries no start time, so identity would fall back
+        // to comm-only — which can't tell this room's firecracker from a pid
+        // recycled to *another* firecracker/jailer. On the signaling path that's
+        // unsafe (a wrong-process SIGTERM/SIGKILL), so refuse rather than trust
+        // comm. The read-only `ls` display still classifies comm-only; only the
+        // destructive path demands a verified identity.
+        return Ok(kill_outcome(
+            entry,
+            KillDisposition::Refused,
+            "cannot verify process identity (room predates starttime pinning); refusing to signal",
+        ));
+    };
+    match firecracker::terminate_by_identity(pid, Some(starttime), config.cleanup_grace) {
+        KillSignalOutcome::Signaled => reap_after_kill(config, entry, "killed"),
+        KillSignalOutcome::AlreadyExited => {
+            reap_after_kill(config, entry, "already exited; reaped")
+        }
+        KillSignalOutcome::Survived => Ok(kill_outcome(
+            entry,
+            KillDisposition::Failed,
+            "firecracker survived SIGKILL; still alive, not reaped",
+        )),
+        KillSignalOutcome::Indeterminate => Ok(kill_outcome(
+            entry,
+            KillDisposition::Refused,
+            "liveness indeterminate at signal time; could not confirm death (not reaped)",
+        )),
+    }
+}
+
+/// Reap a room whose firecracker is confirmed dead (reusing the gc teardown). A
+/// surviving dir/mount is reported as a `Failed` kill, never a silent leak.
+fn reap_after_kill(
+    config: &RoomsConfig,
+    entry: &RoomEntry,
+    ok_reason: &str,
+) -> Result<KillOutcome, RegistryError> {
+    let (room_dir, jail_instance_dir, socket) = reap_paths(config, &entry.id)?;
+    match firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, config) {
+        Ok(()) => Ok(kill_outcome(entry, KillDisposition::Killed, ok_reason)),
+        Err(e) => {
+            warn!(id = %entry.id, error = %e, "kill: reap after terminate failed");
+            Ok(kill_outcome(
+                entry,
+                KillDisposition::Failed,
+                &format!("terminated but reap failed: {e}"),
+            ))
+        }
+    }
+}
+
+fn kill_outcome(entry: &RoomEntry, disposition: KillDisposition, reason: &str) -> KillOutcome {
+    KillOutcome {
+        id: entry.id.clone(),
+        state: entry.state,
+        disposition,
+        reason: reason.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -307,8 +504,12 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::{classify, gc, is_valid_room_id, list_rooms, GcOptions, RoomState};
+    use super::{
+        classify, gc, is_valid_room_id, kill, kill_live, list_rooms, GcOptions, KillDisposition,
+        RoomEntry, RoomState,
+    };
     use crate::config::RoomsConfig;
+    use crate::error::RegistryError;
     use crate::room::{self, Liveness, RoomMeta};
     use chrono::Utc;
     use std::path::{Path, PathBuf};
@@ -333,6 +534,7 @@ mod tests {
             id.clone(),
             Some("sleep 600".to_owned()),
             pid,
+            pid.map(u64::from),
             keep,
             Utc::now(),
         );
@@ -598,5 +800,144 @@ mod tests {
             config.room_dir(VALID_ID),
             Some(PathBuf::from(format!("/s/{VALID_ID}")))
         );
+    }
+
+    #[test]
+    fn kill_rejects_invalid_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        assert!(
+            kill(&config, "../etc").is_err(),
+            "an invalid id must be rejected before any signal or fs work"
+        );
+    }
+
+    #[test]
+    fn kill_no_such_room_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        // A syntactically valid id with no room dir → already gone → no outcomes.
+        let report = kill(&config, VALID_ID).unwrap();
+        assert!(report.outcomes.is_empty());
+        assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn kill_unknown_room_is_refused_and_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        // pid None → Unknown liveness → refuse: never signal, never reap.
+        let id = make_room(&config, None, false, true);
+        let report = kill(&config, &id).unwrap();
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].state, RoomState::Unknown);
+        assert_eq!(report.outcomes[0].disposition, KillDisposition::Refused);
+        assert_eq!(report.exit_code(), 2);
+        // the dirs must survive — kill refused to act.
+        assert!(config.room_dir(&id).unwrap().exists());
+        assert!(config.jail_instance_dir(&id).unwrap().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kill_orphaned_dead_points_to_gc_without_reaping() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        // A pid that cannot exist → Dead → OrphanedDead. kill must NOT reap it
+        // (that's gc's job); it points there and leaves the dirs for gc.
+        let id = make_room(&config, Some(4_194_305), false, true);
+        let report = kill(&config, &id).unwrap();
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].state, RoomState::OrphanedDead);
+        assert_eq!(report.outcomes[0].disposition, KillDisposition::AlreadyDead);
+        assert_eq!(report.exit_code(), 0);
+        assert!(
+            config.room_dir(&id).unwrap().exists(),
+            "kill must not reap an already-dead room (gc's job)"
+        );
+        assert!(config.jail_instance_dir(&id).unwrap().exists());
+    }
+
+    /// A v1 room (no recorded start time) classified alive must REFUSE on the
+    /// signaling path rather than fall back to comm-only identity — comm alone
+    /// can't tell this room's firecracker from a pid recycled to *another*
+    /// firecracker/jailer, and signaling the wrong one is the cardinal hazard.
+    /// We force the alive branch (probe can't be faked in-process) with the
+    /// test's own live pid; the guard must short-circuit to `refused` *before*
+    /// `terminate_by_identity` is consulted — which, were the guard gone, would
+    /// read the pid Dead-by-comm, reap, and report `killed`. So `refused` plus
+    /// the surviving dirs proves nothing was signaled or reaped.
+    #[test]
+    fn kill_live_refuses_v1_room_without_starttime() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let id = make_room(&config, None, false, true);
+        let entry = RoomEntry {
+            id: id.clone(),
+            state: RoomState::Running,
+            label: None,
+            pid: Some(std::process::id()),
+            pid_starttime: None,
+            started_at: Some(Utc::now()),
+            keep: false,
+        };
+        let outcome = kill_live(&config, &entry).unwrap();
+        assert_eq!(
+            outcome.disposition,
+            KillDisposition::Refused,
+            "a v1 room without a start time must refuse before any signal"
+        );
+        // Refusal signals and reaps nothing — the dirs survive.
+        assert!(config.room_dir(&id).unwrap().exists());
+        assert!(config.jail_instance_dir(&id).unwrap().exists());
+    }
+
+    /// An unresolvable state base (HOME unset, e.g. under `sudo`) must surface
+    /// `HomeUnset` — loud and non-zero — not collapse into an empty exit-0
+    /// "already gone" report while a live room runs orphaned under a base we
+    /// can't see. `ls`/`gc` already error here; `kill` now matches.
+    #[test]
+    fn kill_on_unresolvable_base_is_home_unset_not_already_gone() {
+        // No state_base override → the base is HOME-derived. Scope the HOME
+        // removal to the kill call alone (restored on drop) so the window other
+        // parallel HOME-readers could observe is as tight as possible.
+        let config = RoomsConfig::default();
+        let result = {
+            let _home = HomeGuard::unset();
+            kill(&config, VALID_ID)
+        };
+        assert!(
+            matches!(result, Err(RegistryError::HomeUnset)),
+            "unresolvable base must be a loud HomeUnset error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn kill_disposition_exit_codes() {
+        assert_eq!(KillDisposition::Killed.exit_code(), 0);
+        assert_eq!(KillDisposition::AlreadyDead.exit_code(), 0);
+        assert_eq!(KillDisposition::Failed.exit_code(), 1);
+        assert_eq!(KillDisposition::Refused.exit_code(), 2);
+    }
+
+    /// Unset `HOME` for a test's duration, restoring it on drop (even on panic).
+    /// With no `state_base` override, the state base can't resolve — the
+    /// `HomeUnset` condition. Restoring keeps parallel HOME-readers undisturbed.
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn unset() -> Self {
+            let prev = std::env::var_os("HOME");
+            std::env::remove_var("HOME");
+            Self(prev)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(home) = self.0.take() {
+                std::env::set_var("HOME", home);
+            }
+        }
     }
 }
