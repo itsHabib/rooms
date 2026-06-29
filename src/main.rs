@@ -824,7 +824,15 @@ fn gc_cmd(dry_run: bool, id: Option<String>, config: &RoomsConfig) -> Result<u8,
     let only = id.clone();
     let report = registry::gc(config, &registry::GcOptions { dry_run, only: id })?;
     render_gc(&report, only.as_deref());
-    Ok(0)
+    // Exit non-zero when a real reap failed (a reapable room left un-reaped), so
+    // a scripted caller sees the partial failure — mirroring `doctor`/`diff`'s
+    // exit-code-as-contract. A dry-run never reaps, so it's always exit 0.
+    let reap_failed = !report.dry_run
+        && report
+            .outcomes
+            .iter()
+            .any(|o| o.state.is_reapable() && !o.reaped);
+    Ok(u8::from(reap_failed))
 }
 
 fn render_gc(report: &registry::GcReport, only: Option<&str>) {

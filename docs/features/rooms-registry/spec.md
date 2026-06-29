@@ -100,6 +100,8 @@ Reap **only** `OrphanedDead` rooms. The reap reuses `RoomGuard` via a new `firec
 - bare `rooms gc` → reap every `OrphanedDead` room; print a per-room summary (`reaped <id>` / `skipped <id> (running)`).
 - `rooms gc <id>` → reap just that one (still only if `OrphanedDead`; otherwise a clear skip line, not a forced delete).
 - `rooms gc --dry-run` → print what *would* be reaped; **touch nothing** (never constructs a guard, never unmounts, never rms).
+- gc **accumulates** per-room errors instead of aborting the batch — one orphan with a stuck mount never blocks reaping the healthy rest in a single run.
+- **Exit code** (composes in scripts like `doctor`/`diff`): **0** when clean (everything reapable was reaped, or nothing to reap, or a dry-run); **non-zero** when a real reap failed (a reapable room left un-reaped, e.g. a stuck mount).
 
 Destructive-by-default is safe **by construction**: the reap predicate is `state == OrphanedDead`, so gc can never reap a live, kept, or unknown-liveness room. Safety comes from the predicate, not from a `--force` flag (matches the e2e contract: bare `gc` reaps, `--dry-run` previews).
 
