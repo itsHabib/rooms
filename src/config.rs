@@ -22,8 +22,12 @@ pub struct RoomsConfig {
     pub firecracker_binary: PathBuf,
     /// Path to the jailer binary (default: `"jailer"` on PATH).
     pub jailer_binary: PathBuf,
-    /// Base directory for jailer chroot jails (default: `$HOME/.local/state/rooms/jailer`).
+    /// Base directory for jailer chroot jails (default: `<state_base>/jailer`).
     pub jailer_chroot_base: Option<PathBuf>,
+    /// Base directory for all room state (default: `$HOME/.local/state/rooms`).
+    /// Overriding it (e.g. to a tempdir) redirects every room path — the seam
+    /// that makes the registry hermetically testable.
+    pub state_base: Option<PathBuf>,
     /// Minimum supported Firecracker semver major.minor.
     pub min_firecracker_version: (u32, u32),
     /// Minimum rootfs image size in bytes.
@@ -50,6 +54,7 @@ impl Default for RoomsConfig {
             firecracker_binary: PathBuf::from("firecracker"),
             jailer_binary: PathBuf::from("jailer"),
             jailer_chroot_base: None,
+            state_base: None,
             min_firecracker_version: (1, 7),
             min_rootfs_bytes: 64 * 1024 * 1024,
         }
@@ -57,6 +62,50 @@ impl Default for RoomsConfig {
 }
 
 impl RoomsConfig {
+    /// The base directory holding every room's state. Honors `state_base`,
+    /// else `$HOME/.local/state/rooms`. `None` only when neither is set (HOME
+    /// unset); callers map that to their own layer's error.
+    pub fn resolved_state_base(&self) -> Option<PathBuf> {
+        if let Some(base) = &self.state_base {
+            return Some(base.clone());
+        }
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state/rooms"))
+    }
+
+    /// Per-room state dir: `<state_base>/<id>` — holds `firecracker.log` and
+    /// `room.json`.
+    pub fn room_dir(&self, id: &str) -> Option<PathBuf> {
+        Some(self.resolved_state_base()?.join(id))
+    }
+
+    /// Jailer chroot base: the `jailer_chroot_base` override, else
+    /// `<state_base>/jailer`.
+    pub fn chroot_base(&self) -> Option<PathBuf> {
+        if let Some(base) = &self.jailer_chroot_base {
+            return Some(base.clone());
+        }
+        Some(self.resolved_state_base()?.join("jailer"))
+    }
+
+    // The three below mirror the jail layout staged in `firecracker` — kept in
+    // lockstep by `config_paths_match_jail_layout` so the registry and the
+    // booter resolve identical paths.
+
+    /// Jail instance dir: `<chroot_base>/firecracker/<id>`.
+    pub fn jail_instance_dir(&self, id: &str) -> Option<PathBuf> {
+        Some(self.chroot_base()?.join("firecracker").join(id))
+    }
+
+    /// Jail root (the chroot): `<jail_instance_dir>/root`.
+    pub fn jail_root_dir(&self, id: &str) -> Option<PathBuf> {
+        Some(self.jail_instance_dir(id)?.join("root"))
+    }
+
+    /// Firecracker API socket: `<jail_root>/api.sock`.
+    pub fn jail_socket(&self, id: &str) -> Option<PathBuf> {
+        Some(self.jail_root_dir(id)?.join("api.sock"))
+    }
+
     /// API call timeout for a specific endpoint.
     #[must_use]
     pub fn timeout_for_endpoint(&self, endpoint: &str) -> Duration {
@@ -68,5 +117,61 @@ impl RoomsConfig {
         } else {
             self.api_timeout
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RoomsConfig;
+    use std::path::PathBuf;
+
+    fn with_base(base: &str) -> RoomsConfig {
+        RoomsConfig {
+            state_base: Some(PathBuf::from(base)),
+            ..RoomsConfig::default()
+        }
+    }
+
+    #[test]
+    fn paths_derive_from_state_base() {
+        let c = with_base("/s");
+        let id = "01abcdefghijklmnopqrstuvwx";
+        assert_eq!(c.resolved_state_base(), Some(PathBuf::from("/s")));
+        assert_eq!(c.room_dir(id), Some(PathBuf::from(format!("/s/{id}"))));
+        assert_eq!(c.chroot_base(), Some(PathBuf::from("/s/jailer")));
+    }
+
+    #[test]
+    fn config_paths_match_jail_layout() {
+        // Pins the registry's view of a room's dirs to the layout `firecracker`
+        // stages; a drift here would point gc at the wrong tree.
+        let c = with_base("/s");
+        let id = "01abcdefghijklmnopqrstuvwx";
+        assert_eq!(
+            c.jail_instance_dir(id),
+            Some(PathBuf::from(format!("/s/jailer/firecracker/{id}")))
+        );
+        assert_eq!(
+            c.jail_root_dir(id),
+            Some(PathBuf::from(format!("/s/jailer/firecracker/{id}/root")))
+        );
+        assert_eq!(
+            c.jail_socket(id),
+            Some(PathBuf::from(format!(
+                "/s/jailer/firecracker/{id}/root/api.sock"
+            )))
+        );
+    }
+
+    #[test]
+    fn jailer_chroot_base_override_wins() {
+        let c = RoomsConfig {
+            state_base: Some(PathBuf::from("/s")),
+            jailer_chroot_base: Some(PathBuf::from("/custom/jail")),
+            ..RoomsConfig::default()
+        };
+        assert_eq!(c.chroot_base(), Some(PathBuf::from("/custom/jail")));
+        // room_dir still tracks state_base, independent of the chroot override.
+        assert_eq!(c.room_dir("x"), Some(PathBuf::from("/s/x")));
     }
 }

@@ -170,14 +170,16 @@ Each layer swappable, seams deliberate. dossier could be Linear; ship could be a
 Strict layered dependency direction (mirrored from dossier / tower):
 
 ```
-domain → firecracker / rootfs / transport → runner → main
+config / room → firecracker / rootfs / transport → runner / registry → main
 ```
 
-- **`domain`** — plain types (`RoomId`, outcomes); no I/O.
-- **`firecracker`** — process spawn, API socket, VM config, boot/shutdown.
+- **`config`** — runtime config + the room path layout (state base, room dir, jail dirs); no I/O.
+- **`room`** — per-room metadata (`RoomMeta`) + liveness probe; plain data plus its own persistence.
+- **`firecracker`** — process spawn, API socket, VM config, boot/shutdown, orphan reap.
 - **`rootfs`** — overlay/CoW, image paths (flake input lands here in v0.1).
 - **`transport`** — repo bundle, scp into guest.
 - **`runner`** — SSH exec, artifact capture, guest readiness.
+- **`registry`** — `rooms ls` / `rooms gc` policy: scan the state base, classify liveness, reap orphans (composes the `firecracker` teardown).
 - **`main`** — clap CLI, wires layers.
 
 Don't introduce a downward import. If a feature needs a new dependency direction, lift the shared concern into `domain`.

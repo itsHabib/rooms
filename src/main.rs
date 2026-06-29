@@ -8,7 +8,8 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
 use rooms::{
-    artifacts, config::RoomsConfig, doctor, error::RoomsError, firecracker, rootfs, runner,
+    artifacts, config::RoomsConfig, doctor, error::RoomsError, firecracker, registry, room, rootfs,
+    runner,
 };
 use tracing::{info, warn};
 
@@ -108,6 +109,20 @@ enum Command {
         /// Emit the raw `changeset.json` instead of a human summary.
         #[arg(long)]
         json: bool,
+    },
+    /// List rooms and their liveness (running | kept | orphaned-dead | unknown).
+    Ls {
+        /// Emit structured JSON output (schema'd; logs stay on stderr).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reap orphaned (dead-but-leaked) rooms. Never touches a live or kept room.
+    Gc {
+        /// Preview what would be reaped; remove nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Reap only this room id (still only if it's orphaned-dead).
+        id: Option<String>,
     },
 }
 
@@ -240,6 +255,8 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
         Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
         Command::Diff { from, json } => diff_changeset(&from, json).await,
+        Command::Ls { json } => list_rooms_cmd(json, &config),
+        Command::Gc { dry_run, id } => gc_cmd(dry_run, id, &config),
     }
 }
 
@@ -312,12 +329,17 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     // plain `rooms run --command` otherwise keeps a writable rootfs so any
     // image — including ones without /sbin/overlay-init — still boots.
     let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
+    let descriptor = room::RoomDescriptor {
+        command: Some(room_label(&action)),
+        keep: args.keep,
+    };
     let mut vm = firecracker::boot(
         &kernel,
         &args.image,
         Some(&network),
         config,
         readonly_rootfs,
+        &descriptor,
     )
     .await?;
 
@@ -700,6 +722,148 @@ fn print_escapes_by_op(changeset: &artifacts::Changeset) {
     }
 }
 
+/// A short human label for `room.json`, derived from the resolved post-boot
+/// action — what `rooms ls` shows under COMMAND.
+fn room_label(action: &Action) -> String {
+    match action {
+        Action::Keep => "(keep)".to_owned(),
+        Action::Idle => "(idle)".to_owned(),
+        Action::Exec(runner::Runner::Command(cmd)) => cmd.clone(),
+        Action::Exec(runner::Runner::Cursor(req)) => format!("cursor:{}", req.repo_url),
+    }
+}
+
+fn list_rooms_cmd(json: bool, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!("rooms ls");
+    let rooms = registry::list_rooms(config)?;
+    if json {
+        return render_rooms_json(&rooms);
+    }
+    render_rooms_human(&rooms);
+    Ok(0)
+}
+
+// stdout is the documented data surface for `rooms ls --json` (logs stay on
+// stderr), mirroring `rooms doctor --json` / `rooms diff --json`.
+#[allow(
+    clippy::print_stdout,
+    reason = "machine-readable ls output; stdout is the documented contract"
+)]
+fn render_rooms_json(rooms: &[registry::RoomEntry]) -> Result<u8, RoomsError> {
+    let report = registry::ListReport::new(rooms.to_vec());
+    let out =
+        serde_json::to_string_pretty(&report).map_err(|e| RoomsError::Internal(e.to_string()))?;
+    println!("{out}");
+    Ok(0)
+}
+
+// `rooms ls` is a data surface like `docker ps`; the table is its stdout
+// contract (the empty-state note goes to stderr so a piped `ls` stays clean).
+#[allow(
+    clippy::print_stdout,
+    reason = "ls table is the documented stdout contract"
+)]
+fn render_rooms_human(rooms: &[registry::RoomEntry]) {
+    if rooms.is_empty() {
+        eprintln!("no rooms");
+        return;
+    }
+    println!(
+        "{:<26}  {:<13}  {:<7}  {:<8}  COMMAND",
+        "ID", "STATE", "PID", "AGE"
+    );
+    for r in rooms {
+        let pid = r.pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
+        println!(
+            "{:<26}  {:<13}  {:<7}  {:<8}  {}",
+            r.id,
+            r.state.label(),
+            pid,
+            format_age(r.started_at),
+            truncate_label(r.label.as_deref(), 48),
+        );
+    }
+}
+
+/// Humanized age from a room's start time; `?` when unknown (no metadata).
+fn format_age(started_at: Option<DateTime<Utc>>) -> String {
+    let Some(start) = started_at else {
+        return "?".to_owned();
+    };
+    humanize_secs((Utc::now() - start).num_seconds().max(0))
+}
+
+/// Render a non-negative second count compactly (`45s`, `2m3s`, `1h4m`, `3d2h`).
+fn humanize_secs(secs: i64) -> String {
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 3600 {
+        return format!("{}m{}s", secs / 60, secs % 60);
+    }
+    if secs < 86_400 {
+        return format!("{}h{}m", secs / 3600, (secs % 3600) / 60);
+    }
+    format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3600)
+}
+
+/// Truncate a label to `max` display chars, marking elision with a single `…`.
+fn truncate_label(label: Option<&str>, max: usize) -> String {
+    let Some(s) = label else {
+        return "-".to_owned();
+    };
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+fn gc_cmd(dry_run: bool, id: Option<String>, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(dry_run, ?id, "rooms gc");
+    let only = id.clone();
+    let report = registry::gc(config, &registry::GcOptions { dry_run, only: id })?;
+    render_gc(&report, only.as_deref());
+    // Exit non-zero when a real reap failed (a reapable room left un-reaped), so
+    // a scripted caller sees the partial failure — mirroring `doctor`/`diff`'s
+    // exit-code-as-contract. A dry-run never reaps, so it's always exit 0.
+    let reap_failed = !report.dry_run
+        && report
+            .outcomes
+            .iter()
+            .any(|o| o.state.is_reapable() && !o.reaped);
+    Ok(u8::from(reap_failed))
+}
+
+fn render_gc(report: &registry::GcReport, only: Option<&str>) {
+    if report.outcomes.is_empty() {
+        render_gc_empty(only);
+        return;
+    }
+    for o in &report.outcomes {
+        eprintln!("{}  {}", o.id, o.reason);
+    }
+    if report.dry_run {
+        let n = report
+            .outcomes
+            .iter()
+            .filter(|o| o.state.is_reapable())
+            .count();
+        eprintln!("dry-run: {n} room(s) would be reaped");
+        return;
+    }
+    let n = report.outcomes.iter().filter(|o| o.reaped).count();
+    eprintln!("reaped {n} room(s)");
+}
+
+fn render_gc_empty(only: Option<&str>) {
+    let Some(id) = only else {
+        eprintln!("no rooms to reap");
+        return;
+    };
+    eprintln!("no room with id {id} (already gone?)");
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -714,8 +878,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        changeset_exit_code, diff_changeset, parse_max_wall, resolve_action, Cli, Command,
-        RoomsError, RunArgs, RunnerKind,
+        changeset_exit_code, diff_changeset, humanize_secs, parse_max_wall, resolve_action,
+        truncate_label, Cli, Command, RoomsError, RunArgs, RunnerKind,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
@@ -1013,5 +1177,59 @@ mod tests {
             err.to_string().contains("--out") && err.to_string().contains("--keep"),
             "expected error to name --out and --keep; got: {err}"
         );
+    }
+
+    #[test]
+    fn ls_verb_parses_json_and_default() {
+        let json = Cli::try_parse_from(["rooms", "ls", "--json"]).expect("ls --json parses");
+        match json.command {
+            Command::Ls { json } => assert!(json),
+            other => panic!("expected Ls, got {other:?}"),
+        }
+        let human = Cli::try_parse_from(["rooms", "ls"]).expect("ls parses");
+        match human.command {
+            Command::Ls { json } => assert!(!json),
+            other => panic!("expected Ls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gc_verb_parses_dry_run_and_id() {
+        let id = "01abcdefghijklmnopqrstuvwx";
+        let cli = Cli::try_parse_from(["rooms", "gc", "--dry-run", id])
+            .expect("gc --dry-run <id> parses");
+        match cli.command {
+            Command::Gc { dry_run, id: got } => {
+                assert!(dry_run);
+                assert_eq!(got.as_deref(), Some(id));
+            }
+            other => panic!("expected Gc, got {other:?}"),
+        }
+        let bare = Cli::try_parse_from(["rooms", "gc"]).expect("bare gc parses");
+        match bare.command {
+            Command::Gc { dry_run, id } => {
+                assert!(!dry_run);
+                assert!(id.is_none());
+            }
+            other => panic!("expected Gc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn humanize_secs_formats_each_magnitude() {
+        assert_eq!(humanize_secs(0), "0s");
+        assert_eq!(humanize_secs(45), "45s");
+        assert_eq!(humanize_secs(125), "2m5s");
+        assert_eq!(humanize_secs(3_661), "1h1m");
+        assert_eq!(humanize_secs(90_061), "1d1h");
+    }
+
+    #[test]
+    fn truncate_label_elides_long_and_passes_short() {
+        assert_eq!(truncate_label(None, 10), "-");
+        assert_eq!(truncate_label(Some("short"), 10), "short");
+        let long = truncate_label(Some("abcdefghijklmnop"), 5);
+        assert_eq!(long.chars().count(), 5, "truncated to max display width");
+        assert!(long.ends_with('…'), "elision marker present: {long}");
     }
 }
