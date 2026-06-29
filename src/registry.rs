@@ -212,7 +212,15 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
     }
     let mut outcomes = Vec::with_capacity(rooms.len());
     for entry in &rooms {
-        outcomes.push(reap_entry(config, entry, opts.dry_run)?);
+        // Accumulate per-room errors instead of aborting the batch: one orphan
+        // with a stuck mount must not stop gc from reaping the healthy rest.
+        match reap_entry(config, entry, opts.dry_run) {
+            Ok(out) => outcomes.push(out),
+            Err(e) => {
+                warn!(id = %entry.id, error = %e, "reap failed; continuing with the remaining rooms");
+                outcomes.push(error_outcome(entry, &e));
+            }
+        }
     }
     Ok(GcReport {
         schema_version: REGISTRY_SCHEMA_VERSION,
@@ -274,6 +282,10 @@ fn ensure_child(path: &Path, expected_parent: &Path) -> Result<(), RegistryError
 
 fn skip_outcome(entry: &RoomEntry) -> GcOutcome {
     outcome(entry, false, &format!("skipped: {}", entry.state.label()))
+}
+
+fn error_outcome(entry: &RoomEntry, err: &RegistryError) -> GcOutcome {
+    outcome(entry, false, &format!("error: {err}"))
 }
 
 fn outcome(entry: &RoomEntry, reaped: bool, reason: &str) -> GcOutcome {
@@ -505,6 +517,60 @@ mod tests {
         // the non-targeted orphan is untouched.
         assert!(config.room_dir(&bystander).unwrap().exists());
         assert!(!config.room_dir(&target).unwrap().exists());
+    }
+
+    /// gc must not abort the whole batch when one orphan's reap fails (a stuck
+    /// mount): the healthy orphans still get reaped and the failure surfaces as a
+    /// per-room outcome, not an error that aborts the run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gc_continues_past_a_failed_reap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+
+        // Orphan whose jail removal fails: lock its jail root read-only so the
+        // entries under it can't be unlinked -> remove_dir_all fails -> reap errors.
+        let stuck = make_room(&config, Some(4_194_305), false, true);
+        let stuck_root = config.jail_root_dir(&stuck).unwrap();
+        std::fs::create_dir_all(stuck_root.join("sub")).unwrap();
+        std::fs::set_permissions(&stuck_root, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        // A normal orphan that reaps cleanly.
+        let healthy = make_room(&config, Some(4_194_305), false, true);
+
+        let report = gc(&config, &GcOptions::default()).unwrap(); // must NOT be Err
+
+        std::fs::set_permissions(&stuck_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // The healthy orphan is reaped regardless of the stuck one -> no abort.
+        let healthy_out = report
+            .outcomes
+            .iter()
+            .find(|o| o.id == healthy)
+            .expect("healthy listed");
+        assert!(
+            healthy_out.reaped,
+            "healthy orphan reaped despite the stuck one"
+        );
+        assert!(!config.room_dir(&healthy).unwrap().exists());
+
+        // Stuck-specific assertions only when the failure was actually injected
+        // (a root test runner bypasses the read-only lock).
+        if config.room_dir(&stuck).unwrap().exists() {
+            let stuck_out = report
+                .outcomes
+                .iter()
+                .find(|o| o.id == stuck)
+                .expect("stuck listed");
+            assert!(!stuck_out.reaped);
+            assert!(
+                stuck_out.reason.contains("error"),
+                "stuck reap reported as error: {}",
+                stuck_out.reason
+            );
+        }
     }
 
     #[test]
