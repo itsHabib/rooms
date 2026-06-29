@@ -490,7 +490,7 @@ mod tests {
     fn gc_only_targets_one_room() {
         let dir = tempfile::tempdir().unwrap();
         let config = config_with_base(dir.path());
-        let keep = make_room(&config, Some(4_194_305), false, true);
+        let bystander = make_room(&config, Some(4_194_305), false, true);
         let target = make_room(&config, Some(4_194_305), false, true);
         let report = gc(
             &config,
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(report.outcomes.len(), 1);
         assert_eq!(report.outcomes[0].id, target);
         // the non-targeted orphan is untouched.
-        assert!(config.room_dir(&keep).unwrap().exists());
+        assert!(config.room_dir(&bystander).unwrap().exists());
         assert!(!config.room_dir(&target).unwrap().exists());
     }
 

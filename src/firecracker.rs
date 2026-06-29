@@ -162,7 +162,12 @@ impl RoomGuard {
         // the room dir preserved and the process dead, the room re-classifies as
         // orphaned-dead, so a later `rooms gc` retries the unmount and reaps it.
         if jail_torn_down {
-            let _ = std::fs::remove_dir_all(&self.room_dir);
+            // Surface a failed room-dir removal: the jail is clean but the room
+            // dir lingers, so the room re-lists as `unknown` (fc gone, meta
+            // intact) and never becomes reapable — at least make it diagnosable.
+            if let Err(e) = std::fs::remove_dir_all(&self.room_dir) {
+                warn!(room_dir = %self.room_dir.display(), error = %e, "failed to remove room dir after cleanup; it may re-list as unknown");
+            }
             return;
         }
         warn!(
@@ -1241,6 +1246,39 @@ mod tests {
             room_dir.exists(),
             "room dir (gc's handle) must be preserved when the jail tree leaks"
         );
+    }
+
+    /// A failed room-dir removal on the jail-succeeded path must not panic and
+    /// must leave the dir (so it's at least diagnosable, per the cleanup warn).
+    /// We inject the removal failure with a read-only parent; no jail dir is set,
+    /// so the jail teardown "succeeds" and cleanup proceeds to the room-dir rm.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_survives_room_dir_removal_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = tmp.path().join("locked");
+        let room_dir = parent.join("room");
+        std::fs::create_dir_all(&room_dir).expect("room dir");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500))
+            .expect("lock parent");
+
+        let config = RoomsConfig::default();
+        let mut guard = RoomGuard::new(room_dir.clone(), room_dir.join("api.sock"), &config);
+        guard.cleanup(); // no jail dir → jail "torn down" → attempts room-dir rm
+        guard.dismiss();
+
+        let injected = room_dir.exists();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("restore perms");
+
+        if injected {
+            assert!(
+                room_dir.exists(),
+                "a failed room-dir removal must leave the dir, not panic"
+            );
+        }
     }
 
     mod room_guard_properties {
