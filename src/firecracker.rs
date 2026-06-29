@@ -1076,10 +1076,23 @@ pub fn terminate_by_identity(
 }
 
 /// SIGKILL a still-alive room process, then confirm it died (by identity).
+///
+/// Re-probes identity immediately before the signal — the SIGTERM grace wait
+/// widened the window for the recorded pid to be reaped and recycled, so a stale
+/// `Alive` from the grace poll must not authorize a SIGKILL. A pid that now reads
+/// `Dead` (our incarnation gone — including one recycled to *another*
+/// firecracker/jailer, caught by the starttime mismatch) is reaped, never
+/// SIGKILLed; an `Unknown` is left indeterminate. Mirrors the identity gate the
+/// SIGTERM path applies before *its* signal.
 #[cfg(unix)]
 fn sigkill_and_confirm(pid: u32, starttime: Option<u64>) -> KillSignalOutcome {
     use std::time::Instant;
 
+    match room::probe(Some(pid), starttime) {
+        room::Liveness::Dead => return KillSignalOutcome::Signaled,
+        room::Liveness::Unknown => return KillSignalOutcome::Indeterminate,
+        room::Liveness::Alive => {}
+    }
     send_signal(pid, "KILL");
     match poll_until_dead(pid, starttime, Instant::now() + Duration::from_secs(1)) {
         room::Liveness::Dead => KillSignalOutcome::Signaled,
