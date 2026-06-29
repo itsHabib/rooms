@@ -124,6 +124,15 @@ enum Command {
         /// Reap only this room id (still only if it's orphaned-dead).
         id: Option<String>,
     },
+    /// Terminate a live room: signal its firecracker, then reap. A dead or
+    /// unknown-liveness id is a safe no-op (an already-dead room is `gc`'s job).
+    Kill {
+        /// The room id to kill.
+        id: String,
+        /// Emit structured JSON output (schema'd; logs stay on stderr).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Which runner backend drives the guest command.
@@ -257,6 +266,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
         Command::Diff { from, json } => diff_changeset(&from, json).await,
         Command::Ls { json } => list_rooms_cmd(json, &config),
         Command::Gc { dry_run, id } => gc_cmd(dry_run, id, &config),
+        Command::Kill { id, json } => kill_cmd(&id, json, &config),
     }
 }
 
@@ -864,6 +874,44 @@ fn render_gc_empty(only: Option<&str>) {
     eprintln!("no room with id {id} (already gone?)");
 }
 
+fn kill_cmd(id: &str, json: bool, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(%id, "rooms kill");
+    let report = registry::kill(config, id)?;
+    // Exit code is the script-composition contract (like gc/diff): 0 killed or
+    // already-dead no-op, 1 the kill couldn't complete (survived / reap leak), 2
+    // refused (indeterminate liveness).
+    let code = report.exit_code();
+    if json {
+        render_kill_json(&report)?;
+        return Ok(code);
+    }
+    render_kill_human(&report, id);
+    Ok(code)
+}
+
+// stdout is the documented data surface for `rooms kill --json` (logs stay on
+// stderr), mirroring `rooms ls --json` / `rooms diff --json`.
+#[allow(
+    clippy::print_stdout,
+    reason = "machine-readable kill output; stdout is the documented contract"
+)]
+fn render_kill_json(report: &registry::KillReport) -> Result<(), RoomsError> {
+    let out =
+        serde_json::to_string_pretty(report).map_err(|e| RoomsError::Internal(e.to_string()))?;
+    println!("{out}");
+    Ok(())
+}
+
+// `rooms kill` is an action like `gc`: the per-room outcome line goes to stderr;
+// stdout is reserved for `--json`. Single-id kill yields 0 or 1 outcome.
+fn render_kill_human(report: &registry::KillReport, id: &str) {
+    let Some(outcome) = report.outcomes.first() else {
+        eprintln!("no room with id {id} (already gone?)");
+        return;
+    };
+    eprintln!("{}  {}", outcome.id, outcome.reason);
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1213,6 +1261,25 @@ mod tests {
             }
             other => panic!("expected Gc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn kill_verb_parses_id_and_requires_it() {
+        let id = "01abcdefghijklmnopqrstuvwx";
+        let cli =
+            Cli::try_parse_from(["rooms", "kill", id, "--json"]).expect("kill <id> --json parses");
+        match cli.command {
+            Command::Kill { id: got, json } => {
+                assert_eq!(got, id);
+                assert!(json);
+            }
+            other => panic!("expected Kill, got {other:?}"),
+        }
+        // id is required: bare `rooms kill` must fail to parse.
+        assert!(
+            Cli::try_parse_from(["rooms", "kill"]).is_err(),
+            "kill requires an id"
+        );
     }
 
     #[test]

@@ -976,6 +976,105 @@ fn kill_child_gracefully(pid: Option<u32>, grace: Duration) {
     }
 }
 
+/// Outcome of an identity-guarded terminate — the `rooms kill` signal path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillSignalOutcome {
+    /// The process was alive and is now confirmed gone (we signaled it).
+    Signaled,
+    /// The recorded pid was already dead (or reused by a non-room process)
+    /// before any signal — nothing to kill; the caller proceeds to reap.
+    AlreadyExited,
+    /// Still the room's firecracker after SIGTERM + SIGKILL — the kill could not
+    /// complete. The caller must NOT reap (the process is still up).
+    Survived,
+    /// Liveness was indeterminate at signal time (unreadable `/proc`); refused to
+    /// signal. Never coerced to alive or dead.
+    Indeterminate,
+}
+
+/// Terminate a room's *live* firecracker by pid — the `rooms kill` signal path.
+///
+/// Re-checks process identity (`/proc/<pid>/stat` via [`room::probe`]) immediately
+/// before every signal so a reused pid is never hit: SIGTERM, poll identity to the
+/// grace deadline, then SIGKILL only while the pid is *still* the room's
+/// firecracker/jailer. A pid that has gone (or been reused
+/// by an unrelated process) reads `Dead` and stops the escalation; success
+/// requires a definitive `Dead` (an `Unknown` is never read as gone). Distinct
+/// from [`kill_child_gracefully`], which guards the Drop path — there we own the
+/// `Child`, so the pid stays at least a zombie and `kill -0` existence suffices;
+/// here the launching process may be gone, so the pid can be recycled and
+/// identity must gate each signal. The residual race — a pid reused by *another*
+/// firecracker/jailer in the sub-millisecond between the final probe and the
+/// syscall — is the irreducible TOCTOU floor without `pidfd`.
+#[must_use]
+pub fn terminate_by_identity(pid: u32, grace: Duration) -> KillSignalOutcome {
+    #[cfg(unix)]
+    {
+        use std::time::Instant;
+
+        match room::probe(Some(pid)) {
+            room::Liveness::Dead => return KillSignalOutcome::AlreadyExited,
+            room::Liveness::Unknown => return KillSignalOutcome::Indeterminate,
+            room::Liveness::Alive => {}
+        }
+        send_signal(pid, "TERM");
+        let grace = grace.min(Duration::from_secs(5));
+        match poll_until_dead(pid, Instant::now() + grace) {
+            room::Liveness::Dead => KillSignalOutcome::Signaled,
+            room::Liveness::Unknown => KillSignalOutcome::Indeterminate,
+            room::Liveness::Alive => sigkill_and_confirm(pid),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, grace);
+        KillSignalOutcome::Indeterminate
+    }
+}
+
+/// SIGKILL a still-alive room process, then confirm it died (by identity).
+#[cfg(unix)]
+fn sigkill_and_confirm(pid: u32) -> KillSignalOutcome {
+    use std::time::Instant;
+
+    send_signal(pid, "KILL");
+    match poll_until_dead(pid, Instant::now() + Duration::from_secs(1)) {
+        room::Liveness::Dead => KillSignalOutcome::Signaled,
+        room::Liveness::Alive => KillSignalOutcome::Survived,
+        room::Liveness::Unknown => KillSignalOutcome::Indeterminate,
+    }
+}
+
+/// Poll a pid's room-identity until it reads `Dead` or the deadline passes.
+///
+/// Returns the last observed liveness. `Unknown` keeps polling (fail-safe: a
+/// transient unreadable `/proc` is not "gone"); only a definitive `Dead` — or the
+/// deadline — ends the wait.
+#[cfg(unix)]
+fn poll_until_dead(pid: u32, deadline: std::time::Instant) -> room::Liveness {
+    use std::thread;
+    use std::time::Instant;
+
+    loop {
+        let live = room::probe(Some(pid));
+        if live == room::Liveness::Dead || Instant::now() >= deadline {
+            return live;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Send a signal to a pid via `kill(1)` (matches `kill_child_gracefully`'s style;
+/// best-effort — the identity re-probe, not this exit code, is the source of truth).
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: &str) {
+    use std::process::Command;
+
+    let _ = Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .output();
+}
+
 fn release_tap(tap_name: Option<&str>) {
     let Some(tap) = tap_name else { return };
 
@@ -1055,6 +1154,43 @@ mod tests {
     };
     use crate::config::RoomsConfig;
     use std::path::{Path, PathBuf};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_absent_pid_is_already_exited() {
+        use super::{terminate_by_identity, KillSignalOutcome};
+        use std::time::Duration;
+        // A pid that cannot exist (>= 2^22 on Linux) probes Dead before any
+        // signal → AlreadyExited, no signal sent.
+        assert_eq!(
+            terminate_by_identity(4_194_305, Duration::from_millis(200)),
+            KillSignalOutcome::AlreadyExited
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_never_signals_a_live_non_firecracker_pid() {
+        use super::{terminate_by_identity, KillSignalOutcome};
+        use std::time::Duration;
+        // The pid-reuse guard, end to end: a real, *live* process that isn't
+        // firecracker/jailer must read Dead by identity and return AlreadyExited
+        // WITHOUT being signaled — proving kill never hits a reused pid. The
+        // child must still be alive afterward.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let outcome = terminate_by_identity(child.id(), Duration::from_millis(200));
+        let still_alive = child.try_wait().expect("try_wait").is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(outcome, KillSignalOutcome::AlreadyExited);
+        assert!(
+            still_alive,
+            "a live non-firecracker pid must never be signaled"
+        );
+    }
 
     #[test]
     fn build_boot_args_overlay_init_only_when_readonly() {
