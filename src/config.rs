@@ -28,6 +28,11 @@ pub struct RoomsConfig {
     /// Overriding it (e.g. to a tempdir) redirects every room path — the seam
     /// that makes the registry hermetically testable.
     pub state_base: Option<PathBuf>,
+    /// Base directory holding the quickstart kernel + rootfs images
+    /// (default: `$HOME/rooms/images`). Overriding it (e.g. to a tempdir)
+    /// redirects the doctor's default image probes — the seam that makes the
+    /// sha-drift check hermetically testable, mirroring `state_base`.
+    pub images_base: Option<PathBuf>,
     /// Minimum supported Firecracker semver major.minor.
     pub min_firecracker_version: (u32, u32),
     /// Minimum rootfs image size in bytes.
@@ -55,6 +60,7 @@ impl Default for RoomsConfig {
             jailer_binary: PathBuf::from("jailer"),
             jailer_chroot_base: None,
             state_base: None,
+            images_base: None,
             min_firecracker_version: (1, 7),
             min_rootfs_bytes: 64 * 1024 * 1024,
         }
@@ -70,6 +76,16 @@ impl RoomsConfig {
             return Some(base.clone());
         }
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state/rooms"))
+    }
+
+    /// The directory holding the quickstart kernel + rootfs images. Honors
+    /// `images_base`, else `$HOME/rooms/images`. `None` only when neither is
+    /// set (HOME unset); callers map that to their own layer's behavior.
+    pub fn resolved_images_base(&self) -> Option<PathBuf> {
+        if let Some(base) = &self.images_base {
+            return Some(base.clone());
+        }
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("rooms/images"))
     }
 
     /// Per-room state dir: `<state_base>/<id>` — holds `firecracker.log` and

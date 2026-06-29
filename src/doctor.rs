@@ -54,7 +54,7 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
         check_firecracker_version(config),
         check_jailer(config),
         check_firecracker_user(),
-        check_jailer_file_access(image),
+        check_jailer_file_access(image, config),
         check_tap(),
         check_tap_openable(),
         check_kernel(image, config),
@@ -237,9 +237,12 @@ fn check_firecracker_user() -> CheckResult {
     }
 }
 
-// `image` is only consulted by the unix jail-access checks in this fn body.
-#[cfg_attr(not(unix), allow(unused_variables, reason = "image used only on unix"))]
-fn check_jailer_file_access(image: Option<&Path>) -> CheckResult {
+// `image`/`config` are only consulted by the unix jail-access checks in this body.
+#[cfg_attr(
+    not(unix),
+    allow(unused_variables, reason = "image/config used only on unix")
+)]
+fn check_jailer_file_access(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
     let name = "jailer_file_access".to_owned();
     #[cfg(unix)]
     {
@@ -251,8 +254,8 @@ fn check_jailer_file_access(image: Option<&Path>) -> CheckResult {
             };
         };
 
-        let kernel = resolve_kernel_path(image);
-        let rootfs = image.map_or_else(default_rootfs_path, Path::to_path_buf);
+        let kernel = resolve_kernel_path(image, config);
+        let rootfs = image.map_or_else(|| default_rootfs_path(config), Path::to_path_buf);
 
         let mut failures = Vec::new();
         if let Some(path) = kernel {
@@ -454,9 +457,9 @@ const fn version_meets_min(major: u32, minor: u32, min: (u32, u32)) -> bool {
     major > min.0 || (major == min.0 && minor >= min.1)
 }
 
-fn check_kernel(image: Option<&Path>, _config: &RoomsConfig) -> CheckResult {
+fn check_kernel(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
     let name = "kernel".to_owned();
-    let Some(path) = resolve_kernel_path(image) else {
+    let Some(path) = resolve_kernel_path(image, config) else {
         return CheckResult {
             name,
             ok: false,
@@ -482,7 +485,7 @@ fn check_kernel(image: Option<&Path>, _config: &RoomsConfig) -> CheckResult {
 
 fn check_rootfs(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
     let name = "rootfs".to_owned();
-    let path = image.map_or_else(default_rootfs_path, Path::to_path_buf);
+    let path = image.map_or_else(|| default_rootfs_path(config), Path::to_path_buf);
 
     match validate_rootfs(&path, config.min_rootfs_bytes) {
         Ok(()) => CheckResult {
@@ -609,17 +612,18 @@ fn check_nested_virt() -> CheckResult {
     }
 }
 
-fn resolve_kernel_path(image: Option<&Path>) -> Option<PathBuf> {
+fn resolve_kernel_path(image: Option<&Path>, config: &RoomsConfig) -> Option<PathBuf> {
     if let Some(img) = image {
         return kernel_sibling(img);
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join("rooms/images/vmlinux.bin"))
+    Some(config.resolved_images_base()?.join("vmlinux.bin"))
 }
 
-fn default_rootfs_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/tmp"));
-    PathBuf::from(home).join("rooms/images/rootfs.ext4")
+fn default_rootfs_path(config: &RoomsConfig) -> PathBuf {
+    config
+        .resolved_images_base()
+        .unwrap_or_else(|| PathBuf::from("/tmp/rooms/images"))
+        .join("rootfs.ext4")
 }
 
 fn parse_checksums(content: &str) -> HashMap<String, String> {
@@ -670,14 +674,14 @@ fn drift_target_path(
     match artifact {
         "firecracker-v1.10.1-x86_64" => resolve_in_path(&config.firecracker_binary),
         // jailer installs alongside firecracker (setup-rooms-host.sh) and is a
-        // security-boundary binary, so cover its pin too. It is not in
-        // RoomsConfig, so resolve the conventional name on PATH.
-        "jailer-v1.10.1-x86_64" => resolve_in_path(Path::new("jailer")),
-        "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
+        // security-boundary binary, so cover its pin too — resolved through the
+        // same config seam as firecracker.
+        "jailer-v1.10.1-x86_64" => resolve_in_path(&config.jailer_binary),
+        "vmlinux-6.1.155.bin" => resolve_kernel_path(image, config),
         // The bionic pin only applies to the quickstart download at its default
         // path — never to an arbitrary --image, which may be a built agent
         // rootfs that legitimately differs from the bionic digest.
-        "bionic.rootfs.ext4" => Some(default_rootfs_path()),
+        "bionic.rootfs.ext4" => Some(default_rootfs_path(config)),
         _ => None,
     }
 }
@@ -805,8 +809,14 @@ mod tests {
 
     #[test]
     fn sha_drift_reports_ok_when_no_artifacts_present() {
+        // Point every drift target at an empty tempdir so the "no artifacts
+        // present" precondition holds regardless of host state — a rooms-host
+        // with real firecracker/jailer/kernel installs must not leak in.
+        let dir = tempfile::tempdir().expect("tempdir");
         let config = RoomsConfig {
-            firecracker_binary: PathBuf::from("/nonexistent/firecracker"),
+            firecracker_binary: dir.path().join("firecracker"),
+            jailer_binary: dir.path().join("jailer"),
+            images_base: Some(dir.path().to_path_buf()),
             ..RoomsConfig::default()
         };
         let result = check_sha_drift(&config, None);
@@ -856,7 +866,7 @@ mod tests {
         );
         assert_eq!(
             target,
-            Some(default_rootfs_path()),
+            Some(default_rootfs_path(&config)),
             "bionic pin must resolve to the default quickstart rootfs path"
         );
     }
