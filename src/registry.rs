@@ -542,7 +542,9 @@ mod tests {
 
         let report = gc(&config, &GcOptions::default()).unwrap(); // must NOT be Err
 
-        std::fs::set_permissions(&stuck_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Best-effort restore: under a root runner the lock didn't hold, so the
+        // jail dir was already reaped and this path no longer exists — don't panic.
+        let _ = std::fs::set_permissions(&stuck_root, std::fs::Permissions::from_mode(0o700));
 
         // The healthy orphan is reaped regardless of the stuck one -> no abort.
         let healthy_out = report
