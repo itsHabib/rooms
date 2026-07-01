@@ -13,7 +13,7 @@ Live state — what's shipped, what's in flight, and what's next — lives in do
 <!-- BEGIN dev-workbench (managed by /dev-workbench skill — re-run to refresh; hand-edits inside this block will be overwritten) -->
 ## Dev workbench
 
-Several MCP servers + skills are available in any Claude session on this machine. Same shape across every repo in the portfolio — refresh with `/dev-workbench` when the canonical set evolves.
+Several MCP servers + skills are available in any Claude session on this machine. Same shape across every repo in the portfolio — refresh with `/dev-workbench` when the canonical set evolves. Stuck on a *knowledge* question about another portfolio repo — how it behaves, its conventions, what's in flight there — `/consult` its steward instead of asking the operator; only *authority* questions (direction, spend, irreversible calls) go to the operator.
 
 ### dossier — project memory plane
 
@@ -121,6 +121,14 @@ Produces a 4-section update: What happened / What's next / What I recommend / Wh
 
 **Pair with:** `/shipped` for the retrospective. `/status` is mid-session; `/shipped` is post-landing.
 
+### `/consult` — summon a sibling repo's steward
+
+Summons another portfolio repo's steward (an ephemeral subagent scoped to that repo) for a same-turn answer; knowledge questions go to a peer, authority questions to the operator. Read-only, no side effects.
+
+**Triggers:** "ask the ship agent", "what does the dossier steward think", "consult <repo> about X", explicit `/consult <repo> "<question>"`.
+
+**Pair with:** the stuck path — reach for it mid-task before escalating to the operator.
+
 ### `/worktree-*` — manage secondary git worktrees
 
 Thin skill family over plain `git worktree`. Use these instead of an MCP — the verbs that mattered (add, list, remove, transfer, where) cover the common cases without an external state store. Convention in this repo: feature branches use `prod-<slug>` prefix; worktrees live at `.claude/worktrees/<branch>/`.
@@ -162,7 +170,7 @@ Thin skill family over plain `git worktree`. Use these instead of an MCP — the
 
 ### Why this shape
 
-Each layer swappable, seams deliberate. dossier could be Linear; ship could be a different agent runner; `/worktree-*` could be hand-rolled `git worktree` calls; playwright is one MCP among many that might serve a given browser task. The canonical set is what worked in this portfolio's actual day-to-day — substituting one tier doesn't ripple into the others, which is the value of the shape.
+Each layer swappable, seams deliberate. dossier could be Linear; ship could be a different agent runner; `/worktree-*` could be hand-rolled `git worktree` calls; playwright is one MCP among many that might serve a given browser task. The canonical set is what worked in this portfolio's actual day-to-day — substituting one tier doesn't ripple into the others, which is the value of the shape. `/consult` owns the stuck path: peer knowledge before operator attention.
 <!-- END dev-workbench -->
 
 ## Architecture
