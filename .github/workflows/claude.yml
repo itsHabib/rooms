@@ -28,7 +28,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          # Full history: the action's tag-mode diff (git hash-object) needs
+          # PR-branch blobs that a depth-1 checkout of main lacks, so a shallow
+          # fetch kills @claude review on any PR that adds files.
+          fetch-depth: 0
 
       - name: Run Claude Code
         id: claude
