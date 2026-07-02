@@ -15,7 +15,7 @@ rooms boots exactly **one networked room at a time**. The host side is a single 
 
 **Non-goals (this TDD):**
 - **No in-rooms scheduler or queue.** rooms is mechanism; scheduling is the consumer's policy. When the pool is full, `rooms run` fails fast with a distinct exit code — ship's driver already owns dispatch/backpressure and is the right home for "wait and retry."
-- **No snapshots/fork** — sequenced after the pool (own TDD); this design only avoids painting it into a corner (a restored room re-attaches to a *new* slot; the slot abstraction must not assume the guest negotiated its IP at boot).
+- **No snapshots/fork** — sequenced after the pool (own TDD). But this design must not *foreclose* it, and one correction from review matters: a Firecracker snapshot freezes the guest's static `ip=`/gateway into the restored kernel state, so a restored room canNOT simply take a fresh arbitrary slot (wrong IP → black-holed guest). The forward-compat hook, cheap now and expensive to retrofit: `claim` accepts an **optional target index** so restore can request *the same slot's IP* (reserve-by-index), rather than first-free-only. P1 adds the optional arg; the reserve semantics are settled in the snapshots TDD. (The earlier "re-attaches to a new slot / must not assume the guest negotiated its IP at boot" framing was backwards — noted and corrected here.)
 - **No multi-host pooling, no port-forwarding/ingress, no persistent rooms** — vision non-goals unchanged.
 
 ## 2. Functional & non-functional requirements
@@ -63,12 +63,14 @@ rooms boots exactly **one networked room at a time**. The host side is a single 
 
 ## 4. Key decisions & trade-offs
 
-### D1 — IP layout: **/30 per slot carved from `172.16.0.0/24`** (not flat /24)
+### D1 — IP layout: **/30 per slot carved from `172.16.0.0/24`, slot 0 reserved for legacy** (not flat /24)
 
-Each slot k (0-based) owns the /30 at `172.16.0.(4k)/30`: gateway (host/tap side) `.4k+1`, guest `.4k+2`. 64 slots max — far above any realistic cap on one host.
+Pool slot k (1-based; **k=0 reserved**) owns the /30 at `172.16.0.(4k)/30`: gateway (host/tap side) `.4k+1`, guest `.4k+2`. So slot 1 = `tap-fc1` / gw `.5` / guest `.6`; 63 pool slots (k=1..63).
+
+**Why slot 0 is reserved:** the k=0 /30 would derive `tap-fc0` / gw `172.16.0.1` / guest `172.16.0.2` — **byte-for-byte the legacy shared-tap addresses** (`scripts/setup-tap.sh`: `tap-fc0`, host `172.16.0.1/24`, guest `172.16.0.2`), differing only in mask. During the P2 coexistence window (legacy `tap-fc0` path still alive alongside slotted rooms), a pool boot on slot 0 would collide on `ip tuntap add tap-fc0` (EEXIST) or duplicate-IP a live legacy guest. Reserving k=0 makes the two address spaces disjoint by construction; the allocator starts at k=1. Once the legacy path is removed (end of P2), k=0 *may* be reclaimed by a follow-up, but the default stays k≥1 to keep the invariant simple.
 
 - *Why not flat /24 (all guests `.2/.3/.4…` behind per-room taps):* per-room TAPs are separate L2 segments; one /24 spanning N host interfaces forces per-guest /32 host routes and proxy-ARP-ish hacks. A /30 per tap is the boring, well-trodden per-VM layout: the kernel routes each /30 to its tap with zero extra configuration.
-- *Cost:* guest netmask changes from `/24` to `/30` — `build_boot_args` currently bakes `255.255.255.0`; the netmask becomes a `NetworkConfig` field sourced from the slot. Legacy shared-tap boots keep working (slot 0's /30 ≠ today's addresses, so the migration is: pool rooms use slots; the old `tap-fc0`+`.2` path survives only until P2 lands, then `main.rs` always allocates).
+- *Cost:* guest netmask changes from `/24` to `/30` — `build_boot_args` currently bakes `255.255.255.0`; the netmask becomes a `NetworkConfig` field sourced from the slot (`prefix`; see §5 for the prefix→dotted-quad conversion `build_boot_args` needs).
 - *Supernet stays `172.16.0.0/24`* for NAT + firewall matching — one rule set for all slots (see D4).
 
 ### D2 — TAP lifecycle: **created by `rooms run` at boot, deleted at teardown** (not a pre-provisioned tap pool)
@@ -84,22 +86,36 @@ Claim = `create_new` (O_CREAT|O_EXCL) on `<state>/slots/<k>` containing the room
 
 - *Why not registry-scan-and-pick:* scan-then-claim is a TOCTOU window under concurrent boots; fixing it needs a lock anyway. The slot file *is* the lock, with no daemon and no flock lifetime subtleties across sudo/jailer process trees.
 - *Why not flock on a shared file:* advisory locks held across the room's multi-hour lifetime pin an fd in a process tree that jailer re-parents; a crash's lock release semantics get subtle. O_EXCL files have exactly the same crash-orphan story as rooms themselves — and gc already solves that story (see §7.3).
+- *Assumption (stated, doctor-checked):* `create_new`/O_EXCL is atomic **on a local filesystem** (the state base is `$HOME`-derived, currently local ext4). It is *not* reliably atomic over classic NFS/overlay; if the state base ever moves to a network share this guarantee breaks. Invariant: the `slots/` dir must be local — `doctor` adds a mount-type check (§6) so a misconfigured host fails loud rather than silently double-allocating.
 
 ### D4 — Firewall: **`ROOMS_FWD` chain + `tap-fc+` wildcard, O(1) rules**
 
-Installed once per host: `FORWARD -j ROOMS_FWD` (idempotent), and inside `ROOMS_FWD` the exact policy `setup-tap.sh` appends per-tap today, expressed once against the wildcard interface `tap-fc+` and the `172.16.0.0/24` supernet: RFC1918 DROPs (guest→LAN), guest→out ACCEPT, established return ACCEPT. NAT: one `POSTROUTING -s 172.16.0.0/24 -o <out> -j MASQUERADE`.
+Installed once per host: **`-I FORWARD 1 -j ROOMS_FWD`** (inserted at position 1, not appended — iptables is first-match, so appending lets a pre-existing broad `FORWARD ACCEPT` from Docker/tailscale/a permissive default policy preempt the isolation; the jump must run before anything else can accept a guest packet). Inside `ROOMS_FWD`, the policy expressed once and **source/dest-qualified by the `172.16.0.0/24` supernet** (not by interface name alone — see below): RFC1918 DROPs (guest→LAN), the guest→guest isolation DROP (`-s 172.16.0.0/24 -d 172.16.0.0/24`), guest→out ACCEPT, and the established-return ACCEPT **keeping its `-i <out_iface>` ingress scope** (an interface-agnostic ESTABLISHED,RELATED accept would let a conntrack-helper expectation carry a sibling→sibling packet past the isolation DROP). The chain ends with a **self-terminating `-s 172.16.0.0/24 -j DROP` tail** so rooms traffic can never fall through to whatever FORWARD policy lives below the jump. NAT: one `POSTROUTING -s 172.16.0.0/24 -o <out> -j MASQUERADE` (the `-s` supernet bound is also what keeps the `tap-fc+` wildcard from ever forwarding a non-rooms interface's traffic).
 
 - *Why:* today's script appends 5 rules per tap into the global FORWARD; at N taps that's 5N rules interleaved with whatever else lives there, and teardown has to string-match them back out. A named chain owned by rooms is inspectable (`iptables -L ROOMS_FWD`), survives N without growing, and `--host` teardown is "flush + delete one chain."
 - *Guest→guest isolation for free:* add one `tap-fc+ → tap-fc+`-shaped DROP (src+dst both in supernet) so parallel agent runs can't reach each other — this falls out of the chain design and closes a hole the single-room world never had. **This line is why the pool needs the adversarial review pass** (parallel rooms = new lateral-movement surface).
 
 ### D5 — Cap + full-pool semantics: **`--max-pool` (default 8), fail-fast, no queue**
 
-Allocator tries slots 0..min(cap, 64); all claimed → exit with a distinct code + `pool full: <cap> rooms live` (and a `--json` error kind). Ship's driver treats it like any dispatch failure and retries on its own schedule.
+Allocator tries slots 1..=min(effective_cap, 63); all claimed → exit **4** + `error_kind: "pool_full"` (§6). Ship's driver treats it like any dispatch failure and retries on its own schedule.
 
-- *Why 8:* the Hyper-V rooms-host has modest cores/RAM; 8 × (1 vCPU + 512 MB-ish) rooms is already generous. It's a knob, not a constant.
+- **Cap is a host fact, not a per-caller flag.** `slots/` is host-global, so if each `rooms run` read its ceiling only from its own `--max-pool`, two concurrent drivers would disagree on "full" — one idles capacity while the other blows past the ceiling the cap exists to protect. So the source of truth is a **host cap** (a host config value; default 8), and `--max-pool <n>` / `ROOMS_MAX_POOL` can only *lower* it for a given invocation: `effective_cap = min(flag_or_env ?? host_cap, host_cap, 63)`. The resource ceiling is a *mechanism* concern (how many microVMs this box will admit) — it is not scheduling/queue/backpressure policy, which stays in the driver.
+- **Two axes, both surfaced.** The `63` is the addressing ceiling (the /24 carve minus reserved slot 0); the host cap is the resource ceiling. `--max-pool > 63` is rejected at parse time with a message naming the /24 origin, so raising the default (§10 Q1) can't silently clamp.
+- *Why 8:* the Hyper-V rooms-host has modest cores/RAM; 8 × (1 vCPU + 512 MB-ish) rooms is already generous. A knob, not a constant.
 - *Why no queue:* a queue in rooms duplicates scheduling state the driver already owns, and a CLI that blocks indefinitely holding a sudo is operationally worse than one that says "full, come back."
 
 ## 5. Data model
+
+**Room id — minted before the claim.** Today `RoomId::new`/`as_str` are private to `firecracker` and the id is generated *inside* `boot`. The pool moves id minting up into `main.rs` **before** `slot::claim`, so the same id value is the slot-file contents, the room dir name, and `room.json.id` — one identity threaded through all three. Without this, §7.1 would "write the room id" at a point where no id exists yet, and reconcile would have nothing stable to key on. (`RoomId::new` + `as_str` become `pub(crate)`.)
+
+**Slot file** `<state>/slots/<k>` carries its **own liveness token**, not just the room id — because at claim time the room dir may not exist yet, so the registry can't yet vouch for the claimer. Contents (two lines, written in the single O_EXCL create+write):
+
+```
+<room_id>
+<claimer_pid> <claimer_starttime>     # /proc/<pid>/stat field 22, the same identity tuple room::probe uses
+```
+
+The token lets reconcile decide liveness from the slot file *alone*, before any room.json exists. An empty/short/unparseable slot file (crash between the O_EXCL create and the write) is the explicit **claim-in-progress** state → skip, never reclaim (see §7.3).
 
 **`room.json`** (registry) gains one optional object — additive, schema-compatible; absent = legacy shared-tap room:
 
@@ -107,20 +123,20 @@ Allocator tries slots 0..min(cap, 64); all claimed → exit with a distinct code
 "slot": { "index": 3, "tap": "tap-fc3", "gateway": "172.16.0.13", "guest": "172.16.0.14", "prefix": 30 }
 ```
 
-**Slot file** `<state>/slots/<k>`: single line, the room id. Created O_EXCL at claim; removed at free. Orphan story in §7.3.
-
-**`NetworkConfig`** gains `netmask_prefix` (today implied /24); constructed from the slot instead of literals in `main.rs`.
+**`NetworkConfig`** gains `prefix: u8` (today implied /24). `build_boot_args` interpolates a **dotted-quad** netmask into the kernel `ip=` cmdline, so the pool adds a `prefix → dotted-quad` conversion (`30 → 255.255.255.252`) at the `NetworkConfig`→boot-args boundary — name it so P1/P2 don't rediscover it.
 
 No migrations: old rooms without `slot` are display-blank in `ls` and reap exactly as today (`tap_owned=false` → shared tap untouched).
 
 ## 6. API contract
 
 ```
-rooms run …existing flags… [--max-pool <n>]     # n defaults 8; env ROOMS_MAX_POOL
+rooms run …existing flags… [--max-pool <n>]     # per-invocation ceiling; effective cap = min(n, host cap, 63)
 rooms ls [--json]                               # + slot column / field
-rooms doctor [--json]                           # + checks: ROOMS_FWD installed, slots/ writable,
+rooms doctor [--json]                           # + checks: ROOMS_FWD installed AND matches the allocator supernet
+                                                #   (version/supernet marker rule, not existence-only);
+                                                #   slots/ present + local-fs + writable;
                                                 #   orphaned taps (tap-fc<k> with no live room)
-setup-tap.sh --host                             # idempotent host-once install (chain, NAT, sysctls)
+setup-tap.sh --host                             # idempotent host-once install (chain, NAT, sysctls, marker rule)
 setup-tap.sh --host --teardown                  # flush + remove chain, restore recorded sysctls
 ```
 
@@ -128,31 +144,45 @@ setup-tap.sh --host --teardown                  # flush + remove chain, restore 
 
 ```rust
 pub struct Slot { pub index: u8, pub tap: String, pub gateway: Ipv4Addr, pub guest: Ipv4Addr, pub prefix: u8 }
-pub fn claim(state: &Path, room_id: &str, cap: u8) -> Result<Slot, SlotError>   // O_EXCL walk 0..cap
-pub fn free(state: &Path, slot_index: u8) -> Result<(), SlotError>              // idempotent
-pub fn reconcile(state: &Path, live: &[RoomRow]) -> Vec<Reclaimed>              // gc hook: slot files ∖ live rooms
+pub struct Claimer { pub pid: u32, pub starttime: u64 }   // /proc/<pid>/stat identity, mirrors room::probe
+// claim mints nothing — the caller passes the pre-minted room id (§5) and its own identity.
+pub fn claim(state: &Path, room_id: &str, me: Claimer, cap: u8) -> Result<Slot, SlotError>  // O_EXCL walk 1..=cap
+pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Freed, SlotError>  // compare-and-delete
+pub fn reconcile(state: &Path, registry: &Registry) -> Vec<Reclaimed>   // gc/doctor hook; liveness from slot token
 ```
 
-**Errors:** `SlotError::PoolFull { cap }` (distinct exit code), `SlotError::Io`. Pool-full must be distinguishable from boot failure by ship's runner without string-matching.
+**`free` is compare-and-delete**, not blind remove: it deletes the tap + slot file **only if** the slot file still names `expected_room_id`. A mismatch means index k was already reclaimed and reassigned to another room → `free` leaves it untouched and returns `Freed::AlreadyReassigned` (mirrors the existing `terminate_by_identity` pid guard — never act on a reused identity). This closes the ABA teardown where a stale `room.json` drives `ip link del tap-fc<k>` against a *live* room that reused the index.
+
+**Errors / exit codes.** `SlotError::PoolFull { cap }`, `SlotError::Io`. Today every `RoomsError` maps to **exit 2** and guest command codes pass through `0..255` (lane-escape already owns **3**), so PoolFull needs its own reserved code the guest can't emit as a normal status: **reserve exit 4 for pool-full**, and `main.rs` must branch `PoolFull` *ahead* of the generic `Err → 2` arm. Because guest-code overlap can't be fully eliminated by an exit code alone, `rooms run --json` **also** emits a terminal record with `error_kind: "pool_full"` — ship's runner keys on that field, not on the code or a string. (Satisfies the §2 NFR "distinguishable without string-matching," which the first draft asserted but never delivered.)
 
 ## 7. Key flows
 
 ### 7.1 Boot (the changed path)
 
-1. `rooms run` → `slot::claim` walks k = 0..cap: `create_new(slots/<k>)` → first success wins; all `AlreadyExists` → `PoolFull`.
+0. `main.rs` mints the room id (§5) — before anything else, so id is available to the claim.
+1. `slot::claim(id, me, cap)` walks k = 1..=cap: for each, `create_new(slots/<k>)` then write `<id>\n<my_pid> <my_starttime>` — first success wins; all `AlreadyExists` → `PoolFull`. (k=0 is never walked — reserved for legacy, §4 D1.)
 2. Build `NetworkConfig` from the slot; `ip tuntap add <tap> … user firecracker`, `ip addr add <gw>/30`, `ip link set <tap> up`, per-tap forwarding sysctl.
-3. `RoomGuard::set_tap_owned(true)`; write `slot` into `room.json` **before** the firecracker spawn (so a crash between claim and boot is reconcilable — the slot file names a room id whose room.json exists and whose liveness probe says dead → gc reclaims).
-4. Boot proceeds exactly as today with the slot's cmdline IP args (netmask from `prefix`).
+3. `RoomGuard::set_tap_owned(true)`; write `slot` into `room.json` before the firecracker spawn.
+4. Boot proceeds with the slot's cmdline IP args (netmask = `prefix`→dotted-quad).
 
-Failure at any step ≤ 3 unwinds in reverse (tap delete if created, slot free) via the existing guard — no new cleanup mechanism, the guard grows two steps.
+The slot file's own liveness token (step 1) is what makes every pre-`room.json` window reconcilable: even if the process dies before step 3 writes `room.json`, reconcile can probe the recorded claimer identity and reclaim once it's confirmed dead — it does not depend on the room dir existing. Failure at any step ≥ 2 unwinds in reverse (tap delete if created, then `slot::free(k, id)`) via the existing guard — the guard grows two steps.
 
 ### 7.2 Teardown / kill / gc (the freeing path)
 
-Guard cleanup (normal exit), `kill` (signal + reap), and `gc` (orphan reap) all converge on `reap_orphan`; it grows: if `room.json` has a slot → delete the tap (`ip link del`, tolerate already-gone), then `slot::free`. Order matters — tap first, slot file last, so a crash mid-reap leaves the slot file as the breadcrumb and the next `gc` retries (freeing is idempotent).
+Guard cleanup (normal exit), `kill` (signal + reap), and `gc` (orphan reap) all converge on `reap_orphan`. It grows: **gate the slot release on `reap_orphan` returning `Ok(())`** — if reap preserved the room dir (e.g. the stranded-mount case `cleanup_sync` already handles), the slot stays claimed so a later retry, not a premature free, handles it. On clean reap: delete the tap (`ip link del`, tolerate already-gone), then `slot::free(k, this_room_id)` — **compare-and-delete** (§6): free only fires if `slots/<k>` still names *this* room. If it names another id, index k was already reclaimed and reassigned → leave it (returns `AlreadyReassigned`). Order is tap-then-slot-file so a crash mid-reap leaves the slot file as the breadcrumb; the compare-and-delete guard makes the retry safe even if the index churned in between.
 
 ### 7.3 Leak reclamation (the flow that keeps the pool honest)
 
-A slot leaks when its claimer died between claim and room.json write, or a reap crashed mid-way. `gc` (and `doctor` read-only) runs `slot::reconcile`: for each `slots/<k>`, resolve the recorded room id against the registry — room absent, or present-and-dead → reclaim (delete any matching `tap-fc<k>`, remove the slot file). A slot whose room is **live** is never touched (symmetry with gc's confirmed-dead invariant). Rooms' pid-identity probe (from the kill work) is the liveness authority, so a reused pid can't make a dead room look alive.
+A slot leaks when its claimer died before `room.json` was written, or a reap crashed mid-way. `gc` (acting) and `doctor` (read-only) run `slot::reconcile`, which decides **from the slot file's own token**, not from the room dir's presence:
+
+- **Empty / short / unparseable slot file** → *claim-in-progress* (crashed between O_EXCL create and the token write). **Skip** — never reclaim; a later `gc` re-checks. (A truly stuck one is caught by a generous age threshold + the claimer probe below, not by racing it.)
+- **Token present** → probe the recorded `(pid, starttime)` with the same identity check `room::probe`/`terminate_by_identity` use:
+  - claimer **confirmed dead** → reclaim: `ip link del tap-fc<k>` (tolerate gone), remove the slot file, **and remove/tombstone the room dir if one exists** so a single corpse can't drive two frees (the ABA source). 
+  - claimer **alive**, or liveness **Unknown/indeterminate** → **skip** (never reclaim a live or unprovable room — symmetry with gc's confirmed-dead-only invariant).
+
+This replaces the first draft's "room absent, or present-and-dead → reclaim", which was wrong two ways: a room *dir without `room.json`* classified Unknown and was reclaimed by neither reconcile nor gc (slot wedged forever), and reclaiming on mere `room.json` *absence* raced a still-booting room into double-allocation (the slot file legitimately exists before the room dir during jail staging). Keying on the slot's own claimer token closes both.
+
+### 7.4 Concurrent boot (what P3 proves)
 
 ### 7.4 Concurrent boot (what P3 proves)
 
@@ -161,7 +191,7 @@ N `rooms run` invocations race: claims serialize on the filesystem, taps are per
 ## 8. Concurrency / consistency / failure model
 
 - **Claim race:** filesystem O_EXCL is the serialization point; no retry loop needed beyond the k-walk. Two racers on the last slot: one `PoolFull`, one winner — property-tested with threads in P1.
-- **Crash windows:** every window leaves either (a) a slot file naming a dead/absent room → `reconcile` reclaims, or (b) an orphaned tap with no slot file → doctor flags, gc's tap sweep (taps matching `tap-fc<k>` with no live room) deletes. There is no window that requires a human.
+- **Crash windows:** enumerated against the slot file's own liveness token (§5, §7.3), so none needs a human. (i) between O_EXCL create and token write → *claim-in-progress* file → reconcile skips, retries later. (ii) after token write, before `room.json` → reconcile probes the claimer identity, reclaims once confirmed dead (does not need the room dir). (iii) mid-reap → gate on `reap_orphan Ok(())` keeps the slot claimed if the room dir was preserved; the compare-and-delete `free` makes the retry safe even if index k churned. (iv) orphaned tap with no slot file → doctor flags, gc's tap sweep (a `tap-fc<k>` with no live room) deletes. The one thing that must hold: reclaim removes/tombstones the room dir, so a single corpse can never drive two frees against a reused index.
 - **Sudo/process-tree:** claim/free run in the pre-jailer parent (same privilege as today's boot path); nothing inside the guest or jailed child touches slot state.
 - **Degraded mode:** ROOMS_FWD missing (host not set up) → boot fails at the doctor-precheck with the exact `setup-tap.sh --host` remediation, before a slot is claimed.
 
@@ -184,7 +214,11 @@ Post-gate (NOT this TDD, tracked in `02-operational-layer`): snapshots+fork (own
 1. **Default cap value** — 8 is a guess at the Hyper-V host's comfort; the P3 e2e should measure real memory/CPU at N=3 and inform the default. (Not blocking: it's a knob.)
 2. **`kill --all`** — plan part 1 stretch; with the pool it becomes "drain." Worth folding into P3 or leaving for receipts-era? Leaning: leave out; `ls --json | xargs kill` composes.
 3. **Doctor's orphan-tap sweep vs gc's** — read-only flag in doctor + acting sweep in gc, or both in gc only? Leaning doctor-flags/gc-acts (doctor never mutates).
-4. **Snapshot re-attach contract** — restored room gets a *fresh* slot; does the guest's frozen IP config need in-guest re-negotiation, or does Firecracker's restored NIC simply sit on the new tap with the old IP (requiring the slot's IP to be *reserved* for restore)? Flagged now so the pool doesn't foreclose either answer; settled in the snapshots TDD.
+4. **Snapshot re-attach contract** — the guest's IP is boot-frozen into the restored kernel (§2), so restore needs the slot's IP *reserved by index*, not a fresh one. P1 lands the optional-target-index hook on `claim`; the full reserve/versioning/re-point semantics (and whether a receipt records the slot index) are settled in the snapshots TDD. Open only in *degree*, not direction.
+
+## Changelog
+
+- **2026-07-01 (v2, pre-merge):** applied the adversarial-pass verdict (MERGE-WITH-EDITS). Six load-bearing corrections: reserved slot 0 to end the legacy-alias collision (D1); slot file carries its own claimer liveness token so pre-`room.json` windows are reconcilable and the wedge/double-alloc pair is closed (§5, §7.3, §8); `free`/reap is compare-and-delete gated on `reap_orphan Ok(())`, killing the ABA teardown of a reused index (§6, §7.2); room id minted before claim (§5, §7.1); PoolFull reserves exit 4 + a `--json` `error_kind` field (§6); `-I FORWARD 1` + self-terminating supernet DROP + kept ingress scope so isolation can't be preempted or bypassed (D4). Folded to tasks: host-fact cap coherence (D5), the two-axis ceiling, prefix→dotted-quad conversion point, doctor supernet-match check. Original decisions D1–D5 unchanged.
 
 ## 11. Validation plan
 
