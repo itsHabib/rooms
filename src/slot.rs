@@ -67,6 +67,11 @@ pub fn claim(
     cap: u8,
     target: Option<u8>,
 ) -> Result<Slot, SlotError> {
+    // Validate before create_dir_all — an invalid index must reject without
+    // touching (or failing on) the state tree.
+    if let Some(index) = target {
+        ensure_pool_index(index)?;
+    }
     let dir = state.join(SLOTS_DIR);
     std::fs::create_dir_all(&dir)?;
     if let Some(index) = target {
@@ -82,9 +87,9 @@ pub fn claim(
     Err(SlotError::PoolFull { cap })
 }
 
-/// Attempt exactly one requested index (reserve-by-index).
+/// Attempt exactly one requested index (reserve-by-index; the caller has
+/// already validated it).
 fn claim_target(dir: &Path, room_id: &str, me: Claimer, index: u8) -> Result<Slot, SlotError> {
-    ensure_pool_index(index)?;
     if try_claim(dir, index, room_id, me)? {
         return Ok(derive(index));
     }
@@ -579,6 +584,15 @@ mod tests {
                 "free of index {bad} must be rejected"
             );
         }
+        // Rejection happens before any filesystem work — nothing was created.
+        assert!(
+            !dir.path().join(SLOTS_DIR).exists(),
+            "an invalid index must not create the slots dir"
+        );
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "an invalid index must leave the state base untouched"
+        );
     }
 
     #[test]
