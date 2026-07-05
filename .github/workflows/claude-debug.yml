@@ -1,13 +1,14 @@
 name: Claude Debug
 
 # Throwaway diagnostic: reproduce the @claude SDK turn-1 error in isolation.
-# push-triggered so it runs from THIS branch's definition (comment/review
-# triggers run from the default branch, which we can't edit for a test).
-# prompt-mode so no PR/comment context is needed; show_full_output surfaces
-# the real SDK error the tag-mode reviewer hides. Delete this branch when done.
+# pull_request-triggered so it runs from THIS branch's definition WITH secrets
+# (same-repo PRs get them; comment/review triggers run from the default branch,
+# which we can't edit for a test — and the action rejects `push`).
+# prompt-mode so no @claude context is needed; show_full_output surfaces the
+# real SDK error the tag-mode reviewer hides. Delete this branch when done.
 on:
-  push:
-    branches: [ci-claude-debug]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
   debug:
