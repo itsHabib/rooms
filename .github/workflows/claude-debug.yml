@@ -1,0 +1,27 @@
+name: Claude Debug
+
+# Throwaway diagnostic: reproduce the @claude SDK turn-1 error in isolation.
+# push-triggered so it runs from THIS branch's definition (comment/review
+# triggers run from the default branch, which we can't edit for a test).
+# prompt-mode so no PR/comment context is needed; show_full_output surfaces
+# the real SDK error the tag-mode reviewer hides. Delete this branch when done.
+on:
+  push:
+    branches: [ci-claude-debug]
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Claude Code (prompt mode, full output)
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: "Reply with exactly the single word: pong"
+          show_full_output: "true"
