@@ -8,9 +8,11 @@
 //!
 //! Allocation truth is the slot *file* `<state>/slots/<k>`: [`claim`] is an
 //! `O_CREAT|O_EXCL` create (the filesystem is the race arbiter — two racers on
-//! one index get exactly one winner, no daemon, no flock), [`free`] is a
-//! compare-and-delete, and each file carries its claimer's own liveness token
-//! so [`reconcile`] can judge a leaked slot before any `room.json` exists.
+//! one index get exactly one winner, no daemon, no lock held over a room's
+//! lifetime), [`free`] is a compare-and-delete whose verify+unlink runs under
+//! a short-lived free-lock, and each file carries its claimer's own liveness
+//! token so [`reconcile`] can judge a leaked slot before any `room.json`
+//! exists.
 //! `O_EXCL` is atomic on a local filesystem only — not reliably over NFS — so
 //! the state base must stay local (doctor enforces this once gc wiring lands).
 
@@ -26,6 +28,11 @@ pub use crate::room::Slot;
 
 /// Directory under the state base holding one lock file per claimed slot.
 pub const SLOTS_DIR: &str = "slots";
+
+/// The free-lock file beside the slots dir, serializing every verify+unlink
+/// critical section ([`free`] and [`reconcile`]'s removal). Claims never take
+/// it — `O_EXCL` creation cannot overwrite anyone.
+const FREE_LOCK: &str = "slots.lock";
 
 /// Highest claimable pool slot index: the /24 carve yields 64 /30s, minus the
 /// reserved slot 0.
@@ -65,7 +72,9 @@ pub fn claim(
     if let Some(index) = target {
         return claim_target(&dir, room_id, me, index);
     }
-    for index in 1..=cap.min(MAX_SLOT) {
+    // The error reports the effective cap — the pool size actually walked.
+    let cap = cap.min(MAX_SLOT);
+    for index in 1..=cap {
         if try_claim(&dir, index, room_id, me)? {
             return Ok(derive(index));
         }
@@ -100,11 +109,43 @@ fn try_claim(dir: &Path, index: u8, room_id: &str, me: Claimer) -> Result<bool, 
     let mut file = match open {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        // Windows reports ACCESS_DENIED for a create racing a delete-pending
+        // file (a slot mid-free), where unix reports the file as existing.
+        // Production hosts are Linux; on the Windows dev/CI platform treat it
+        // as a lost race — never a claim failure — so racing tests hold there.
+        #[cfg(windows)]
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
         Err(e) => return Err(SlotError::Io(e)),
     };
     let token = format!("{room_id}\n{} {}\n", me.pid, me.starttime);
-    file.write_all(token.as_bytes())?;
+    if let Err(e) = file.write_all(token.as_bytes()) {
+        // We exclusively created this file and no token committed, so removing
+        // it robs no one — and leaving it would wedge the index as
+        // claim-in-progress forever after a transient failure (ENOSPC).
+        drop(file);
+        if let Err(rm) = std::fs::remove_file(&path) {
+            warn!(index, error = %rm, "could not remove half-claimed slot file");
+        }
+        return Err(SlotError::Io(e));
+    }
     Ok(true)
+}
+
+/// Take the exclusive free-lock, released when the returned handle drops.
+///
+/// Held only across a verify+unlink critical section — milliseconds, never a
+/// room's lifetime — so the crash story stays the OS's: an exiting process
+/// releases it. Without this lock, two frees of the same room can interleave
+/// with a fresh claim of the index and unlink the *new* room's file, robbing
+/// a live claim and re-opening double allocation.
+fn lock_frees(state: &Path) -> Result<std::fs::File, SlotError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(state.join(FREE_LOCK))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Derive slot k's network identity: the /30 at `172.16.0.4k`. Callers
@@ -139,6 +180,7 @@ pub enum Freed {
 /// (the same never-act-on-a-reused-identity rule as `terminate_by_identity`).
 pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Freed, SlotError> {
     let path = state.join(SLOTS_DIR).join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Freed::AlreadyFree),
@@ -208,7 +250,13 @@ fn slot_index_of(name: &std::ffi::OsStr) -> Option<u8> {
 
 /// Judge one slot file; `Some` only for a confirmed-dead claimer.
 fn reconcile_slot(state: &Path, path: &Path, index: u8) -> Option<Reclaimed> {
-    let contents = std::fs::read_to_string(path).ok()?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) => {
+            warn!(index, error = %e, "cannot read slot file; skipping");
+            return None;
+        }
+    };
     let SlotToken::Claimed {
         room_id,
         pid,
@@ -228,15 +276,38 @@ fn reconcile_slot(state: &Path, path: &Path, index: u8) -> Option<Reclaimed> {
             removed: false,
         });
     }
-    if let Err(e) = std::fs::remove_file(path) {
-        warn!(index, error = %e, "cannot remove leaked slot file; leaving for the next pass");
-        return None;
-    }
-    Some(Reclaimed {
+    remove_if_unchanged(state, path, &contents, index).then_some(Reclaimed {
         index,
         room_id,
         removed: true,
     })
+}
+
+/// Unlink a leaked slot file, but only if it still holds `expected` — under
+/// the free-lock, and re-verified there, so the index churning (freed and
+/// re-claimed by a live room) between this pass's read and its unlink can
+/// never unlink the new claim.
+fn remove_if_unchanged(state: &Path, path: &Path, expected: &str, index: u8) -> bool {
+    let removed = (|| -> Result<bool, SlotError> {
+        let _lock = lock_frees(state)?;
+        let now = match std::fs::read_to_string(path) {
+            Ok(now) => now,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(SlotError::Io(e)),
+        };
+        if now != expected {
+            return Ok(false);
+        }
+        std::fs::remove_file(path)?;
+        Ok(true)
+    })();
+    match removed {
+        Ok(removed) => removed,
+        Err(e) => {
+            warn!(index, error = %e, "cannot remove leaked slot file; leaving for the next pass");
+            false
+        }
+    }
 }
 
 /// A slot file's parsed contents.
@@ -344,6 +415,7 @@ mod tests {
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
+        clippy::panic,
         clippy::indexing_slicing,
         reason = "test module"
     )]
@@ -434,7 +506,10 @@ mod tests {
             claim(dir.path(), &room_id(n), ME, u8::MAX, None).unwrap();
         }
         let full = claim(dir.path(), &room_id(999), ME, u8::MAX, None);
-        assert!(matches!(full, Err(SlotError::PoolFull { .. })));
+        assert!(
+            matches!(full, Err(SlotError::PoolFull { cap: MAX_SLOT })),
+            "PoolFull must report the effective (clamped) cap, got {full:?}"
+        );
         assert!(!slot_path(dir.path(), 64).exists(), "no claim past 63");
     }
 
@@ -722,7 +797,7 @@ mod tests {
     }
 
     mod race {
-        use super::super::{claim, Claimer, SlotError};
+        use super::super::{claim, free, Claimer, Freed, SlotError};
         use super::room_id;
         use proptest::prelude::*;
         use std::sync::{Arc, Barrier};
@@ -807,6 +882,63 @@ mod tests {
                     std::fs::read_to_string(super::slot_path(dir.path(), index)).unwrap();
                 let winner_id = room_id(winner);
                 prop_assert_eq!(contents.lines().next(), Some(winner_id.as_str()));
+            }
+
+            // The robbed-claim regression: T stale frees of a dead room race
+            // one claimer re-taking the same index. The free-lock's
+            // verify+unlink must never unlink the NEW room's file — exactly
+            // one free removes the old claim, and the re-claimer's file
+            // survives every straggler.
+            #[test]
+            fn concurrent_frees_never_rob_a_fresh_claim(freers in 2u8..=6) {
+                let dir = tempfile::tempdir().unwrap();
+                let state = dir.path().to_path_buf();
+                let old = room_id(1);
+                let me = Claimer { pid: 1, starttime: 1 };
+                claim(&state, &old, me, 8, Some(1)).unwrap();
+
+                let barrier = Arc::new(Barrier::new(usize::from(freers) + 1));
+                let mut threads = Vec::with_capacity(usize::from(freers));
+                for _ in 0..freers {
+                    let state = state.clone();
+                    let old = old.clone();
+                    let barrier = Arc::clone(&barrier);
+                    threads.push(std::thread::spawn(move || {
+                        barrier.wait();
+                        free(&state, 1, &old)
+                    }));
+                }
+                let claimer = {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let me = Claimer { pid: 2, starttime: 2 };
+                        barrier.wait();
+                        loop {
+                            match claim(&state, &room_id(2), me, 8, Some(1)) {
+                                Ok(slot) => return slot,
+                                Err(SlotError::TargetTaken { .. }) => std::thread::yield_now(),
+                                Err(e) => panic!("unexpected claim error: {e}"),
+                            }
+                        }
+                    })
+                };
+                let freed: Vec<Freed> = threads
+                    .into_iter()
+                    .map(|t| t.join().expect("freer panicked").unwrap())
+                    .collect();
+                let slot = claimer.join().expect("claimer panicked");
+                prop_assert_eq!(slot.index, 1);
+
+                let removed = freed.iter().filter(|f| matches!(f, Freed::Removed)).count();
+                prop_assert_eq!(removed, 1, "exactly one free removes the old claim");
+                let contents =
+                    std::fs::read_to_string(super::slot_path(dir.path(), 1)).unwrap();
+                let new_id = room_id(2);
+                prop_assert_eq!(
+                    contents.lines().next(),
+                    Some(new_id.as_str()),
+                    "the re-claimer's file must survive every stale free"
+                );
             }
         }
     }
