@@ -263,9 +263,16 @@ pub fn reconcile(state: &Path) -> Vec<Reclaimed> {
 }
 
 /// Parse a `slots/` file name as a claimable index; `None` for strays
-/// (`0`, `64`, temp files) — never touched.
+/// (`0`, `64`, temp files) — never touched. Only the canonical spelling the
+/// allocator writes counts: `u8::parse` also accepts `"01"` / `"+1"`, and
+/// attributing such a stray to index 1 would report a false reclaim against
+/// the real `slots/1`.
 fn slot_index_of(name: &std::ffi::OsStr) -> Option<u8> {
-    let index: u8 = name.to_str()?.parse().ok()?;
+    let name = name.to_str()?;
+    let index: u8 = name.parse().ok()?;
+    if name != index.to_string() {
+        return None;
+    }
     (1..=MAX_SLOT).contains(&index).then_some(index)
 }
 
@@ -677,12 +684,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(SLOTS_DIR)).unwrap();
         let token = format!("{}\n4194305 1\n", room_id(1));
-        for stray in ["0", "64", "999", "abc", ".tmp"] {
+        // "01" / "+1" / " 1" parse as 1 through u8::parse — only the canonical
+        // spelling the allocator writes may be attributed to a slot.
+        let strays = ["0", "64", "999", "abc", ".tmp", "01", "+1", " 1"];
+        for stray in strays {
             std::fs::write(dir.path().join(SLOTS_DIR).join(stray), &token).unwrap();
         }
         assert_eq!(reconcile(dir.path()), Vec::new());
-        for stray in ["0", "64", "999", "abc", ".tmp"] {
-            assert!(dir.path().join(SLOTS_DIR).join(stray).exists());
+        for stray in strays {
+            assert!(
+                dir.path().join(SLOTS_DIR).join(stray).exists(),
+                "stray {stray:?} must never be touched"
+            );
         }
     }
 
