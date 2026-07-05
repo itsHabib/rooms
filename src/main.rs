@@ -779,17 +779,22 @@ fn render_rooms_human(rooms: &[registry::RoomEntry]) {
         return;
     }
     println!(
-        "{:<26}  {:<13}  {:<7}  {:<8}  COMMAND",
-        "ID", "STATE", "PID", "AGE"
+        "{:<26}  {:<13}  {:<7}  {:<8}  {:<4}  COMMAND",
+        "ID", "STATE", "PID", "AGE", "SLOT"
     );
     for r in rooms {
         let pid = r.pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
+        let slot = r
+            .slot
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), |s| s.index.to_string());
         println!(
-            "{:<26}  {:<13}  {:<7}  {:<8}  {}",
+            "{:<26}  {:<13}  {:<7}  {:<8}  {:<4}  {}",
             r.id,
             r.state.label(),
             pid,
             format_age(r.started_at),
+            slot,
             truncate_label(r.label.as_deref(), 48),
         );
     }
