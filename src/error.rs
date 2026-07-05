@@ -40,10 +40,11 @@ pub enum SlotError {
     /// branch on it (fail-fast, no queue), never on an error string.
     #[error("pool full: all {cap} slots claimed")]
     PoolFull { cap: u8 },
-    /// A requested target index outside the claimable pool (0 is reserved for
-    /// the legacy shared tap; the /24 carve tops out at 63).
-    #[error("invalid target slot {index}: valid pool slots are 1..={max}")]
-    InvalidTarget { index: u8, max: u8 },
+    /// A slot index outside the claimable pool (0 is reserved for the legacy
+    /// shared tap; the /24 carve tops out at 63) — rejected before any
+    /// filesystem work, on the claim-target and free paths alike.
+    #[error("invalid slot index {index}: valid pool slots are 1..={max}")]
+    InvalidIndex { index: u8, max: u8 },
     /// A requested target index is already claimed by another room.
     #[error("target slot {index} already claimed")]
     TargetTaken { index: u8 },

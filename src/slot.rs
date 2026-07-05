@@ -84,16 +84,24 @@ pub fn claim(
 
 /// Attempt exactly one requested index (reserve-by-index).
 fn claim_target(dir: &Path, room_id: &str, me: Claimer, index: u8) -> Result<Slot, SlotError> {
-    if index == 0 || index > MAX_SLOT {
-        return Err(SlotError::InvalidTarget {
-            index,
-            max: MAX_SLOT,
-        });
-    }
+    ensure_pool_index(index)?;
     if try_claim(dir, index, room_id, me)? {
         return Ok(derive(index));
     }
     Err(SlotError::TargetTaken { index })
+}
+
+/// Reject an index outside the claimable pool before any filesystem work —
+/// slot 0 (the legacy alias) and anything past the /24 carve are never valid
+/// operands, however a caller came by them (flag, stale `room.json`).
+const fn ensure_pool_index(index: u8) -> Result<(), SlotError> {
+    if index == 0 || index > MAX_SLOT {
+        return Err(SlotError::InvalidIndex {
+            index,
+            max: MAX_SLOT,
+        });
+    }
+    Ok(())
 }
 
 /// One `O_EXCL` attempt on `slots/<index>`. `Ok(false)` = lost the race (the
@@ -179,6 +187,7 @@ pub enum Freed {
 /// teardown against a reused index must not free a *live* sibling's slot
 /// (the same never-act-on-a-reused-identity rule as `terminate_by_identity`).
 pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Freed, SlotError> {
+    ensure_pool_index(slot_index)?;
     let path = state.join(SLOTS_DIR).join(slot_index.to_string());
     let _lock = lock_frees(state)?;
     let contents = match std::fs::read_to_string(&path) {
@@ -230,7 +239,14 @@ pub fn reconcile(state: &Path) -> Vec<Reclaimed> {
         }
     };
     let mut reclaimed = Vec::new();
-    for dirent in read_dir.flatten() {
+    for dirent in read_dir {
+        let dirent = match dirent {
+            Ok(dirent) => dirent,
+            Err(e) => {
+                warn!(error = %e, "unreadable slots dir entry; skipping");
+                continue;
+            }
+        };
         let Some(index) = slot_index_of(&dirent.file_name()) else {
             continue;
         };
@@ -547,13 +563,20 @@ mod tests {
     }
 
     #[test]
-    fn reserved_and_out_of_range_targets_are_rejected() {
+    fn reserved_and_out_of_range_indices_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         for bad in [0, MAX_SLOT + 1, u8::MAX] {
-            let res = claim(dir.path(), &room_id(1), ME, 8, Some(bad));
+            let claimed = claim(dir.path(), &room_id(1), ME, 8, Some(bad));
             assert!(
-                matches!(res, Err(SlotError::InvalidTarget { index, .. }) if index == bad),
+                matches!(claimed, Err(SlotError::InvalidIndex { index, .. }) if index == bad),
                 "target {bad} must be rejected"
+            );
+            // free guards the same bound — a corrupted room.json slot index
+            // must never drive filesystem work outside the pool.
+            let freed = free(dir.path(), bad, &room_id(1));
+            assert!(
+                matches!(freed, Err(SlotError::InvalidIndex { index, .. }) if index == bad),
+                "free of index {bad} must be rejected"
             );
         }
     }
