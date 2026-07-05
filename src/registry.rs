@@ -70,6 +70,8 @@ pub struct RoomEntry {
     pub pid_starttime: Option<u64>,
     pub started_at: Option<DateTime<Utc>>,
     pub keep: bool,
+    /// The room's claimed network slot; `None` for a legacy shared-tap room.
+    pub slot: Option<room::Slot>,
 }
 
 /// The `ls --json` payload (schema'd, like the doctor/diff reports).
@@ -161,6 +163,7 @@ fn entry_for(config: &RoomsConfig, id: &str) -> RoomEntry {
         pid_starttime,
         started_at: meta.as_ref().map(|m| m.started_at),
         keep,
+        slot: meta.and_then(|m| m.slot),
     }
 }
 
@@ -778,6 +781,28 @@ mod tests {
     }
 
     #[test]
+    fn list_carries_the_room_slot_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let slotted = make_room(&config, None, false, false);
+        let legacy = make_room(&config, None, false, false);
+        let room_dir = config.room_dir(&slotted).unwrap();
+        let mut meta = room::read(&room_dir).unwrap().unwrap();
+        meta.slot = Some(room::Slot {
+            index: 3,
+            tap: "tap-fc3".to_owned(),
+            gateway: std::net::Ipv4Addr::new(172, 16, 0, 13),
+            guest: std::net::Ipv4Addr::new(172, 16, 0, 14),
+            prefix: 30,
+        });
+        room::write_atomic(&room_dir, &meta).unwrap();
+        let rooms = list_rooms(&config).unwrap();
+        let entry = |id: &str| rooms.iter().find(|e| e.id == id).expect("listed");
+        assert_eq!(entry(&slotted).slot.as_ref().map(|s| s.index), Some(3));
+        assert_eq!(entry(&legacy).slot, None, "legacy rooms stay slotless");
+    }
+
+    #[test]
     fn meta_less_room_is_unknown_not_reaped() {
         let dir = tempfile::tempdir().unwrap();
         let config = config_with_base(dir.path());
@@ -880,6 +905,7 @@ mod tests {
             pid_starttime: None,
             started_at: Some(Utc::now()),
             keep: false,
+            slot: None,
         };
         let outcome = kill_live(&config, &entry).unwrap();
         assert_eq!(

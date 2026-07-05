@@ -9,6 +9,7 @@ pub mod registry;
 pub mod room;
 pub mod rootfs;
 pub mod runner;
+pub mod slot;
 pub mod transport;
 
 pub use config::RoomsConfig;

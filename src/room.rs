@@ -5,14 +5,16 @@
 //! exists"; `room.json` only *enriches* it with the pid, label, and age that
 //! `rooms ls` shows. A room with no (or unreadable) `room.json` still lists.
 
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Schema version for `room.json` (forward-compat, mirrors `result.json`). v2
-/// adds `pid_starttime`; v1 files still read (the field defaults to `None`).
-pub const ROOM_META_SCHEMA_VERSION: u32 = 2;
+/// adds `pid_starttime`; v3 adds the optional `slot` object. Older files still
+/// read (both fields default to `None`).
+pub const ROOM_META_SCHEMA_VERSION: u32 = 3;
 
 /// Metadata file name inside a room's state dir.
 pub const ROOM_META_FILE: &str = "room.json";
@@ -27,6 +29,25 @@ pub struct RoomDescriptor {
     pub command: Option<String>,
     /// Started with `--keep` (a deliberately-held room, not an in-flight run).
     pub keep: bool,
+}
+
+/// A room's claimed network slot, recorded in `room.json`.
+///
+/// The /30 carved for pool slot `index`, displayed by `rooms ls`. Absent = a
+/// legacy shared-tap room. Plain data — the allocation logic lives in
+/// [`crate::slot`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Slot {
+    /// Pool slot index k (1-based; 0 is reserved for the legacy shared tap).
+    pub index: u8,
+    /// Host tap device name (`tap-fc<k>`).
+    pub tap: String,
+    /// Host/gateway side of the slot's /30 (`172.16.0.4k+1`).
+    pub gateway: Ipv4Addr,
+    /// Guest side of the slot's /30 (`172.16.0.4k+2`).
+    pub guest: Ipv4Addr,
+    /// Network prefix length (30).
+    pub prefix: u8,
 }
 
 /// Persisted metadata for one room, written atomically at boot.
@@ -48,10 +69,16 @@ pub struct RoomMeta {
     pub pid_starttime: Option<u64>,
     /// Started with `--keep`.
     pub keep: bool,
+    /// The room's claimed network slot; `None` for a legacy shared-tap room
+    /// (or a pre-v3 `room.json`). Not serialized when absent, so legacy files
+    /// keep their exact shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<Slot>,
 }
 
 impl RoomMeta {
-    /// Build a v-current metadata record.
+    /// Build a v-current metadata record. The slot starts `None` — the boot
+    /// path that claims one sets the field before the atomic write.
     #[must_use]
     pub const fn new(
         id: String,
@@ -69,6 +96,7 @@ impl RoomMeta {
             pid,
             pid_starttime,
             keep,
+            slot: None,
         }
     }
 }
@@ -259,9 +287,10 @@ mod tests {
 
     use super::{
         classify_comm, classify_stat, classify_stat_with_identity, parse_starttime, probe, read,
-        write_atomic, Liveness, RoomMeta,
+        write_atomic, Liveness, RoomMeta, Slot,
     };
     use chrono::Utc;
+    use std::net::Ipv4Addr;
 
     fn sample(pid: Option<u32>) -> RoomMeta {
         RoomMeta::new(
@@ -281,6 +310,40 @@ mod tests {
         write_atomic(dir.path(), &meta).expect("write");
         let back = read(dir.path()).expect("read").expect("present");
         assert_eq!(meta, back);
+    }
+
+    #[test]
+    fn meta_round_trips_with_slot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut meta = sample(Some(42));
+        meta.slot = Some(Slot {
+            index: 3,
+            tap: "tap-fc3".to_owned(),
+            gateway: Ipv4Addr::new(172, 16, 0, 13),
+            guest: Ipv4Addr::new(172, 16, 0, 14),
+            prefix: 30,
+        });
+        write_atomic(dir.path(), &meta).expect("write");
+        let back = read(dir.path()).expect("read").expect("present");
+        assert_eq!(meta, back);
+    }
+
+    #[test]
+    fn slotless_meta_serializes_without_a_slot_key() {
+        // Legacy rooms must keep their exact file shape: no `"slot": null`.
+        let json = serde_json::to_string(&sample(None)).expect("serialize");
+        assert!(!json.contains("slot"), "absent slot must not serialize");
+    }
+
+    #[test]
+    fn v2_meta_without_slot_still_reads() {
+        // A pre-v3 room.json (no slot field) must still deserialize, with the
+        // field defaulting to None (a legacy shared-tap room) — back-compat.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let v2 = r#"{"schema_version":2,"id":"01abcdefghijklmnopqrstuvwx","label":null,"started_at":"2026-06-28T00:00:00Z","pid":42,"pid_starttime":7,"keep":false}"#;
+        std::fs::write(dir.path().join("room.json"), v2).expect("write v2");
+        let back = read(dir.path()).expect("read").expect("present");
+        assert_eq!(back.slot, None);
     }
 
     #[test]
