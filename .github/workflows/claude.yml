@@ -38,5 +38,11 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Pin an explicit model id. The action installs the latest Claude Code
+          # each run and otherwise uses the CLI's default model; that default
+          # drifted to an id the OAuth-subscription token can't reach, so the SDK
+          # errored on turn 1 and the reviewer posted only a stub. Pin the id
+          # (not the `sonnet` alias, which can re-resolve to the broken default).
+          claude_args: "--model claude-sonnet-4-6"
           additional_permissions: |
             actions: read
