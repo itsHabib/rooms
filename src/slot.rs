@@ -593,7 +593,7 @@ mod tests {
             Claimer { pid, starttime }
         }
 
-        /// A pid that cannot exist on Linux (> PID_MAX_LIMIT) — confirmed dead.
+        /// A pid that cannot exist on Linux (> `PID_MAX_LIMIT`) — confirmed dead.
         const DEAD: Claimer = Claimer {
             pid: 4_194_305,
             starttime: 1,
