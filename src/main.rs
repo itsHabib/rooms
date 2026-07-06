@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
 use rooms::{
     artifacts, config::RoomsConfig, doctor, error::RoomsError, firecracker, registry, room, rootfs,
-    runner,
+    runner, slot,
 };
 use tracing::{info, warn};
 
@@ -324,34 +324,69 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
 
-    let network = firecracker::NetworkConfig {
-        tap_name: "tap-fc0".to_owned(),
-        guest_ip: "172.16.0.2".to_owned(),
-        gateway_ip: "172.16.0.1".to_owned(),
-        netmask: "255.255.255.0".to_owned(),
-    };
+    // Degraded-mode precheck: the host firewall chain must be installed before
+    // we claim a slot, so a mis-provisioned host fails fast with the exact
+    // remediation rather than booting a room that can't be isolated. Fail-open
+    // on an unprobeable host (no iptables / not root) — the boot's own root/KVM
+    // checks own those errors.
+    if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
+        return Err(RoomsError::Internal(remediation));
+    }
+
+    // Every room path derives from the state base; resolve it once up front.
+    let state_base = config.resolved_state_base().ok_or_else(|| {
+        RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
+    })?;
+    // Resolve every host-side input that can fail BEFORE claiming a slot: a
+    // missing --task file, a bad key path, or other input error must fail fast
+    // without leaking a claim — repeated, that would exhaust the pool until a
+    // `rooms gc`. After the claim, only boot can fail, and its guard frees the
+    // slot.
     let key = key_path()?;
-    // Resolve the post-boot action before booting so a missing --task file (or
-    // other host-side input error) fails fast without spending a microVM boot.
     let action = resolve_action(&args).await?;
     // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
     // untrusted code) or when the operator opts in with --readonly-rootfs; a
     // plain `rooms run --command` otherwise keeps a writable rootfs so any
     // image — including ones without /sbin/overlay-init — still boots.
     let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
+
+    // Mint the room id BEFORE the claim, so the one value is the slot-file
+    // contents, the room dir name, and room.json.id. Then claim a pool slot and
+    // derive the guest network from it.
+    let room_id = firecracker::mint_room_id();
+    let me = slot::Claimer::current().ok_or_else(|| {
+        RoomsError::Internal("cannot read this process's identity for the slot claim".to_owned())
+    })?;
+    let claimed = slot::claim(&state_base, &room_id, me, slot::DEFAULT_MAX_POOL, None)?;
+    let network = firecracker::NetworkConfig {
+        tap_name: claimed.tap.clone(),
+        guest_ip: claimed.guest.to_string(),
+        gateway_ip: claimed.gateway.to_string(),
+        prefix: claimed.prefix,
+    };
     let descriptor = room::RoomDescriptor {
         command: Some(room_label(&action)),
         keep: args.keep,
     };
-    let mut vm = firecracker::boot(
-        &kernel,
-        &args.image,
-        Some(&network),
-        config,
+    let boot_req = firecracker::BootRequest {
+        kernel: &kernel,
+        rootfs: &args.image,
+        network: Some(&network),
+        slot: Some(&claimed),
+        room_id: &room_id,
         readonly_rootfs,
-        &descriptor,
-    )
-    .await?;
+        descriptor: &descriptor,
+    };
+    let mut vm = match firecracker::boot(&boot_req, config).await {
+        Ok(vm) => vm,
+        Err(e) => {
+            // boot's guard frees the slot when it got far enough to take
+            // ownership; this covers an early failure before that. Compare-and-
+            // delete makes the double-free safe (AlreadyFree / AlreadyReassigned).
+            let _ = slot::free(&state_base, claimed.index, &room_id);
+            return Err(e.into());
+        }
+    };
 
     if args.keep {
         vm.guard_mut().set_suppress_cleanup(true);

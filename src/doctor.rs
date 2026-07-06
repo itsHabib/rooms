@@ -25,6 +25,103 @@ const DRIFT_ARTIFACTS: &[&str] = &[
 /// Schema version for `--json` output (ED-4: forward-compatible).
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
 
+/// The rooms-owned FORWARD sub-chain.
+pub const ROOMS_FWD_CHAIN: &str = "ROOMS_FWD";
+
+/// The allocator supernet every slot's /30 is carved from — the value doctor
+/// checks the chain is scoped to, not mere chain existence.
+pub const ROOMS_SUPERNET: &str = "172.16.0.0/24";
+
+/// Marker comment `setup-tap.sh --host` stamps into `ROOMS_FWD`, embedding the
+/// chain version + supernet so doctor keys on a version/supernet match rather
+/// than existence alone.
+pub const ROOMS_FWD_MARKER: &str = "rooms:fwd:v1:172.16.0.0/24";
+
+/// Whether the host's `ROOMS_FWD` chain could be read, and if so whether it
+/// matches the allocator supernet marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomsFwdStatus {
+    /// Chain present and the version/supernet marker matches.
+    Installed,
+    /// Chain absent, or present without the current marker (version/supernet
+    /// drift). Boot must not proceed.
+    Missing,
+    /// Could not read the chain (no `iptables`, or insufficient privilege) — a
+    /// fail-open state: the caller defers to its own root/privilege checks.
+    Unprobeable,
+}
+
+/// Boot-time degraded-mode precheck: the host firewall chain must be installed
+/// before a slot is claimed.
+///
+/// `Err(remediation)` only when the chain is *confirmed* missing; an unprobeable
+/// host (non-root, no `iptables`) returns `Ok(())` so the boot's own root/KVM
+/// checks surface those errors.
+pub fn ensure_rooms_fwd_installed() -> Result<(), String> {
+    match rooms_fwd_status() {
+        RoomsFwdStatus::Installed | RoomsFwdStatus::Unprobeable => Ok(()),
+        RoomsFwdStatus::Missing => Err(format!(
+            "{ROOMS_FWD_CHAIN} chain not installed (or supernet drift); run `sudo bash scripts/setup-tap.sh --host` before booting a room"
+        )),
+    }
+}
+
+/// Probe the `ROOMS_FWD` chain, distinguishing a confirmed-missing chain from an
+/// unreadable one (permission / no iptables) so callers never conflate "not set
+/// up" with "run me as root".
+#[must_use]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::missing_const_for_fn,
+        reason = "non-unix body is const-trivial; the unix body shells out to iptables"
+    )
+)]
+pub fn rooms_fwd_status() -> RoomsFwdStatus {
+    #[cfg(unix)]
+    {
+        let output = Command::new("iptables")
+            .args(["-S", ROOMS_FWD_CHAIN])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                classify_rooms_fwd_dump(&String::from_utf8_lossy(&out.stdout))
+            }
+            Ok(out) => {
+                // A missing chain exits non-zero with "No chain/target/match by
+                // that name"; a privilege failure ("Permission denied ...") is
+                // unprobeable, not a confirmed-missing chain.
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("No chain") {
+                    RoomsFwdStatus::Missing
+                } else {
+                    RoomsFwdStatus::Unprobeable
+                }
+            }
+            // iptables not installed / not on PATH.
+            Err(_) => RoomsFwdStatus::Unprobeable,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        RoomsFwdStatus::Unprobeable
+    }
+}
+
+/// Classify an `iptables -S ROOMS_FWD` dump.
+///
+/// `Installed` iff it carries the current version/supernet marker (chain exists
+/// but without it → drift → `Missing`). Pure, so it's unit-testable without
+/// iptables.
+#[must_use]
+pub fn classify_rooms_fwd_dump(dump: &str) -> RoomsFwdStatus {
+    if dump.contains(ROOMS_FWD_MARKER) {
+        RoomsFwdStatus::Installed
+    } else {
+        RoomsFwdStatus::Missing
+    }
+}
+
 /// Outcome of a single doctor check.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckResult {
@@ -55,8 +152,10 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
         check_jailer(config),
         check_firecracker_user(),
         check_jailer_file_access(image),
-        check_tap(),
-        check_tap_openable(),
+        check_tun_device(),
+        check_rooms_fwd(),
+        check_slots_dir(config),
+        check_orphaned_taps(config),
         check_kernel(image, config),
         check_rootfs(image, config),
         check_anthropic_api_key(),
@@ -347,8 +446,12 @@ fn current_primary_gid(uid: u32) -> u32 {
     parse_getent_passwd(&String::from_utf8_lossy(&out.stdout)).map_or(u32::MAX, |(_uid, gid)| gid)
 }
 
-fn check_tap_openable() -> CheckResult {
-    let name = "tap_openable".to_owned();
+/// The `/dev/net/tun` device firecracker opens at boot to create each slot's
+/// tap. The per-slot model has no persistent `tap-fc0` to probe — tap creation
+/// happens in the boot path — so the standing precondition is just that the
+/// firecracker user can open `/dev/net/tun`.
+fn check_tun_device() -> CheckResult {
+    let name = "tun_device".to_owned();
     #[cfg(unix)]
     {
         let Some(uid) = firecracker_uid() else {
@@ -358,7 +461,6 @@ fn check_tap_openable() -> CheckResult {
                 message: format!("cannot verify TAP access: {FIRECRACKER_USER} user missing"),
             };
         };
-
         let tun = Path::new("/dev/net/tun");
         if !tun.exists() {
             return CheckResult {
@@ -368,53 +470,21 @@ fn check_tap_openable() -> CheckResult {
                     .to_owned(),
             };
         }
-
         if !path_readable_by_uid(tun, uid) {
             return CheckResult {
                 name,
                 ok: false,
                 message: format!(
-                    "{FIRECRACKER_USER} cannot open /dev/net/tun; recreate TAP with scripts/setup-tap.sh"
+                    "{FIRECRACKER_USER} cannot open /dev/net/tun; check its permissions"
                 ),
             };
         }
-
-        let show = Command::new("ip")
-            .args(["tuntap", "show", "tap-fc0"])
-            .output();
-        match show {
-            Ok(out) if out.status.success() => {
-                let line = String::from_utf8_lossy(&out.stdout);
-                if tap_owned_by_user(&line, FIRECRACKER_USER) {
-                    CheckResult {
-                        name,
-                        ok: true,
-                        message: format!("tap-fc0 exists and is owned by {FIRECRACKER_USER}"),
-                    }
-                } else {
-                    CheckResult {
-                        name,
-                        ok: false,
-                        message: format!(
-                            "tap-fc0 is not owned by {FIRECRACKER_USER}; run sudo bash scripts/setup-tap.sh"
-                        ),
-                    }
-                }
-            }
-            Ok(out) => CheckResult {
-                name,
-                ok: false,
-                message: format!(
-                    "tap-fc0 not found (ip link exit {}: {}); run `sudo bash scripts/setup-tap.sh`",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            },
-            Err(e) => CheckResult {
-                name,
-                ok: false,
-                message: format!("could not run `ip link show tap-fc0`: {e}"),
-            },
+        CheckResult {
+            name,
+            ok: true,
+            message: format!(
+                "/dev/net/tun present and openable by {FIRECRACKER_USER} (per-slot taps created at boot)"
+            ),
         }
     }
     #[cfg(not(unix))]
@@ -422,18 +492,9 @@ fn check_tap_openable() -> CheckResult {
         CheckResult {
             name,
             ok: false,
-            message: "TAP openability checks require a Unix host".to_owned(),
+            message: "TAP checks require a Unix host".to_owned(),
         }
     }
-}
-
-/// Returns true when `ip tuntap show` output assigns the TAP to `user`.
-pub fn tap_owned_by_user(tuntap_output: &str, user: &str) -> bool {
-    tuntap_output
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair.first() == Some(&"user") && pair.get(1) == Some(&user))
 }
 
 fn parse_firecracker_version(output: &str) -> Option<(u32, u32)> {
@@ -514,55 +575,217 @@ fn check_anthropic_api_key() -> CheckResult {
     }
 }
 
-fn check_tap() -> CheckResult {
-    let name = "tap".to_owned();
+fn check_rooms_fwd() -> CheckResult {
+    let name = "rooms_fwd".to_owned();
+    match rooms_fwd_status() {
+        RoomsFwdStatus::Installed => CheckResult {
+            name,
+            ok: true,
+            message: format!("{ROOMS_FWD_CHAIN} installed and scoped to {ROOMS_SUPERNET}"),
+        },
+        RoomsFwdStatus::Missing => CheckResult {
+            name,
+            ok: false,
+            message: format!(
+                "{ROOMS_FWD_CHAIN} not installed or supernet drift; run `sudo bash scripts/setup-tap.sh --host`"
+            ),
+        },
+        // Non-root / no iptables: warn (ok) rather than fail — a non-privileged
+        // `rooms doctor` can't read the FORWARD table.
+        RoomsFwdStatus::Unprobeable => CheckResult {
+            name,
+            ok: true,
+            message: format!(
+                "warn: could not read {ROOMS_FWD_CHAIN} (need root?); re-run `sudo rooms doctor` to verify the chain"
+            ),
+        },
+    }
+}
+
+fn check_slots_dir(config: &RoomsConfig) -> CheckResult {
+    let name = "slots_dir".to_owned();
+    let Some(slots) = config.slots_dir() else {
+        return CheckResult {
+            name,
+            ok: false,
+            message: "HOME unset; cannot locate the slots dir".to_owned(),
+        };
+    };
+    // `O_EXCL` slot claims need a local, writable filesystem. Probe writability
+    // at the nearest existing ancestor — the slots dir is created lazily on
+    // first claim, so its absence is fine as long as the parent accepts a file.
+    let probe = nearest_existing_dir(&slots);
+    match probe {
+        Some(dir) if dir_is_writable(&dir) => CheckResult {
+            name,
+            ok: true,
+            message: format!(
+                "slots dir {} is writable (ensure the state base is a local fs, not NFS)",
+                slots.display()
+            ),
+        },
+        Some(dir) => CheckResult {
+            name,
+            ok: false,
+            message: format!(
+                "slots dir {} not writable ({} rejected a probe file); O_EXCL slot claims will fail",
+                slots.display(),
+                dir.display()
+            ),
+        },
+        None => CheckResult {
+            name,
+            ok: false,
+            message: format!(
+                "no existing ancestor of {} to write slot claims into",
+                slots.display()
+            ),
+        },
+    }
+}
+
+fn check_orphaned_taps(config: &RoomsConfig) -> CheckResult {
+    let name = "orphaned_taps".to_owned();
+    let orphans = orphaned_pool_taps(config);
+    if orphans.is_empty() {
+        return CheckResult {
+            name,
+            ok: true,
+            message: "no orphaned pool taps".to_owned(),
+        };
+    }
+    let list = orphans
+        .iter()
+        .map(|k| format!("tap-fc{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    CheckResult {
+        name,
+        ok: true,
+        message: format!("warn: orphaned tap(s) with no live slot: {list}; `rooms gc` sweeps them"),
+    }
+}
+
+/// Pool taps (`tap-fc<k>`, k≥1) present on the host with no claimed slot file.
+///
+/// The true orphans a boot-path or reconcile crash can strand (a slot file
+/// removed, then its tap-delete failed). Empty on a non-unix host or when `ip
+/// link show` can't be read. Shared by `doctor` (which flags them) and
+/// `registry::gc` (which sweeps them), so the two never disagree.
+#[must_use]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::missing_const_for_fn,
+        reason = "non-unix body is const-trivial; the unix body shells out to ip"
+    )
+)]
+pub fn orphaned_pool_taps(config: &RoomsConfig) -> Vec<u8> {
     #[cfg(unix)]
     {
-        // Verifies the runtime prerequisites without needing CAP_NET_ADMIN:
-        // firecracker opens the existing `tap-fc0` via `/dev/net/tun` at boot;
-        // tap creation is `scripts/setup-tap.sh`'s job, not the probe's.
-        let tun = Path::new("/dev/net/tun");
-        if !tun.exists() {
-            return CheckResult {
-                name,
-                ok: false,
-                message: "/dev/net/tun missing; load the tun kernel module (sudo modprobe tun)"
-                    .to_owned(),
-            };
+        let claimed = claimed_slot_indices(config);
+        let Ok(out) = Command::new("ip").args(["-o", "link", "show"]).output() else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
         }
-        let show = Command::new("ip")
-            .args(["link", "show", "tap-fc0"])
-            .output();
-        match show {
-            Ok(out) if out.status.success() => CheckResult {
-                name,
-                ok: true,
-                message: "/dev/net/tun present and tap-fc0 exists".to_owned(),
-            },
-            Ok(out) => CheckResult {
-                name,
-                ok: false,
-                message: format!(
-                    "tap-fc0 not found (ip link exit {}: {}); run `sudo bash scripts/setup-tap.sh`",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            },
-            Err(e) => CheckResult {
-                name,
-                ok: false,
-                message: format!("could not run `ip link show tap-fc0`: {e}"),
-            },
-        }
+        orphaned_tap_indices(&String::from_utf8_lossy(&out.stdout), &claimed)
     }
     #[cfg(not(unix))]
     {
-        CheckResult {
-            name,
-            ok: false,
-            message: "TAP checks require a Unix host".to_owned(),
+        let _ = config;
+        Vec::new()
+    }
+}
+
+/// The set of currently-claimed pool slot indices, read from the slots dir. An
+/// unresolvable / unreadable dir yields an empty set (best-effort).
+#[cfg(unix)]
+fn claimed_slot_indices(config: &RoomsConfig) -> std::collections::HashSet<u8> {
+    let mut set = std::collections::HashSet::new();
+    let Some(slots) = config.slots_dir() else {
+        return set;
+    };
+    let Ok(read_dir) = std::fs::read_dir(&slots) else {
+        return set;
+    };
+    for dirent in read_dir.flatten() {
+        if let Some(name) = dirent.file_name().to_str() {
+            if let Ok(index) = name.parse::<u8>() {
+                if name == index.to_string() {
+                    set.insert(index);
+                }
+            }
         }
     }
+    set
+}
+
+/// The nearest existing directory at or above `path`.
+fn nearest_existing_dir(path: &Path) -> Option<PathBuf> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p.is_dir() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
+}
+
+/// Whether `dir` accepts a probe file — the writability signal for slot claims.
+///
+/// The probe file is created then removed; a rename-free `O_EXCL` create is the
+/// operation slot claims actually use.
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(".rooms-doctor-write-probe");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A stray probe from a prior run — still proves writability.
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Parse `ip -o link show` output for `tap-fc<k>` devices (k ≥ 1) whose slot
+/// index is not in `claimed`, sorted ascending. Pure, so it's unit-testable
+/// without touching the host's links.
+#[must_use]
+pub fn orphaned_tap_indices<S: std::hash::BuildHasher>(
+    ip_link_output: &str,
+    claimed: &std::collections::HashSet<u8, S>,
+) -> Vec<u8> {
+    let mut orphans: Vec<u8> = ip_link_output
+        .lines()
+        .filter_map(parse_tap_index)
+        .filter(|k| !claimed.contains(k))
+        .collect();
+    orphans.sort_unstable();
+    orphans.dedup();
+    orphans
+}
+
+/// Extract a `tap-fc<k>` (k ≥ 1) slot index from one `ip -o link show` line.
+/// The device name is the second whitespace-colon token: `N: tap-fc3: <...>`.
+fn parse_tap_index(line: &str) -> Option<u8> {
+    let dev = line.split_whitespace().nth(1)?.trim_end_matches(':');
+    // `ip -o` sometimes suffixes `@if<n>` for linked devices; strip it.
+    let dev = dev.split('@').next()?;
+    let suffix = dev.strip_prefix("tap-fc")?;
+    let index: u8 = suffix.parse().ok()?;
+    // Slot 0 is the reserved legacy shared tap — never an orphan candidate.
+    (index >= 1).then_some(index)
 }
 
 fn check_nested_virt() -> CheckResult {
@@ -754,20 +977,52 @@ mod tests {
 
     use super::{
         check_sha_drift, default_rootfs_path, drift_target_path, parse_checksums,
-        parse_firecracker_version, tap_owned_by_user, version_meets_min, RoomsConfig,
+        parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
 
     #[test]
-    fn tap_owned_by_user_detects_tuntap_owner() {
-        assert!(tap_owned_by_user(
-            "tap-fc0: tap persist user firecracker\n",
-            "firecracker"
-        ));
-        assert!(!tap_owned_by_user(
-            "tap-fc0: tap persist user mh\n",
-            "firecracker"
-        ));
+    fn classify_rooms_fwd_dump_keys_on_the_supernet_marker() {
+        use super::{classify_rooms_fwd_dump, RoomsFwdStatus, ROOMS_FWD_MARKER};
+        let installed = format!(
+            "-N ROOMS_FWD\n-A ROOMS_FWD -s 172.16.0.0/24 -m comment --comment \"{ROOMS_FWD_MARKER}\" -j DROP\n"
+        );
+        assert_eq!(
+            classify_rooms_fwd_dump(&installed),
+            RoomsFwdStatus::Installed
+        );
+        // A chain that exists but lacks the current marker is drift → Missing,
+        // never a false Installed.
+        assert_eq!(
+            classify_rooms_fwd_dump("-N ROOMS_FWD\n-A ROOMS_FWD -j DROP\n"),
+            RoomsFwdStatus::Missing
+        );
+        // An older-version marker must not satisfy the current supernet check.
+        assert_eq!(
+            classify_rooms_fwd_dump(
+                "-A ROOMS_FWD -m comment --comment \"rooms:fwd:v0:10.0.0.0/8\" -j DROP\n"
+            ),
+            RoomsFwdStatus::Missing
+        );
+    }
+
+    #[test]
+    fn orphaned_tap_indices_flags_only_unclaimed_pool_taps() {
+        use super::orphaned_tap_indices;
+        use std::collections::HashSet;
+        let dump = "\
+1: lo: <LOOPBACK,UP> mtu 65536 qdisc noqueue state UNKNOWN\n\
+2: eth0: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq state UP\n\
+3: tap-fc0: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc pfifo_fast state DOWN\n\
+4: tap-fc1: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc pfifo_fast state DOWN\n\
+5: tap-fc2: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc pfifo_fast state DOWN\n\
+6: tap-fc7@if9: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc pfifo_fast state DOWN\n";
+        // Slot 1 is claimed; taps 0 (legacy, never an orphan), 2, and 7 are not.
+        let claimed: HashSet<u8> = std::iter::once(1u8).collect();
+        assert_eq!(orphaned_tap_indices(dump, &claimed), vec![2, 7]);
+        // With every pool tap claimed, none are orphaned.
+        let all: HashSet<u8> = [1u8, 2, 7].into_iter().collect();
+        assert!(orphaned_tap_indices(dump, &all).is_empty());
     }
 
     #[test]
