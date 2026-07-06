@@ -10,7 +10,7 @@
 # tap-fc* / firecracker procs / a non-clean `rooms ls`) -> one-line PASS/FAIL.
 #
 # Usage (rooms-host):
-#   sudo -E make e2e            # or: sudo -E scripts/e2e.sh [--image <rootfs>]
+#   sudo -E make e2e            # or: sudo -E scripts/e2e.sh
 #
 # Preconditions (the preflight names any that are missing): /dev/kvm,
 # firecracker + jailer, the ROOMS_FWD chain (`sudo bash scripts/setup-tap.sh
@@ -31,19 +31,15 @@ user_home="$(getent passwd "$build_user" 2>/dev/null | cut -d: -f6)"
 user_home="${user_home:-${HOME}}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The e2e tests resolve their guest images from the conventional ~/rooms/images
+# (per pool_e2e.rs), so the preflight validates that same rootfs. No --image
+# override: it would reach only the preflight and silently diverge from the image
+# the tests actually boot.
 image="${user_home}/rooms/images/rootfs.ext4"
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --image)
-            image="$2"
-            shift 2
-            ;;
-        *)
-            echo "unknown arg: $1" >&2
-            exit 2
-            ;;
-    esac
-done
+if [[ $# -gt 0 ]]; then
+    echo "unknown arg: $1 (this harness takes no arguments)" >&2
+    exit 2
+fi
 
 log_dir="$(mktemp -d "${TMPDIR:-/tmp}/rooms-e2e.XXXXXX")"
 echo "[e2e] repo=$repo_root image=$image user=$build_user logs=$log_dir"
@@ -93,7 +89,13 @@ fi
 taps_before="$(ip -o link show 2>/dev/null | count 'tap-fc')"
 fc_before="$(pgrep -c firecracker 2>/dev/null || true)"
 fc_before="${fc_before:-0}"
-ls_before="$(HOME="$user_home" "$rooms_bin" ls --json 2>/dev/null | count '"id":')"
+if ! ls_before_json="$(HOME="$user_home" "$rooms_bin" ls --json 2>"$log_dir/ls.log")"; then
+    cat "$log_dir/ls.log" >&2
+    fail "baseline rooms ls --json failed — unverifiable, treating as a failed gate"
+fi
+# `"id":` occurs once per listed room — a schema-stable proxy for the count. The
+# typed, drift-guarded form is registry::parse_ls_report, reused by the rig.
+ls_before="$(printf '%s' "$ls_before_json" | count '"id":')"
 
 # 3. Run the e2e binary as root (serial — the tests share host-global taps/slots)
 #    with the user's HOME so it finds the images + guest key. Each test still
@@ -109,7 +111,11 @@ tail -n 15 "$log_dir/e2e.log"
 taps_after="$(ip -o link show 2>/dev/null | count 'tap-fc')"
 fc_after="$(pgrep -c firecracker 2>/dev/null || true)"
 fc_after="${fc_after:-0}"
-ls_after="$(HOME="$user_home" "$rooms_bin" ls --json 2>/dev/null | count '"id":')"
+if ! ls_after_json="$(HOME="$user_home" "$rooms_bin" ls --json 2>"$log_dir/ls.log")"; then
+    cat "$log_dir/ls.log" >&2
+    fail "post-run rooms ls --json failed — unverifiable leak, treating as a failed gate"
+fi
+ls_after="$(printf '%s' "$ls_after_json" | count '"id":')"
 
 leaks=()
 [[ "$taps_after" -gt "$taps_before" ]] &&
