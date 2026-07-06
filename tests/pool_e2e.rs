@@ -483,16 +483,20 @@ fn isolation_precedes_egress(fwd_dump: &str) -> bool {
     }
 }
 
-/// True when no ACCEPT to the guest supernet precedes the isolation DROP.
-/// `isolation_precedes_egress` proves the DROP beats the *egress* ACCEPT, but a
-/// different supernet-destined ACCEPT placed above the DROP would match an
-/// inter-slot packet first and pass every other assert while cross-talk stayed
-/// open — so the gate must also prove nothing accepts inter-slot traffic before
-/// the DROP.
+/// True when no ACCEPT matching inter-slot traffic precedes the isolation DROP.
+/// `isolation_precedes_egress` proves the DROP beats the *egress* ACCEPT, but any
+/// supernet ACCEPT placed above the DROP would match an inter-slot packet first
+/// and pass every other assert while cross-talk stayed open. An inter-slot
+/// packet carries both a supernet source and a supernet destination, so the
+/// check matches an ACCEPT touching **either** side (a source-only
+/// `-s .../24 -j ACCEPT` bypasses isolation just as a `-d .../24` one does). The
+/// legitimate egress ACCEPT is supernet-sourced but sits after the DROP, so it
+/// passes; only a supernet ACCEPT *above* the DROP fails.
 fn no_accept_before_drop(fwd_dump: &str) -> bool {
-    let accept_to_supernet = fwd_dump
-        .lines()
-        .position(|l| l.contains("-d 172.16.0.0/24") && l.contains("-j ACCEPT"));
+    let accept_to_supernet = fwd_dump.lines().position(|l| {
+        l.contains("-j ACCEPT")
+            && (l.contains("-s 172.16.0.0/24") || l.contains("-d 172.16.0.0/24"))
+    });
     match (isolation_drop_line(fwd_dump), accept_to_supernet) {
         (Some(d), Some(a)) => a > d,
         (Some(_), None) => true,
