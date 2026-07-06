@@ -89,12 +89,14 @@ assert_rules_present() {
     assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -d 192.168.0.0/16 -j DROP" "192.168.0.0/16 drop"
     assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -d 172.16.0.0/12 -j DROP" "172.16.0.0/12 drop"
     assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -o $OUT_IFACE -j ACCEPT" "egress accept"
-    assert_grep "$chain" "--comment $MARKER" "version/supernet marker"
+    # `iptables -S` prints the comment value quoted (`--comment "rooms:fwd:..."`),
+    # so match the marker value itself — the same substring `doctor` keys on.
+    assert_grep "$chain" "$MARKER" "version/supernet marker"
 
     # Isolation + LAN drops precede the egress accept; the marker tail is last.
     assert_rule_before "-s $SUPERNET -d $SUPERNET -j DROP" "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "isolation before egress"
     assert_rule_before "-d 10.0.0.0/8 -j DROP" "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "10/8 drop before egress"
-    assert_rule_before "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "--comment $MARKER" "egress before marker tail"
+    assert_rule_before "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "$MARKER" "egress before marker tail"
 
     local out_forward
     out_forward="$(sysctl -n "net.ipv4.conf.${OUT_IFACE}.forwarding")"
