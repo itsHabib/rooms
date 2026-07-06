@@ -52,17 +52,27 @@ pub fn has_isolation_drop(rooms_fwd_dump: &str) -> bool {
     isolation_drop_line(rooms_fwd_dump).is_some()
 }
 
-/// True when no ACCEPT matching inter-slot traffic precedes the DROP.
+/// True when no ACCEPT that could match inter-slot traffic precedes the DROP.
 ///
-/// An inter-slot packet carries **both** a supernet source and a supernet
-/// destination, so any ACCEPT touching either side placed above the DROP would
-/// match it first and let cross-talk through while every other check passed. The
-/// legitimate egress ACCEPT is supernet-sourced but sits after the DROP, so it
-/// passes; only a supernet ACCEPT *above* the DROP fails.
+/// A dangerous ACCEPT above the DROP is one that would match an inter-slot packet
+/// (both endpoints in the supernet): either it **names the supernet** on a side,
+/// or it's **broad** — no address (`-s`/`-d`) or interface (`-i`/`-o`) constraint
+/// that would exclude the packet, so a bare `-j ACCEPT` matches everything. An
+/// ACCEPT scoped to a non-supernet address is harmless. The legitimate egress and
+/// return-path ACCEPTs name the supernet but sit after the DROP, so they pass;
+/// only a dangerous ACCEPT *above* the DROP fails.
 #[must_use]
 pub fn no_accept_before_drop(rooms_fwd_dump: &str) -> bool {
     let accept = rooms_fwd_dump.lines().position(|line| {
-        line.contains("-j ACCEPT") && (line.contains(MATCH_SRC) || line.contains(MATCH_DST))
+        if !line.contains("-j ACCEPT") {
+            return false;
+        }
+        let names_supernet = line.contains(MATCH_SRC) || line.contains(MATCH_DST);
+        let broad = !line.contains("-s ")
+            && !line.contains("-d ")
+            && !line.contains("-i ")
+            && !line.contains("-o ");
+        names_supernet || broad
     });
     match (isolation_drop_line(rooms_fwd_dump), accept) {
         (Some(drop), Some(accept)) => accept > drop,
@@ -169,6 +179,20 @@ mod tests {
         let broken = concat!(
             "-N ROOMS_FWD\n",
             "-A ROOMS_FWD -s 172.16.0.0/24 -j ACCEPT\n",
+            "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP\n",
+            "-A ROOMS_FWD -s 172.16.0.0/24 -o eth0 -j ACCEPT",
+        );
+        assert!(!no_accept_before_drop(broken));
+        assert!(!rooms_fwd_isolates(broken));
+    }
+
+    #[test]
+    fn a_broad_matchless_accept_above_the_drop_is_caught() {
+        // A match-less ACCEPT accepts everything — inter-slot traffic included —
+        // even though it names no supernet address.
+        let broken = concat!(
+            "-N ROOMS_FWD\n",
+            "-A ROOMS_FWD -j ACCEPT\n",
             "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP\n",
             "-A ROOMS_FWD -s 172.16.0.0/24 -o eth0 -j ACCEPT",
         );

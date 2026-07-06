@@ -452,6 +452,12 @@ fn forward_dump() -> String {
         .args(["-S", "FORWARD"])
         .output()
         .expect("iptables -S FORWARD");
+    assert!(
+        out.status.success(),
+        "iptables -S FORWARD failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -539,6 +545,10 @@ async fn concurrent_boot_rig(
     config: &RoomsConfig,
     me: Claimer,
 ) {
+    assert!(
+        n >= 1,
+        "the rig must boot at least one room; n=0 passes every assertion vacuously"
+    );
     // Pre-boot state the concurrent reap must restore exactly.
     let taps_before = rooms_taps();
     let slots_before = slots_listing(state_base);
@@ -565,7 +575,13 @@ async fn concurrent_boot_rig(
     }
     let mut results = Vec::with_capacity(usize::from(n));
     for handle in handles {
-        results.push(handle.await.expect("boot task panicked"));
+        match handle.await {
+            Ok(result) => results.push(result),
+            // Re-raise the boot task's own panic so its message + backtrace
+            // survive, instead of collapsing to a generic "task panicked".
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => panic!("boot task did not complete: {join}"),
+        }
     }
     let booted = all_booted_or_cleanup(results, state_base).await;
 
