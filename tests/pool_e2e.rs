@@ -32,6 +32,7 @@ use std::process::Command;
 use rooms::config::RoomsConfig;
 use rooms::error::FirecrackerError;
 use rooms::firecracker::{self, BootRequest, NetworkConfig};
+use rooms::isolation;
 use rooms::slot::{self, Claimer};
 
 /// The slot this test drives. 1 is the first real pool slot (0 is the reserved
@@ -319,23 +320,6 @@ async fn room_boots_on_slot_1_and_reaps_byte_identically() {
     );
 }
 
-/// The three pool slots the concurrent-boot gate drives (the first real slots;
-/// slot 0 is the reserved legacy tap).
-const CONCURRENT_INDICES: [u8; 3] = [1, 2, 3];
-
-/// The guest→guest isolation rule `setup-tap.sh --host` installs into the
-/// host-once `ROOMS_FWD` chain: guest k and guest j both live in the supernet,
-/// so this line drops every inter-slot packet. The byte-identical `fwd` assert
-/// proves boot/reap never touch it.
-const ISOLATION_DROP: &str = "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP";
-
-/// The `FORWARD` jump into `ROOMS_FWD`. It must be the *first* FORWARD rule so no
-/// pre-existing broad ACCEPT can preempt the chain and let guest→guest
-/// forwarding slip past isolation — the DROP only bites if packets actually
-/// reach the chain (`setup-tap.sh`'s `iptables -I FORWARD 1 -j ROOMS_FWD`,
-/// mirrored by `scripts/test-tap-rules.sh`).
-const FORWARD_JUMP: &str = "-A FORWARD -j ROOMS_FWD";
-
 /// A room booted on a pool slot for the concurrent-boot gate.
 struct BootedRoom {
     room_id: String,
@@ -460,64 +444,21 @@ async fn probe_all_reachable(booted: &[BootedRoom]) -> Vec<String> {
     logins
 }
 
-/// Line index of the guest→guest isolation DROP in a `ROOMS_FWD` dump. Per-line
-/// exact match, used for the presence check and both ordering checks alike — so a
-/// decorated line can never make presence (loose) and ordering (strict) disagree
-/// and panic confusingly.
-fn isolation_drop_line(fwd_dump: &str) -> Option<usize> {
-    fwd_dump.lines().position(|l| l.trim() == ISOLATION_DROP)
-}
-
-/// True when the guest→guest DROP sits before the egress ACCEPT in the chain
-/// dump — the order that makes the DROP bite (a preceding broad ACCEPT would let
-/// inter-slot traffic through first). A dump with the DROP and no egress ACCEPT
-/// line still passes: there's nothing for a packet to slip past.
-fn isolation_precedes_egress(fwd_dump: &str) -> bool {
-    let egress_line = fwd_dump.lines().position(|l| {
-        l.contains("-s 172.16.0.0/24") && l.contains("-o ") && l.contains("-j ACCEPT")
-    });
-    match (isolation_drop_line(fwd_dump), egress_line) {
-        (Some(d), Some(e)) => d < e,
-        (Some(_), None) => true,
-        _ => false,
-    }
-}
-
-/// True when no ACCEPT matching inter-slot traffic precedes the isolation DROP.
-/// `isolation_precedes_egress` proves the DROP beats the *egress* ACCEPT, but any
-/// supernet ACCEPT placed above the DROP would match an inter-slot packet first
-/// and pass every other assert while cross-talk stayed open. An inter-slot
-/// packet carries both a supernet source and a supernet destination, so the
-/// check matches an ACCEPT touching **either** side (a source-only
-/// `-s .../24 -j ACCEPT` bypasses isolation just as a `-d .../24` one does). The
-/// legitimate egress ACCEPT is supernet-sourced but sits after the DROP, so it
-/// passes; only a supernet ACCEPT *above* the DROP fails.
-fn no_accept_before_drop(fwd_dump: &str) -> bool {
-    let accept_to_supernet = fwd_dump.lines().position(|l| {
-        l.contains("-j ACCEPT")
-            && (l.contains("-s 172.16.0.0/24") || l.contains("-d 172.16.0.0/24"))
-    });
-    match (isolation_drop_line(fwd_dump), accept_to_supernet) {
-        (Some(d), Some(a)) => a > d,
-        (Some(_), None) => true,
-        _ => false,
-    }
-}
-
-/// The first `-A FORWARD ...` rule from `iptables -S FORWARD`, or empty when the
-/// FORWARD chain carries no rules. The gate needs this to be the `ROOMS_FWD`
-/// jump: a chain that reads clean but isn't first (or isn't jumped at all)
-/// leaves guest→guest forwarding possible.
-fn first_forward_rule() -> String {
+/// The `iptables -S FORWARD` dump — [`isolation::forward_jump_is_first`] analyzes
+/// it to confirm `ROOMS_FWD` is actually first in the packet path. The pure
+/// analysis lives in the library so it's unit-tested against broken chains.
+fn forward_dump() -> String {
     let out = Command::new("iptables")
         .args(["-S", "FORWARD"])
         .output()
         .expect("iptables -S FORWARD");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find(|line| line.starts_with("-A FORWARD "))
-        .unwrap_or_default()
-        .to_owned()
+    assert!(
+        out.status.success(),
+        "iptables -S FORWARD failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// From guest `source`, probe `peer` over ICMP. Returns true only on a
@@ -542,25 +483,26 @@ fn guest_reaches_peer(source: &str, peer: &str, key: &Path) -> bool {
 /// guest k cannot actually reach guest j. Without a key-paired rootfs the
 /// structural proof stands alone and the behavioral gap is noted, never failed.
 fn assert_isolation(booted: &[BootedRoom], logins: &[String]) {
-    // Packet path: the chain must be jumped from FORWARD and be first, else the
-    // DROP below reads clean but never sees an inter-slot packet.
-    let forward_first = first_forward_rule();
-    assert_eq!(
-        forward_first, FORWARD_JUMP,
-        "ROOMS_FWD must be the first FORWARD rule so no prior ACCEPT preempts guest isolation; got: {forward_first:?}"
+    // Structural proof via the pure, unit-tested predicates in rooms::isolation:
+    // ROOMS_FWD is jumped from FORWARD first, the guest->guest DROP is present,
+    // unpreempted by a supernet ACCEPT, and before the egress ACCEPT — the whole
+    // packet path, not just the chain text.
+    let forward = forward_dump();
+    assert!(
+        isolation::forward_jump_is_first(&forward),
+        "ROOMS_FWD must be the first FORWARD rule so no prior ACCEPT preempts guest isolation:\n{forward}"
     );
-
     let fwd = rooms_fwd_dump();
     assert!(
-        isolation_drop_line(&fwd).is_some(),
+        isolation::has_isolation_drop(&fwd),
         "ROOMS_FWD is missing the guest->guest isolation DROP:\n{fwd}"
     );
     assert!(
-        no_accept_before_drop(&fwd),
+        isolation::no_accept_before_drop(&fwd),
         "an ACCEPT to the guest supernet precedes the isolation DROP in ROOMS_FWD — an inter-slot packet could match it first:\n{fwd}"
     );
     assert!(
-        isolation_precedes_egress(&fwd),
+        isolation::drop_precedes_egress(&fwd),
         "the isolation DROP must precede the egress ACCEPT in ROOMS_FWD:\n{fwd}"
     );
 
@@ -585,48 +527,71 @@ fn assert_isolation(booted: &[BootedRoom], logins: &[String]) {
     }
 }
 
-#[tokio::test]
-async fn three_rooms_boot_concurrently_isolated_and_reap_byte_identically() {
-    let Some((kernel, rootfs)) = preflight() else {
-        return;
-    };
-
-    // Isolated state base so the claims + room dirs never collide with real
-    // rooms; the taps are still host-global, so the pre-check asserts free slots.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state_base = tmp.path().to_path_buf();
-    let config = RoomsConfig {
-        state_base: Some(state_base.clone()),
-        ..RoomsConfig::default()
-    };
-    let me = Claimer::current().expect("read this process's claimer identity");
-
+/// The reusable concurrency + leak rig: boot `n` rooms at once on distinct pool
+/// slots and assert the pool's hard-parallelism contract — no double-allocation,
+/// every guest reachable over its own slot tap, guest↔guest isolated, and the host
+/// state (taps, `slots/`, `ROOMS_FWD`) byte-identical after reap.
+///
+/// Parameterized on `n`: the pool P3 gate calls it with 3; a stress run can go
+/// higher, and a future snapshots test reuses it. The subtle, load-bearing part —
+/// proving guest j is *unreachable*, not just that k works — is pinned by the
+/// pure, broken-chain-tested predicates in [`isolation`] plus the byte-identical
+/// reap here.
+async fn concurrent_boot_rig(
+    n: u8,
+    state_base: &Path,
+    kernel: &Path,
+    rootfs: &Path,
+    config: &RoomsConfig,
+    me: Claimer,
+) {
+    assert!(
+        n >= 1,
+        "the rig must boot at least one room; n=0 passes every assertion vacuously"
+    );
     // Pre-boot state the concurrent reap must restore exactly.
     let taps_before = rooms_taps();
-    let slots_before = slots_listing(&state_base);
+    let slots_before = slots_listing(state_base);
     let fwd_before = rooms_fwd_dump();
-    for index in CONCURRENT_INDICES {
+    for index in 1..=n {
         assert!(
             !taps_before.contains(&format!("tap-fc{index}:")),
             "slot {index} already in use (tap-fc{index} present); free it first: {taps_before}"
         );
     }
 
-    // Boot three rooms at once: they must land on distinct slots (no double-
-    // allocation) and all be alive together (real concurrency, not serialized).
-    let (r1, r2, r3) = tokio::join!(
-        claim_and_boot(&state_base, &kernel, &rootfs, &config, me),
-        claim_and_boot(&state_base, &kernel, &rootfs, &config, me),
-        claim_and_boot(&state_base, &kernel, &rootfs, &config, me),
-    );
-    let booted = all_booted_or_cleanup(vec![r1, r2, r3], &state_base).await;
+    // Boot n rooms at once — spawned so they make progress concurrently (real
+    // parallelism, not serialized). Each task owns cloned inputs to satisfy
+    // spawn's 'static bound; the O_EXCL claim keeps their slots distinct.
+    let mut handles = Vec::with_capacity(usize::from(n));
+    for _ in 0..n {
+        let state_base = state_base.to_path_buf();
+        let kernel = kernel.to_path_buf();
+        let rootfs = rootfs.to_path_buf();
+        let config = config.clone();
+        handles.push(tokio::spawn(async move {
+            claim_and_boot(&state_base, &kernel, &rootfs, &config, me).await
+        }));
+    }
+    let mut results = Vec::with_capacity(usize::from(n));
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            // Re-raise the boot task's own panic so its message + backtrace
+            // survive, instead of collapsing to a generic "task panicked".
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => panic!("boot task did not complete: {join}"),
+        }
+    }
+    let booted = all_booted_or_cleanup(results, state_base).await;
 
+    // Distinct slots 1..=n — zero double-allocation.
     let mut indices: Vec<u8> = booted.iter().map(|r| r.slot.index).collect();
     indices.sort_unstable();
+    let expected: Vec<u8> = (1..=n).collect();
     assert_eq!(
-        indices,
-        CONCURRENT_INDICES.to_vec(),
-        "three concurrent claims must take distinct slots 1,2,3"
+        indices, expected,
+        "{n} concurrent claims must take distinct slots 1..={n}"
     );
     let taps_live = rooms_taps();
     for room in &booted {
@@ -637,11 +602,11 @@ async fn three_rooms_boot_concurrently_isolated_and_reap_byte_identically() {
         );
     }
 
-    // Each guest completes its network task, and inter-guest traffic is isolated.
+    // Each guest reachable over its own slot tap; inter-guest traffic isolated.
     let logins = probe_all_reachable(&booted).await;
     assert_isolation(&booted, &logins);
 
-    // Reap all three; every observable returns to byte-identical.
+    // Reap all; every observable returns to byte-identical.
     for room in booted {
         room.vm.shutdown().await.expect("shutdown/reap");
     }
@@ -651,7 +616,7 @@ async fn three_rooms_boot_concurrently_isolated_and_reap_byte_identically() {
         "pool tap set not restored after concurrent reap — a slot tap leaked"
     );
     assert_eq!(
-        slots_listing(&state_base),
+        slots_listing(state_base),
         slots_before,
         "slots/ not restored after concurrent reap — a slot file leaked"
     );
@@ -660,6 +625,24 @@ async fn three_rooms_boot_concurrently_isolated_and_reap_byte_identically() {
         fwd_before,
         "ROOMS_FWD chain was mutated by concurrent boot/reap — it must stay host-once"
     );
+}
+
+#[tokio::test]
+async fn three_rooms_boot_concurrently_isolated_and_reap_byte_identically() {
+    let Some((kernel, rootfs)) = preflight() else {
+        return;
+    };
+    // Isolated state base so the claims + room dirs never collide with real rooms;
+    // the taps are still host-global, so the rig's pre-check asserts free slots.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_base = tmp.path().to_path_buf();
+    let config = RoomsConfig {
+        state_base: Some(state_base.clone()),
+        ..RoomsConfig::default()
+    };
+    let me = Claimer::current().expect("read this process's claimer identity");
+    // The v0.2 pool gate is N=3; the rig is parameterized for higher stress runs.
+    concurrent_boot_rig(3, &state_base, &kernel, &rootfs, &config, me).await;
 }
 
 /// Run the real `rooms run` binary against a full pool, with `HOME` pointed at
