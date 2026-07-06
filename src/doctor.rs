@@ -584,13 +584,13 @@ fn check_anthropic_api_key() -> CheckResult {
 /// from the env read so it's unit-testable without mutating process env.
 ///
 /// The base substrate (boot / network / `--command` exec) runs without a key;
-/// only the cursor runner path needs one. So an unset or empty key is a
-/// [`WARN_PREFIX`] warning, not a failure — else the preflight gate would abort
-/// substrate-only e2e on a host that merely lacks the key.
+/// only the cursor runner path needs one. So an unset, empty, or whitespace-only
+/// key is a [`WARN_PREFIX`] warning, not a failure — else the preflight gate
+/// would abort substrate-only e2e on a host that merely lacks the key.
 fn anthropic_api_key_result(value: Option<&str>) -> CheckResult {
     let name = "anthropic_api_key".to_owned();
     match value {
-        Some(v) if !v.is_empty() => CheckResult {
+        Some(v) if !v.trim().is_empty() => CheckResult {
             name,
             ok: true,
             message: "ANTHROPIC_API_KEY is set".to_owned(),
@@ -1149,16 +1149,16 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_api_key_unset_or_empty_warns_not_fails() {
-        // The base substrate runs without a key, so an unset (or empty) key is a
-        // WARN (ok=true + `warn:` prefix), never a hard FAIL that would abort the
-        // preflight gate on substrate-only e2e.
-        for value in [None, Some("")] {
+    fn anthropic_api_key_unset_empty_or_blank_warns_not_fails() {
+        // The base substrate runs without a key, so an unset, empty, or
+        // whitespace-only key is a WARN (ok=true + `warn:` prefix), never a hard
+        // FAIL that would abort the preflight gate on substrate-only e2e.
+        for value in [None, Some(""), Some("   ")] {
             let result = anthropic_api_key_result(value);
-            assert!(result.ok, "unset/empty key must not fail: {value:?}");
+            assert!(result.ok, "unset/blank key must not fail: {value:?}");
             assert!(
                 result.is_warning(),
-                "unset/empty key must be a WARN, got: {}",
+                "unset/blank key must be a WARN, got: {}",
                 result.message
             );
         }
