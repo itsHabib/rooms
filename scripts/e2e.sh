@@ -50,13 +50,16 @@ count() {
 
 cd "$repo_root" || fail "repo root not found: $repo_root"
 
-# 1. Build the binary the preflight doctor (and the pool-full e2e) run.
-echo "[e2e] building (release)..."
-if ! cargo build --release >"$log_dir/build.log" 2>&1; then
+# 1. Build the binary the preflight doctor runs. Debug, not release: the e2e
+#    tests use the debug `rooms` (via CARGO_BIN_EXE_rooms), so a release build
+#    would be both unused and a slow cold compile — the debug build is shared
+#    with the `cargo test` step below.
+echo "[e2e] building..."
+if ! cargo build >"$log_dir/build.log" 2>&1; then
     tail -n 30 "$log_dir/build.log" >&2
-    fail "release build failed (see $log_dir/build.log)"
+    fail "build failed (see $log_dir/build.log)"
 fi
-rooms_bin="$repo_root/target/release/rooms"
+rooms_bin="$repo_root/target/debug/rooms"
 
 # 2. Preflight — `rooms doctor` exits non-zero on any FAIL. Abort before booting.
 echo "[e2e] preflight: rooms doctor..."
