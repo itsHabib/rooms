@@ -10,18 +10,33 @@
 //! not merely observed live on the rooms-host. A test that cannot fail is
 //! worthless; the tests below prove each way isolation can break is caught.
 
+/// The allocator supernet literal, single-sourced so the predicate constants and
+/// the test fixtures all derive from one place. A macro rather than a `const`
+/// because `concat!` only accepts literals, not const references.
+macro_rules! supernet {
+    () => {
+        "172.16.0.0/24"
+    };
+}
+
 /// The allocator supernet every slot's /30 is carved from.
-pub const SUPERNET: &str = "172.16.0.0/24";
+pub const SUPERNET: &str = supernet!();
 
 /// The guest→guest DROP `setup-tap.sh --host` installs into `ROOMS_FWD`.
-pub const ISOLATION_DROP: &str = "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP";
+pub const ISOLATION_DROP: &str = concat!(
+    "-A ROOMS_FWD -s ",
+    supernet!(),
+    " -d ",
+    supernet!(),
+    " -j DROP"
+);
 
 /// The jump into `ROOMS_FWD` from the built-in `FORWARD` chain.
 pub const FORWARD_JUMP: &str = "-A FORWARD -j ROOMS_FWD";
 
 /// Supernet-source / supernet-dest match fragments an ACCEPT would carry.
-const MATCH_SRC: &str = "-s 172.16.0.0/24";
-const MATCH_DST: &str = "-d 172.16.0.0/24";
+const MATCH_SRC: &str = concat!("-s ", supernet!());
+const MATCH_DST: &str = concat!("-d ", supernet!());
 
 /// True when the `ROOMS_FWD` jump is the **first** rule in the `FORWARD` chain,
 /// so no pre-existing broad ACCEPT preempts guest isolation.
