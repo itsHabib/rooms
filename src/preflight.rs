@@ -103,7 +103,22 @@ pub fn run(rooms_bin: &Path, image: Option<&Path>) -> Result<Preflight, Prefligh
     let output = cmd
         .output()
         .map_err(|e| PreflightError::Doctor(format!("spawn {}: {e}", rooms_bin.display())))?;
-    from_json(&String::from_utf8_lossy(&output.stdout))
+    match from_json(&String::from_utf8_lossy(&output.stdout)) {
+        // A parse failure usually means doctor errored before emitting JSON — its
+        // stderr carries the real reason, which the bare parse error would drop.
+        Err(PreflightError::Parse(msg)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            if stderr.is_empty() {
+                Err(PreflightError::Parse(msg))
+            } else {
+                Err(PreflightError::Doctor(format!(
+                    "doctor produced no readable report ({msg}); stderr: {stderr}"
+                )))
+            }
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]

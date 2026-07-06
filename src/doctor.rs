@@ -613,7 +613,7 @@ fn check_rooms_fwd() -> CheckResult {
             name,
             ok: true,
             message: format!(
-                "warn: could not read {ROOMS_FWD_CHAIN} (need root?); re-run `sudo rooms doctor` to verify the chain"
+                "{WARN_PREFIX} could not read {ROOMS_FWD_CHAIN} (need root?); re-run `sudo rooms doctor` to verify the chain"
             ),
         },
     }
@@ -679,7 +679,9 @@ fn check_orphaned_taps(config: &RoomsConfig) -> CheckResult {
     CheckResult {
         name,
         ok: true,
-        message: format!("warn: orphaned tap(s) with no live slot: {list}; `rooms gc` sweeps them"),
+        message: format!(
+            "{WARN_PREFIX} orphaned tap(s) with no live slot: {list}; `rooms gc` sweeps them"
+        ),
     }
 }
 
@@ -984,7 +986,7 @@ fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
     CheckResult {
         name,
         ok: true,
-        message: format!("warn: {}", warnings.join("; ")),
+        message: format!("{WARN_PREFIX} {}", warnings.join("; ")),
     }
 }
 

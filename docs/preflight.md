@@ -12,7 +12,7 @@ Without this, a misprovisioned host (stale gateway IP, missing TAP, `ROOMS_FWD` 
 - **WARN** — `ok: true` and `message` starts with `warn:`. Allowed through, but recorded.
 - **ok** — `ok: true`, no `warn:` prefix. Clean.
 
-The `warn:` convention has one source: [`CheckResult::is_warning`](../src/doctor.rs).
+The `warn:` prefix has one source — the `WARN_PREFIX` constant — checked by [`CheckResult::is_warning`](../src/doctor.rs) and emitted by the producing checks; the human `rooms doctor` renderer keys on `is_warning` too.
 
 ## Gating a run
 
