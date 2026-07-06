@@ -577,17 +577,30 @@ fn check_rootfs(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
 }
 
 fn check_anthropic_api_key() -> CheckResult {
+    anthropic_api_key_result(std::env::var("ANTHROPIC_API_KEY").ok().as_deref())
+}
+
+/// Decide the Anthropic-key check from the resolved env value — policy split
+/// from the env read so it's unit-testable without mutating process env.
+///
+/// The base substrate (boot / network / `--command` exec) runs without a key;
+/// only the cursor runner path needs one. So an unset, empty, or whitespace-only
+/// key is a [`WARN_PREFIX`] warning, not a failure — else the preflight gate
+/// would abort substrate-only e2e on a host that merely lacks the key.
+fn anthropic_api_key_result(value: Option<&str>) -> CheckResult {
     let name = "anthropic_api_key".to_owned();
-    match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(v) if !v.is_empty() => CheckResult {
+    match value {
+        Some(v) if !v.trim().is_empty() => CheckResult {
             name,
             ok: true,
             message: "ANTHROPIC_API_KEY is set".to_owned(),
         },
         _ => CheckResult {
             name,
-            ok: false,
-            message: "ANTHROPIC_API_KEY not set in environment".to_owned(),
+            ok: true,
+            message: format!(
+                "{WARN_PREFIX} ANTHROPIC_API_KEY unset — required for --runner cursor, not for --command / e2e"
+            ),
         },
     }
 }
@@ -995,8 +1008,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
     use super::{
-        check_sha_drift, default_rootfs_path, drift_target_path, parse_checksums,
-        parse_firecracker_version, version_meets_min, RoomsConfig,
+        anthropic_api_key_result, check_sha_drift, default_rootfs_path, drift_target_path,
+        parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
 
@@ -1132,6 +1145,33 @@ mod tests {
             target,
             Some(default_rootfs_path()),
             "bionic pin must resolve to the default quickstart rootfs path"
+        );
+    }
+
+    #[test]
+    fn anthropic_api_key_unset_empty_or_blank_warns_not_fails() {
+        // The base substrate runs without a key, so an unset, empty, or
+        // whitespace-only key is a WARN (ok=true + `warn:` prefix), never a hard
+        // FAIL that would abort the preflight gate on substrate-only e2e.
+        for value in [None, Some(""), Some("   ")] {
+            let result = anthropic_api_key_result(value);
+            assert!(result.ok, "unset/blank key must not fail: {value:?}");
+            assert!(
+                result.is_warning(),
+                "unset/blank key must be a WARN, got: {}",
+                result.message
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_api_key_set_is_a_plain_pass() {
+        let result = anthropic_api_key_result(Some("sk-ant-example"));
+        assert!(result.ok);
+        assert!(
+            !result.is_warning(),
+            "a set key is a pass, not a warn: {}",
+            result.message
         );
     }
 
