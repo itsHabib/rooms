@@ -38,6 +38,10 @@ const FREE_LOCK: &str = "slots.lock";
 /// reserved slot 0.
 pub const MAX_SLOT: u8 = 63;
 
+/// Default per-invocation pool ceiling. Boot walks slots `1..=this`; an operator
+/// override to lower it can land later.
+pub const DEFAULT_MAX_POOL: u8 = 8;
+
 /// Identity of the process performing a claim.
 ///
 /// A pid pinned to its incarnation via `/proc/<pid>/stat` start time — the
@@ -47,6 +51,19 @@ pub const MAX_SLOT: u8 = 63;
 pub struct Claimer {
     pub pid: u32,
     pub starttime: u64,
+}
+
+impl Claimer {
+    /// This process's own `(pid, starttime)` identity — what boot records into
+    /// the slot file so reconcile can probe the claimer directly. `None` when
+    /// the start time can't be read (off Linux, or an unreadable `/proc`); a
+    /// caller that can't identify itself must not claim.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        let pid = std::process::id();
+        let starttime = crate::room::starttime_of(pid)?;
+        Some(Self { pid, starttime })
+    }
 }
 
 /// Claim a slot for `room_id`, whose identity the caller pre-minted.

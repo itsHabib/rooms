@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Assert setup-tap.sh iptables rules are present, ordered, and removed by teardown.
+# Assert setup-tap.sh --host installs the ROOMS_FWD chain correctly, ordered,
+# with the version/supernet marker, jumped from FORWARD position 1 — and that
+# --host --teardown removes it cleanly and idempotently.
 #
 # Host-only: needs root/sudo, a routable outbound interface, and mutates live
-# iptables + tap-fc0. Run on rooms-host before merge — not in cloud CI.
+# iptables. Run on rooms-host before merge — not in cloud CI.
 #
 # Usage:
 #   sudo ./scripts/test-tap-rules.sh
 
 set -euo pipefail
 
-TAP="${TAP:-tap-fc0}"
-GUEST_NET="${GUEST_NET:-172.16.0.0/24}"
+FWD_CHAIN="${ROOMS_FWD_CHAIN:-ROOMS_FWD}"
+SUPERNET="${ROOMS_SUPERNET:-172.16.0.0/24}"
+MARKER="${ROOMS_FWD_MARKER:-rooms:fwd:v1:172.16.0.0/24}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log()   { printf '\033[1;34m[test-tap-rules]\033[0m %s\n' "$*"; }
@@ -26,37 +29,30 @@ if [[ -z "${OUT_IFACE:-}" ]]; then
 fi
 
 assert_grep() {
-    local haystack="$1"
-    local needle="$2"
-    local label="$3"
+    local haystack="$1" needle="$2" label="$3"
     if ! grep -Fq -- "$needle" <<<"$haystack"; then
         fatal "missing $label: expected '$needle'"
     fi
 }
 
 assert_not_grep() {
-    local haystack="$1"
-    local needle="$2"
-    local label="$3"
+    local haystack="$1" needle="$2" label="$3"
     if grep -Fq -- "$needle" <<<"$haystack"; then
         fatal "unexpected $label: still present '$needle'"
     fi
 }
 
-forward_line() {
+chain_line() {
     local pattern="$1"
-    iptables -S FORWARD | grep -F -- "$pattern" | head -n1
+    iptables -S "$FWD_CHAIN" | grep -F -- "$pattern" | head -n1
 }
 
 assert_rule_before() {
-    local earlier="$1"
-    local later="$2"
-    local label="$3"
-    local forward_dump
-    forward_dump="$(iptables -S FORWARD)"
-    local earlier_line later_line
-    earlier_line="$(grep -Fn -- "$earlier" <<<"$forward_dump" | head -n1 | cut -d: -f1)"
-    later_line="$(grep -Fn -- "$later" <<<"$forward_dump" | head -n1 | cut -d: -f1)"
+    local earlier="$1" later="$2" label="$3"
+    local dump earlier_line later_line
+    dump="$(iptables -S "$FWD_CHAIN")"
+    earlier_line="$(grep -Fn -- "$earlier" <<<"$dump" | head -n1 | cut -d: -f1)"
+    later_line="$(grep -Fn -- "$later" <<<"$dump" | head -n1 | cut -d: -f1)"
     if [[ -z "$earlier_line" || -z "$later_line" ]]; then
         fatal "could not locate rules for ordering check: $label"
     fi
@@ -66,33 +62,39 @@ assert_rule_before() {
 }
 
 assert_rules_present() {
-    local nat forward
+    local nat forward chain
     nat="$(iptables -t nat -S)"
     forward="$(iptables -S FORWARD)"
+    chain="$(iptables -S "$FWD_CHAIN")"
 
-    assert_grep "$nat" "-A POSTROUTING -s $GUEST_NET -o $OUT_IFACE -j MASQUERADE" "source-restricted MASQUERADE"
+    # FORWARD jumps into the chain at position 1 (ahead of any broad ACCEPT).
+    local first_jump
+    first_jump="$(iptables -S FORWARD | grep -F -- "-j $FWD_CHAIN" | head -n1)"
+    if [[ "$first_jump" != "-A FORWARD -j $FWD_CHAIN" ]]; then
+        fatal "expected '-A FORWARD -j $FWD_CHAIN' as the FORWARD jump, got '$first_jump'"
+    fi
+    local forward_first
+    forward_first="$(grep -E '^-A FORWARD ' <<<"$forward" | head -n1)"
+    if [[ "$forward_first" != "-A FORWARD -j $FWD_CHAIN" ]]; then
+        fatal "$FWD_CHAIN jump must be the first FORWARD rule, got '$forward_first'"
+    fi
+
+    # Supernet-scoped NAT, no legacy unrestricted MASQUERADE.
+    assert_grep "$nat" "-A POSTROUTING -s $SUPERNET -o $OUT_IFACE -j MASQUERADE" "source-restricted MASQUERADE"
     assert_not_grep "$nat" "-A POSTROUTING -o $OUT_IFACE -j MASQUERADE" "legacy unrestricted MASQUERADE"
 
-    assert_grep "$forward" "-A FORWARD -d 192.168.0.0/16 -i $TAP -j DROP" "192.168.0.0/16 drop"
-    assert_grep "$forward" "-A FORWARD -d 10.0.0.0/8 -i $TAP -j DROP" "10.0.0.0/8 drop"
-    assert_grep "$forward" "-A FORWARD -d 172.16.0.0/12 -i $TAP -j DROP" "172.16.0.0/12 drop"
-    assert_grep "$forward" "-A FORWARD -i $TAP -o $OUT_IFACE -j ACCEPT" "egress accept"
+    # Chain rules, all supernet-qualified.
+    assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -d $SUPERNET -j DROP" "guest→guest isolation drop"
+    assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -d 10.0.0.0/8 -j DROP" "10.0.0.0/8 drop"
+    assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -d 192.168.0.0/16 -j DROP" "192.168.0.0/16 drop"
+    assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -d 172.16.0.0/12 -j DROP" "172.16.0.0/12 drop"
+    assert_grep "$chain" "-A $FWD_CHAIN -s $SUPERNET -o $OUT_IFACE -j ACCEPT" "egress accept"
+    assert_grep "$chain" "--comment $MARKER" "version/supernet marker"
 
-    local drop192 drop10 drop172 accept
-    drop192="$(forward_line "-d 192.168.0.0/16 -i $TAP -j DROP")"
-    drop10="$(forward_line "-d 10.0.0.0/8 -i $TAP -j DROP")"
-    drop172="$(forward_line "-d 172.16.0.0/12 -i $TAP -j DROP")"
-    accept="$(forward_line "-i $TAP -o $OUT_IFACE -j ACCEPT")"
-
-    assert_rule_before "$drop192" "$accept" "192.168 drop before egress accept"
-    assert_rule_before "$drop10" "$accept" "10/8 drop before egress accept"
-    assert_rule_before "$drop172" "$accept" "172.16/12 drop before egress accept"
-
-    local tap_forward
-    tap_forward="$(sysctl -n "net.ipv4.conf.${TAP}.forwarding")"
-    if [[ "$tap_forward" != "1" ]]; then
-        fatal "expected net.ipv4.conf.${TAP}.forwarding=1, got $tap_forward"
-    fi
+    # Isolation + LAN drops precede the egress accept; the marker tail is last.
+    assert_rule_before "-s $SUPERNET -d $SUPERNET -j DROP" "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "isolation before egress"
+    assert_rule_before "-d 10.0.0.0/8 -j DROP" "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "10/8 drop before egress"
+    assert_rule_before "-s $SUPERNET -o $OUT_IFACE -j ACCEPT" "--comment $MARKER" "egress before marker tail"
 
     local out_forward
     out_forward="$(sysctl -n "net.ipv4.conf.${OUT_IFACE}.forwarding")"
@@ -106,25 +108,29 @@ assert_rules_absent() {
     nat="$(iptables -t nat -S)"
     forward="$(iptables -S FORWARD)"
 
-    assert_not_grep "$nat" "-A POSTROUTING -s $GUEST_NET -o $OUT_IFACE -j MASQUERADE" "source-restricted MASQUERADE"
+    assert_not_grep "$forward" "-A FORWARD -j $FWD_CHAIN" "FORWARD jump"
+    assert_not_grep "$nat" "-A POSTROUTING -s $SUPERNET -o $OUT_IFACE -j MASQUERADE" "source-restricted MASQUERADE"
     assert_not_grep "$nat" "-A POSTROUTING -o $OUT_IFACE -j MASQUERADE" "legacy unrestricted MASQUERADE"
-    assert_not_grep "$forward" "-A FORWARD -d 192.168.0.0/16 -i $TAP -j DROP" "192.168.0.0/16 drop"
-    assert_not_grep "$forward" "-A FORWARD -d 10.0.0.0/8 -i $TAP -j DROP" "10.0.0.0/8 drop"
-    assert_not_grep "$forward" "-A FORWARD -d 172.16.0.0/12 -i $TAP -j DROP" "172.16.0.0/12 drop"
-    assert_not_grep "$forward" "-A FORWARD -i $TAP -o $OUT_IFACE -j ACCEPT" "egress accept"
-    assert_not_grep "$forward" "-A FORWARD -i $OUT_IFACE -o $TAP -m state --state RELATED,ESTABLISHED -j ACCEPT" "return accept"
+    # The chain itself is gone (-S on a missing chain errors → empty capture).
+    if iptables -S "$FWD_CHAIN" >/dev/null 2>&1; then
+        fatal "$FWD_CHAIN chain still present after teardown"
+    fi
 }
 
-log "running setup-tap.sh"
-bash "$SCRIPT_DIR/setup-tap.sh"
+log "running setup-tap.sh --host"
+bash "$SCRIPT_DIR/setup-tap.sh" --host
 assert_rules_present
 
-log "running teardown-tap.sh"
-bash "$SCRIPT_DIR/teardown-tap.sh"
+log "re-running setup-tap.sh --host (idempotent)"
+bash "$SCRIPT_DIR/setup-tap.sh" --host
+assert_rules_present
+
+log "running setup-tap.sh --host --teardown"
+bash "$SCRIPT_DIR/setup-tap.sh" --host --teardown
 assert_rules_absent
 
-log "re-running teardown-tap.sh (idempotent no-op)"
-bash "$SCRIPT_DIR/teardown-tap.sh"
+log "re-running teardown (idempotent no-op)"
+bash "$SCRIPT_DIR/setup-tap.sh" --host --teardown
 assert_rules_absent
 
 log "all assertions passed"

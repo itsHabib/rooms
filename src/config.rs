@@ -78,6 +78,12 @@ impl RoomsConfig {
         Some(self.resolved_state_base()?.join(id))
     }
 
+    /// Pool slot directory: `<state_base>/slots` — one `O_EXCL` file per claimed
+    /// slot. `None` only when the base can't resolve (HOME unset).
+    pub fn slots_dir(&self) -> Option<PathBuf> {
+        Some(self.resolved_state_base()?.join(crate::slot::SLOTS_DIR))
+    }
+
     /// Jailer chroot base: the `jailer_chroot_base` override, else
     /// `<state_base>/jailer`.
     pub fn chroot_base(&self) -> Option<PathBuf> {

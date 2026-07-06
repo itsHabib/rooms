@@ -16,6 +16,7 @@ use crate::config::RoomsConfig;
 use crate::error::RegistryError;
 use crate::firecracker::{self, KillSignalOutcome};
 use crate::room::{self, Liveness, RoomMeta};
+use crate::slot;
 
 /// Schema version for `ls --json` stdout (mirrors `doctor`/`diff`).
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -215,6 +216,15 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
             return Err(RegistryError::InvalidRoomId { id: id.clone() });
         }
     }
+    // Reclaim leaked slots first (a claimer that died before its room.json, or a
+    // reap that crashed mid-way): reconcile judges each slot file by its own
+    // liveness token and removes a confirmed-dead one with no room dir. A slot
+    // still backed by a room dir is left for the reap loop below to free through
+    // the room's own teardown. Skip the sweep on a dry-run and on a targeted
+    // (`--only`) gc — both are scoped to a single room, not a pool-wide sweep.
+    if !opts.dry_run && opts.only.is_none() {
+        reconcile_leaked_slots(config);
+    }
     let mut rooms = list_rooms(config)?;
     if let Some(only) = &opts.only {
         rooms.retain(|e| &e.id == only);
@@ -255,8 +265,45 @@ fn reap_entry(
     if dry_run {
         return Ok(outcome(entry, false, "would reap (dry-run)"));
     }
-    firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, config)?;
+    let slot = slot_release_for(config, entry)?;
+    firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, slot, config)?;
     Ok(outcome(entry, true, "reaped"))
+}
+
+/// Build the tap + slot-file release for a room's teardown, `None` when the room
+/// holds no pool slot (a legacy shared-tap room). The slot's own recorded tap +
+/// index are threaded straight from `room.json`.
+fn slot_release_for(
+    config: &RoomsConfig,
+    entry: &RoomEntry,
+) -> Result<Option<firecracker::SlotRelease>, RegistryError> {
+    let Some(slot) = &entry.slot else {
+        return Ok(None);
+    };
+    let base = config
+        .resolved_state_base()
+        .ok_or(RegistryError::HomeUnset)?;
+    Ok(Some(firecracker::SlotRelease::new(
+        base,
+        slot.index,
+        slot.tap.clone(),
+        entry.id.clone(),
+    )))
+}
+
+/// Run `slot::reconcile` and delete the now-orphaned tap of every slot it
+/// removed (a dead claimer with no room dir — the slot file is gone but the tap
+/// may linger). Best-effort: an unresolvable base skips the sweep, and every
+/// tap delete tolerates already-gone.
+fn reconcile_leaked_slots(config: &RoomsConfig) {
+    let Some(base) = config.resolved_state_base() else {
+        return;
+    };
+    for reclaimed in slot::reconcile(&base) {
+        if reclaimed.removed {
+            firecracker::delete_tap(&format!("tap-fc{}", reclaimed.index));
+        }
+    }
 }
 
 /// Resolve the two dirs gc removes for `id`, re-checking each sits under its
@@ -475,7 +522,8 @@ fn reap_after_kill(
     ok_reason: &str,
 ) -> Result<KillOutcome, RegistryError> {
     let (room_dir, jail_instance_dir, socket) = reap_paths(config, &entry.id)?;
-    match firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, config) {
+    let slot = slot_release_for(config, entry)?;
+    match firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, slot, config) {
         Ok(()) => Ok(kill_outcome(entry, KillDisposition::Killed, ok_reason)),
         Err(e) => {
             warn!(id = %entry.id, error = %e, "kill: reap after terminate failed");
@@ -660,6 +708,44 @@ mod tests {
         } else {
             assert!(report.outcomes.iter().all(|o| !o.reaped));
         }
+    }
+
+    /// Reaping a slotted orphaned-dead room frees its slot file — the reap path
+    /// threads the room.json slot into `reap_orphan`'s compare-and-delete free.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gc_frees_slot_of_reaped_slotted_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let id = make_room(&config, Some(4_194_305), false, true);
+
+        // Record a slot in room.json and claim the matching slot file (dead
+        // claimer, so the belt-and-suspenders reconcile sweep defers to the reap
+        // because the room dir is still present).
+        let room_dir = config.room_dir(&id).unwrap();
+        let mut meta = room::read(&room_dir).unwrap().unwrap();
+        meta.slot = Some(room::Slot {
+            index: 1,
+            tap: "tap-fc1".to_owned(),
+            gateway: std::net::Ipv4Addr::new(172, 16, 0, 5),
+            guest: std::net::Ipv4Addr::new(172, 16, 0, 6),
+            prefix: 30,
+        });
+        room::write_atomic(&room_dir, &meta).unwrap();
+        let me = crate::slot::Claimer {
+            pid: 4_194_305,
+            starttime: 1,
+        };
+        crate::slot::claim(dir.path(), &id, me, 8, Some(1)).unwrap();
+        let slot_file = dir.path().join("slots").join("1");
+        assert!(slot_file.exists(), "slot file present before reap");
+
+        let report = gc(&config, &GcOptions::default()).unwrap();
+        assert!(report.outcomes.iter().any(|o| o.id == id && o.reaped));
+        assert!(
+            !slot_file.exists(),
+            "reaping a slotted room must free its slot file"
+        );
     }
 
     #[cfg(target_os = "linux")]
