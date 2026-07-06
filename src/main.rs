@@ -8,8 +8,11 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
 use rooms::{
-    artifacts, config::RoomsConfig, doctor, error::RoomsError, firecracker, registry, room, rootfs,
-    runner, slot,
+    artifacts,
+    config::RoomsConfig,
+    doctor,
+    error::{RoomsError, SlotError},
+    firecracker, registry, room, rootfs, runner, slot,
 };
 use tracing::{info, warn};
 
@@ -80,6 +83,18 @@ enum Command {
         /// `30m`, `2h`. Omit for no cap (unbounded). Not valid with `--keep`.
         #[arg(long = "max-wall", value_parser = parse_max_wall, conflicts_with = "keep")]
         max_wall: Option<Duration>,
+        /// Lower the pool ceiling for this invocation. The host cap (default 8)
+        /// is the source of truth; this can only lower it, never raise it. Above
+        /// 63 is rejected — the /24 pool carves into 64 /30s minus the reserved
+        /// slot 0, so slot indices top out there. Also settable via
+        /// `ROOMS_MAX_POOL`.
+        #[arg(long = "max-pool", env = "ROOMS_MAX_POOL", value_parser = parse_max_pool)]
+        max_pool: Option<u8>,
+        /// Emit a machine-readable terminal record on stdout. On failure this
+        /// carries the `error_kind` (e.g. `pool_full`) so a caller can branch on
+        /// the field without matching an exit code or a message string.
+        #[arg(long)]
+        json: bool,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -160,6 +175,8 @@ struct RunArgs {
     out_dir: Option<PathBuf>,
     readonly_rootfs: bool,
     max_wall: Option<Duration>,
+    max_pool: Option<u8>,
+    json: bool,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -206,6 +223,33 @@ fn split_duration_unit(s: &str) -> (&str, u64) {
     (s, 1)
 }
 
+/// Parse `--max-pool` / `ROOMS_MAX_POOL`: a positive integer no greater than the
+/// addressing ceiling. The two ceilings are distinct axes — this is the
+/// *addressing* one: the pool is a /24 carved into 64 /30s minus the reserved
+/// slot 0, so slot indices top out at [`slot::MAX_SLOT`]. The host *resource*
+/// cap is separate and can only be lower. Rejecting above the addressing ceiling
+/// at parse time keeps a claim from ever being asked to walk off the /24.
+fn parse_max_pool(s: &str) -> Result<u8, String> {
+    let n: u8 = s.trim().parse().map_err(|_| {
+        format!(
+            "invalid --max-pool '{s}': want an integer 1..={}",
+            slot::MAX_SLOT
+        )
+    })?;
+    if n == 0 {
+        return Err("--max-pool must be greater than zero".to_owned());
+    }
+    if n > slot::MAX_SLOT {
+        return Err(format!(
+            "--max-pool {n} exceeds the addressing ceiling {}: the pool is a /24 carved into /30s \
+             (64 slots minus the reserved slot 0), so slot indices top out at {}",
+            slot::MAX_SLOT,
+            slot::MAX_SLOT
+        ));
+    }
+    Ok(n)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -220,8 +264,81 @@ async fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             warn!(error = %err, "command failed");
-            ExitCode::from(2)
+            ExitCode::from(exit_code_for_error(&err))
         }
+    }
+}
+
+/// The process exit code for a terminal [`RoomsError`]. `PoolFull` gets its own
+/// reserved code so a caller can tell "pool at capacity, retry later" apart from
+/// a generic failure without parsing stderr. The exit-code contract: `0` ok,
+/// `2` generic error, `3` `diff`'s lane escape, **`4` pool full**; a guest's own
+/// code passes through `0..=255` on the `Ok` path (so exit 4 alone is ambiguous
+/// with a guest that exited 4 — the `--json` `error_kind` disambiguates).
+const fn exit_code_for_error(err: &RoomsError) -> u8 {
+    match err {
+        RoomsError::Slot(SlotError::PoolFull { .. }) => 4,
+        _ => 2,
+    }
+}
+
+/// The coarse `error_kind` for the `rooms run --json` terminal record. Ship's
+/// runner keys on `pool_full` — the one terminal error it must distinguish
+/// (fail-fast backpressure, not a real failure) — without matching a string or
+/// an exit code a guest could collide with.
+const fn error_kind(err: &RoomsError) -> &'static str {
+    match err {
+        RoomsError::Slot(SlotError::PoolFull { .. }) => "pool_full",
+        RoomsError::Slot(_) => "slot",
+        RoomsError::Firecracker(_) => "firecracker",
+        RoomsError::Rootfs(_) => "rootfs",
+        RoomsError::Transport(_) => "transport",
+        RoomsError::Runner(_) => "runner",
+        RoomsError::Registry(_) => "registry",
+        RoomsError::Internal(_) => "internal",
+    }
+}
+
+/// The `rooms run --json` terminal record: the machine-readable outcome ship
+/// keys on. `cap` rides along only for `pool_full`, where it's the pool size
+/// actually walked.
+#[derive(serde::Serialize)]
+struct RunErrorRecord {
+    error_kind: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cap: Option<u8>,
+}
+
+/// Build the terminal record for a failed `rooms run --json`.
+fn run_error_record(err: &RoomsError) -> RunErrorRecord {
+    let cap = match err {
+        RoomsError::Slot(SlotError::PoolFull { cap }) => Some(*cap),
+        _ => None,
+    };
+    RunErrorRecord {
+        error_kind: error_kind(err),
+        message: err.to_string(),
+        cap,
+    }
+}
+
+/// Print the `--json` terminal record for a failed run to stdout — the same
+/// machine-readable stdout contract `doctor`/`ls`/`diff --json` follow (logs
+/// stay on stderr). A serialize failure is logged, never fatal: the exit code
+/// still carries the outcome.
+fn emit_run_error_json(err: &RoomsError) {
+    match serde_json::to_string(&run_error_record(err)) {
+        Ok(line) => {
+            #[allow(
+                clippy::print_stdout,
+                reason = "run --json terminal record; stdout is the documented contract"
+            )]
+            {
+                println!("{line}");
+            }
+        }
+        Err(e) => warn!(error = %e, "failed to serialize run --json terminal record"),
     }
 }
 
@@ -241,6 +358,8 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             out_dir,
             readonly_rootfs,
             max_wall,
+            max_pool,
+            json,
         } => {
             run_room(
                 RunArgs {
@@ -256,6 +375,8 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     out_dir,
                     readonly_rootfs,
                     max_wall,
+                    max_pool,
+                    json,
                 },
                 &config,
             )
@@ -309,7 +430,22 @@ fn run_doctor_cmd(
     Ok(u8::from(!report.all_ok()))
 }
 
+/// Boot a room, optionally emitting the `--json` terminal error record. The
+/// exit-code side of the `PoolFull` contract lives in `main`; this owns the
+/// stdout data surface (like every other `--json` command), so the two
+/// concerns — process code and machine-readable record — stay separated.
 async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    let json = args.json;
+    let result = run_room_inner(args, config).await;
+    if json {
+        if let Err(err) = &result {
+            emit_run_error_json(err);
+        }
+    }
+    result
+}
+
+async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
 
     let kernel = args
@@ -357,7 +493,9 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     let me = slot::Claimer::current().ok_or_else(|| {
         RoomsError::Internal("cannot read this process's identity for the slot claim".to_owned())
     })?;
-    let claimed = slot::claim(&state_base, &room_id, me, slot::DEFAULT_MAX_POOL, None)?;
+    // The cap is a host fact; --max-pool / ROOMS_MAX_POOL can only lower it.
+    let cap = config.effective_max_pool(args.max_pool);
+    let claimed = slot::claim(&state_base, &room_id, me, cap, None)?;
     let network = firecracker::NetworkConfig {
         tap_name: claimed.tap.clone(),
         guest_ip: claimed.guest.to_string(),
@@ -966,8 +1104,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        changeset_exit_code, diff_changeset, humanize_secs, parse_max_wall, resolve_action,
-        truncate_label, Cli, Command, RoomsError, RunArgs, RunnerKind,
+        changeset_exit_code, diff_changeset, exit_code_for_error, humanize_secs, parse_max_pool,
+        parse_max_wall, resolve_action, run_error_record, truncate_label, Cli, Command, RoomsError,
+        RunArgs, RunnerKind, SlotError,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
@@ -1052,6 +1191,111 @@ mod tests {
         assert!(
             err.to_string().contains("cannot be used with") || err.to_string().contains("--keep"),
             "expected a conflict error naming --keep; got: {err}"
+        );
+    }
+
+    #[test]
+    fn max_pool_and_json_flags_parse_onto_run() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "id",
+            "--max-pool",
+            "4",
+            "--json",
+        ])
+        .expect("--max-pool + --json should parse");
+        match cli.command {
+            Command::Run { max_pool, json, .. } => {
+                assert_eq!(max_pool, Some(4));
+                assert!(json);
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_max_pool_accepts_the_valid_range() {
+        assert_eq!(parse_max_pool("1"), Ok(1));
+        assert_eq!(parse_max_pool("8"), Ok(8));
+        assert_eq!(parse_max_pool("63"), Ok(super::slot::MAX_SLOT));
+    }
+
+    #[test]
+    fn parse_max_pool_rejects_zero_and_junk() {
+        for bad in ["0", "abc", "-1", "", "12x"] {
+            assert!(parse_max_pool(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn max_pool_above_the_addressing_ceiling_is_rejected_at_parse_time() {
+        // 64 is one past the /24 carve; the message must name that origin so the
+        // operator sees the addressing axis, not just a bare range error.
+        let err = parse_max_pool("64").expect_err("64 must be rejected");
+        assert!(
+            err.contains("63") && (err.contains("/24") || err.contains("/30")),
+            "expected a message naming the addressing ceiling; got: {err}"
+        );
+        // And it's rejected all the way through clap at parse time.
+        assert!(
+            Cli::try_parse_from([
+                "rooms",
+                "run",
+                "--image",
+                "x",
+                "--command",
+                "id",
+                "--max-pool",
+                "64"
+            ])
+            .is_err(),
+            "--max-pool 64 must fail to parse"
+        );
+    }
+
+    #[test]
+    fn exit_code_reserves_four_for_pool_full() {
+        assert_eq!(
+            exit_code_for_error(&RoomsError::Slot(SlotError::PoolFull { cap: 8 })),
+            4,
+            "pool full gets its own reserved code"
+        );
+        // Every other error — including other slot errors — stays generic (2).
+        assert_eq!(
+            exit_code_for_error(&RoomsError::Slot(SlotError::TargetTaken { index: 5 })),
+            2
+        );
+        assert_eq!(
+            exit_code_for_error(&RoomsError::Internal("boom".to_owned())),
+            2
+        );
+    }
+
+    #[test]
+    fn run_error_record_marks_pool_full_with_its_cap() {
+        let record = run_error_record(&RoomsError::Slot(SlotError::PoolFull { cap: 8 }));
+        assert_eq!(record.error_kind, "pool_full");
+        assert_eq!(record.cap, Some(8));
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(
+            json.contains("\"error_kind\":\"pool_full\"") && json.contains("\"cap\":8"),
+            "ship keys on error_kind, with the cap alongside; got: {json}"
+        );
+    }
+
+    #[test]
+    fn run_error_record_classifies_other_errors_and_omits_cap() {
+        let record = run_error_record(&RoomsError::Internal("boom".to_owned()));
+        assert_eq!(record.error_kind, "internal");
+        assert_eq!(record.cap, None);
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(
+            !json.contains("cap"),
+            "cap is omitted for a non-pool-full error; got: {json}"
         );
     }
 
@@ -1245,6 +1489,8 @@ mod tests {
             out_dir: None,
             readonly_rootfs: false,
             max_wall: None,
+            max_pool: None,
+            json: false,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
