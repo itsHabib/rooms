@@ -87,10 +87,13 @@ if ! "$rooms_bin" doctor --image "$image" 2>"$log_dir/doctor.log"; then
     fail "doctor preflight reported a FAIL — fix the checks above before running"
 fi
 
-# Baseline host-global state the run must restore exactly.
+# Baseline host-global state the run must restore exactly. Rooms are compared
+# against this baseline (not zero): the default state base may already hold
+# unrelated rooms from other work, so only rooms *added* by this run are leaks.
 taps_before="$(ip -o link show 2>/dev/null | count 'tap-fc')"
 fc_before="$(pgrep -c firecracker 2>/dev/null || true)"
 fc_before="${fc_before:-0}"
+ls_before="$(HOME="$user_home" "$rooms_bin" ls --json 2>/dev/null | count '"id":')"
 
 # 3. Run the e2e binary as root (serial — the tests share host-global taps/slots)
 #    with the user's HOME so it finds the images + guest key. Each test still
@@ -101,20 +104,20 @@ HOME="$user_home" "$repo_root/$test_bin" --test-threads=1 --nocapture \
     >"$log_dir/e2e.log" 2>&1 || e2e_rc=$?
 tail -n 15 "$log_dir/e2e.log"
 
-# 4. Assert zero host-global leak: no new tap-fc*, no orphaned firecracker, and a
-#    clean `rooms ls`. `"id":` appears once per listed room in the --json report.
+# 4. Assert zero host-global leak: no *new* tap-fc*, firecracker proc, or room
+#    since the baseline. `"id":` appears once per listed room in the --json.
 taps_after="$(ip -o link show 2>/dev/null | count 'tap-fc')"
 fc_after="$(pgrep -c firecracker 2>/dev/null || true)"
 fc_after="${fc_after:-0}"
-ls_rooms="$(HOME="$user_home" "$rooms_bin" ls --json 2>/dev/null | count '"id":')"
+ls_after="$(HOME="$user_home" "$rooms_bin" ls --json 2>/dev/null | count '"id":')"
 
 leaks=()
 [[ "$taps_after" -gt "$taps_before" ]] &&
     leaks+=("tap-fc leaked (before=$taps_before after=$taps_after): $(ip -o link show | grep 'tap-fc' | tr '\n' ' ')")
 [[ "$fc_after" -gt "$fc_before" ]] &&
     leaks+=("firecracker procs leaked (before=$fc_before after=$fc_after)")
-[[ "$ls_rooms" -gt 0 ]] &&
-    leaks+=("rooms ls not clean: $ls_rooms room(s) left — $(HOME="$user_home" "$rooms_bin" ls 2>&1 | tr '\n' ';')")
+[[ "$ls_after" -gt "$ls_before" ]] &&
+    leaks+=("rooms ls: $((ls_after - ls_before)) new room(s) since baseline (before=$ls_before after=$ls_after) — $(HOME="$user_home" "$rooms_bin" ls 2>&1 | tr '\n' ';')")
 
 if [[ "$e2e_rc" -ne 0 ]]; then
     echo "[e2e] e2e suite FAILED (rc=$e2e_rc); see $log_dir/e2e.log" >&2
