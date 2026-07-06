@@ -7,5 +7,6 @@ Start with the elevator pitch in [the top-level README](../README.md). For more 
 3. **Architecture** — see [`CLAUDE.md`](../CLAUDE.md)'s "Architecture" section.
 4. **Productionization manifest** — [`features/01-productionization/driver.md`](features/01-productionization/driver.md).
 5. **Runner contract** — [`runner-contract.md`](runner-contract.md). Artifact layout consumers need.
+6. **Doctor preflight gate** — [`preflight.md`](preflight.md). Every host/e2e run preflights on `rooms doctor`; FAIL aborts.
 
 Per-feature spec docs live under [`features/<slug>/spec.md`](features/).
