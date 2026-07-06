@@ -225,7 +225,7 @@ async fn room_boots_on_slot_1_and_reaps_byte_identically() {
     let slots_before = slots_listing(&state_base);
     let fwd_before = rooms_fwd_dump();
     assert!(
-        !taps_before.contains("tap-fc1 "),
+        !taps_before.contains("tap-fc1:"),
         "slot 1 already in use on this host (tap-fc1 present); free it before running: {taps_before}"
     );
 
@@ -328,6 +328,13 @@ const CONCURRENT_INDICES: [u8; 3] = [1, 2, 3];
 /// so this line drops every inter-slot packet. The byte-identical `fwd` assert
 /// proves boot/reap never touch it.
 const ISOLATION_DROP: &str = "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP";
+
+/// The `FORWARD` jump into `ROOMS_FWD`. It must be the *first* FORWARD rule so no
+/// pre-existing broad ACCEPT can preempt the chain and let guest→guest
+/// forwarding slip past isolation — the DROP only bites if packets actually
+/// reach the chain (`setup-tap.sh`'s `iptables -I FORWARD 1 -j ROOMS_FWD`,
+/// mirrored by `scripts/test-tap-rules.sh`).
+const FORWARD_JUMP: &str = "-A FORWARD -j ROOMS_FWD";
 
 /// A room booted on a pool slot for the concurrent-boot gate.
 struct BootedRoom {
@@ -461,6 +468,22 @@ fn isolation_precedes_egress(fwd_dump: &str) -> bool {
     }
 }
 
+/// The first `-A FORWARD ...` rule from `iptables -S FORWARD`, or empty when the
+/// FORWARD chain carries no rules. The gate needs this to be the `ROOMS_FWD`
+/// jump: a chain that reads clean but isn't first (or isn't jumped at all)
+/// leaves guest→guest forwarding possible.
+fn first_forward_rule() -> String {
+    let out = Command::new("iptables")
+        .args(["-S", "FORWARD"])
+        .output()
+        .expect("iptables -S FORWARD");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|line| line.starts_with("-A FORWARD "))
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// From guest `source`, probe `peer` over ICMP. Returns true only on a
 /// definitive round-trip (the isolation DROP failed to bite). A blocked probe, a
 /// missing tool, or any inconclusive result reads as not-reached — this
@@ -475,12 +498,22 @@ fn guest_reaches_peer(source: &str, peer: &str, key: &Path) -> bool {
     String::from_utf8_lossy(&out.stdout).contains("ROOMS_REACHED")
 }
 
-/// Assert guest→guest isolation two ways: structurally (the `ROOMS_FWD` DROP is
-/// present and ordered before the egress ACCEPT, so inter-slot traffic can't
-/// slip past) and — when a guest login is available — behaviorally (guest k
-/// cannot actually reach guest j). Without a key-paired rootfs the structural
-/// proof stands alone and the gap is noted, never failed.
+/// Assert guest→guest isolation. The structural proof (always run) pins the
+/// whole packet path, not just the chain text: `ROOMS_FWD` is jumped from
+/// `FORWARD` **first** (so no prior ACCEPT preempts it), the guest→guest DROP is
+/// present, and it's ordered **before** the egress ACCEPT. The behavioral proof
+/// (when a guest login exists) confirms guest k cannot actually reach guest j.
+/// Without a key-paired rootfs the structural proof stands alone and the
+/// behavioral gap is noted, never failed.
 fn assert_isolation(booted: &[BootedRoom], logins: &[String]) {
+    // Packet path: the chain must be jumped from FORWARD and be first, else the
+    // DROP below reads clean but never sees an inter-slot packet.
+    let forward_first = first_forward_rule();
+    assert_eq!(
+        forward_first, FORWARD_JUMP,
+        "ROOMS_FWD must be the first FORWARD rule so no prior ACCEPT preempts guest isolation; got: {forward_first:?}"
+    );
+
     let fwd = rooms_fwd_dump();
     assert!(
         fwd.contains(ISOLATION_DROP),
@@ -534,7 +567,7 @@ async fn three_rooms_boot_concurrently_isolated_and_reap_byte_identically() {
     let fwd_before = rooms_fwd_dump();
     for index in CONCURRENT_INDICES {
         assert!(
-            !taps_before.contains(&format!("tap-fc{index} ")),
+            !taps_before.contains(&format!("tap-fc{index}:")),
             "slot {index} already in use (tap-fc{index} present); free it first: {taps_before}"
         );
     }
