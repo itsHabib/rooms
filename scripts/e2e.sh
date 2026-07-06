@@ -66,7 +66,10 @@ cd "$repo_root" || fail "repo root not found: $repo_root"
 # 1. Build the rooms binary + the e2e test binary AS THE USER (no-run: compile
 #    only). The e2e tests themselves need root, so we run the built binary below.
 echo "[e2e] building (as $build_user)..."
+# sudo sanitizes PATH, so put the user's toolchain (rustup/cargo lives under
+# ~/.cargo/bin) ahead of the system dirs the linker needs.
 if ! sudo -u "$build_user" env HOME="$user_home" \
+    PATH="$user_home/.cargo/bin:/usr/local/bin:/usr/bin:/bin" \
     cargo test --features e2e --no-run >"$log_dir/build.log" 2>&1; then
     tail -n 30 "$log_dir/build.log" >&2
     fail "build failed (see $log_dir/build.log)"
