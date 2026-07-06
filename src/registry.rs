@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::config::RoomsConfig;
@@ -23,7 +23,7 @@ use crate::slot;
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
 
 /// A room's lifecycle state as the registry sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RoomState {
     /// firecracker alive, an in-flight `rooms run`.
@@ -60,7 +60,7 @@ impl RoomState {
 }
 
 /// One room as listed by `rooms ls`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomEntry {
     pub id: String,
     pub state: RoomState,
@@ -77,7 +77,7 @@ pub struct RoomEntry {
 }
 
 /// The `ls --json` payload (schema'd, like the doctor/diff reports).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListReport {
     pub schema_version: u32,
     pub rooms: Vec<RoomEntry>,
@@ -91,6 +91,31 @@ impl ListReport {
             rooms,
         }
     }
+
+    /// True when the base holds no rooms — the clean post-run state a host-e2e
+    /// harness asserts, since any room left behind is a leak.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.rooms.is_empty()
+    }
+}
+
+/// Parse `rooms ls --json` output into a [`ListReport`].
+///
+/// A report this build can't read — unparseable, or a foreign `schema_version` —
+/// is an error, never a silently-"clean" empty list: a leak check must not pass
+/// on a report it can't trust (the same fail-safe discipline the doctor preflight
+/// gate uses).
+pub fn parse_ls_report(json: &str) -> Result<ListReport, String> {
+    let report: ListReport =
+        serde_json::from_str(json).map_err(|e| format!("parse ls --json: {e}"))?;
+    if report.schema_version != REGISTRY_SCHEMA_VERSION {
+        return Err(format!(
+            "ls --json schema_version {} != supported {REGISTRY_SCHEMA_VERSION}; regenerate with this rooms build",
+            report.schema_version
+        ));
+    }
+    Ok(report)
 }
 
 /// Pure state classification from a room's keep flag + liveness (policy).
@@ -568,8 +593,8 @@ mod tests {
     )]
 
     use super::{
-        classify, gc, is_valid_room_id, kill, kill_live, list_rooms, GcOptions, KillDisposition,
-        RoomEntry, RoomState,
+        classify, gc, is_valid_room_id, kill, kill_live, list_rooms, parse_ls_report, GcOptions,
+        KillDisposition, ListReport, RoomEntry, RoomState, REGISTRY_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::error::RegistryError;
@@ -578,6 +603,54 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     const VALID_ID: &str = "01abcdefghijklmnopqrstuvwx";
+
+    /// A minimal leftover (`--keep`) room entry for the leak-report tests.
+    fn leak_room(id: &str) -> RoomEntry {
+        RoomEntry {
+            id: id.to_owned(),
+            state: RoomState::Kept,
+            label: Some("(keep)".to_owned()),
+            pid: Some(4242),
+            pid_starttime: None,
+            started_at: Some(Utc::now()),
+            keep: true,
+            slot: None,
+        }
+    }
+
+    #[test]
+    fn parse_ls_report_round_trips_and_flags_a_leak() {
+        // A base with a leftover room round-trips through the real schema and is
+        // NOT clean — the harness's post-run leak signal.
+        let report = ListReport::new(vec![leak_room(VALID_ID)]);
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed = parse_ls_report(&json).expect("real ls --json must round-trip");
+        assert!(!parsed.is_clean(), "a leftover room is a leak");
+        assert_eq!(parsed.rooms.len(), 1);
+        assert_eq!(parsed.rooms[0].id, VALID_ID);
+    }
+
+    #[test]
+    fn an_empty_ls_report_is_clean() {
+        let json = serde_json::to_string(&ListReport::new(vec![])).unwrap();
+        assert!(parse_ls_report(&json)
+            .expect("empty report parses")
+            .is_clean());
+    }
+
+    #[test]
+    fn a_foreign_schema_or_garbage_ls_report_is_rejected_not_clean() {
+        // A leak check must never read a report it can't trust as "clean".
+        let foreign = format!(
+            r#"{{"schema_version":{},"rooms":[]}}"#,
+            REGISTRY_SCHEMA_VERSION + 1
+        );
+        assert!(
+            parse_ls_report(&foreign).is_err(),
+            "foreign schema rejected"
+        );
+        assert!(parse_ls_report("not json").is_err(), "garbage rejected");
+    }
 
     fn config_with_base(base: &Path) -> RoomsConfig {
         RoomsConfig {
