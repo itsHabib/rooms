@@ -333,12 +333,26 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
         return Err(RoomsError::Internal(remediation));
     }
 
-    // Mint the room id BEFORE the claim, so the one value is the slot-file
-    // contents, the room dir name, and room.json.id. Then claim a pool slot and
-    // derive the guest network from it.
+    // Every room path derives from the state base; resolve it once up front.
     let state_base = config.resolved_state_base().ok_or_else(|| {
         RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
     })?;
+    // Resolve every host-side input that can fail BEFORE claiming a slot: a
+    // missing --task file, a bad key path, or other input error must fail fast
+    // without leaking a claim — repeated, that would exhaust the pool until a
+    // `rooms gc`. After the claim, only boot can fail, and its guard frees the
+    // slot.
+    let key = key_path()?;
+    let action = resolve_action(&args).await?;
+    // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
+    // untrusted code) or when the operator opts in with --readonly-rootfs; a
+    // plain `rooms run --command` otherwise keeps a writable rootfs so any
+    // image — including ones without /sbin/overlay-init — still boots.
+    let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
+
+    // Mint the room id BEFORE the claim, so the one value is the slot-file
+    // contents, the room dir name, and room.json.id. Then claim a pool slot and
+    // derive the guest network from it.
     let room_id = firecracker::mint_room_id();
     let me = slot::Claimer::current().ok_or_else(|| {
         RoomsError::Internal("cannot read this process's identity for the slot claim".to_owned())
@@ -350,15 +364,6 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
         gateway_ip: claimed.gateway.to_string(),
         prefix: claimed.prefix,
     };
-    let key = key_path()?;
-    // Resolve the post-boot action before booting so a missing --task file (or
-    // other host-side input error) fails fast without spending a microVM boot.
-    let action = resolve_action(&args).await?;
-    // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
-    // untrusted code) or when the operator opts in with --readonly-rootfs; a
-    // plain `rooms run --command` otherwise keeps a writable rootfs so any
-    // image — including ones without /sbin/overlay-init — still boots.
-    let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
     let descriptor = room::RoomDescriptor {
         command: Some(room_label(&action)),
         keep: args.keep,

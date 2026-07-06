@@ -13,6 +13,7 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::config::RoomsConfig;
+use crate::doctor;
 use crate::error::RegistryError;
 use crate::firecracker::{self, KillSignalOutcome};
 use crate::room::{self, Liveness, RoomMeta};
@@ -291,10 +292,18 @@ fn slot_release_for(
     )))
 }
 
-/// Run `slot::reconcile` and delete the now-orphaned tap of every slot it
-/// removed (a dead claimer with no room dir — the slot file is gone but the tap
-/// may linger). Best-effort: an unresolvable base skips the sweep, and every
-/// tap delete tolerates already-gone.
+/// Reclaim leaked slots and sweep orphaned taps. Two passes, in order:
+///
+/// 1. `slot::reconcile` frees slot files whose claimer is dead, deleting each
+///    reclaimed slot's tap.
+/// 2. Any `tap-fc<k>` still present with no slot file is a true orphan — either
+///    a boot-path crash before the room registered, or a pass-1 tap-delete that
+///    failed after the slot file was already gone. Delete it so the next room
+///    claiming that index doesn't fail on `ip tuntap add`. This is the sweep
+///    `rooms doctor` promises for its orphaned-tap warning.
+///
+/// Best-effort throughout: an unresolvable base skips it, every tap delete
+/// tolerates already-gone.
 fn reconcile_leaked_slots(config: &RoomsConfig) {
     let Some(base) = config.resolved_state_base() else {
         return;
@@ -303,6 +312,9 @@ fn reconcile_leaked_slots(config: &RoomsConfig) {
         if reclaimed.removed {
             firecracker::delete_tap(&format!("tap-fc{}", reclaimed.index));
         }
+    }
+    for index in doctor::orphaned_pool_taps(config) {
+        firecracker::delete_tap(&format!("tap-fc{index}"));
     }
 }
 

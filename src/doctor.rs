@@ -152,8 +152,7 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
         check_jailer(config),
         check_firecracker_user(),
         check_jailer_file_access(image),
-        check_tap(),
-        check_tap_openable(),
+        check_tun_device(),
         check_rooms_fwd(),
         check_slots_dir(config),
         check_orphaned_taps(config),
@@ -447,8 +446,12 @@ fn current_primary_gid(uid: u32) -> u32 {
     parse_getent_passwd(&String::from_utf8_lossy(&out.stdout)).map_or(u32::MAX, |(_uid, gid)| gid)
 }
 
-fn check_tap_openable() -> CheckResult {
-    let name = "tap_openable".to_owned();
+/// The `/dev/net/tun` device firecracker opens at boot to create each slot's
+/// tap. The per-slot model has no persistent `tap-fc0` to probe — tap creation
+/// happens in the boot path — so the standing precondition is just that the
+/// firecracker user can open `/dev/net/tun`.
+fn check_tun_device() -> CheckResult {
+    let name = "tun_device".to_owned();
     #[cfg(unix)]
     {
         let Some(uid) = firecracker_uid() else {
@@ -458,7 +461,6 @@ fn check_tap_openable() -> CheckResult {
                 message: format!("cannot verify TAP access: {FIRECRACKER_USER} user missing"),
             };
         };
-
         let tun = Path::new("/dev/net/tun");
         if !tun.exists() {
             return CheckResult {
@@ -468,53 +470,21 @@ fn check_tap_openable() -> CheckResult {
                     .to_owned(),
             };
         }
-
         if !path_readable_by_uid(tun, uid) {
             return CheckResult {
                 name,
                 ok: false,
                 message: format!(
-                    "{FIRECRACKER_USER} cannot open /dev/net/tun; recreate TAP with scripts/setup-tap.sh"
+                    "{FIRECRACKER_USER} cannot open /dev/net/tun; check its permissions"
                 ),
             };
         }
-
-        let show = Command::new("ip")
-            .args(["tuntap", "show", "tap-fc0"])
-            .output();
-        match show {
-            Ok(out) if out.status.success() => {
-                let line = String::from_utf8_lossy(&out.stdout);
-                if tap_owned_by_user(&line, FIRECRACKER_USER) {
-                    CheckResult {
-                        name,
-                        ok: true,
-                        message: format!("tap-fc0 exists and is owned by {FIRECRACKER_USER}"),
-                    }
-                } else {
-                    CheckResult {
-                        name,
-                        ok: false,
-                        message: format!(
-                            "tap-fc0 is not owned by {FIRECRACKER_USER}; run sudo bash scripts/setup-tap.sh"
-                        ),
-                    }
-                }
-            }
-            Ok(out) => CheckResult {
-                name,
-                ok: false,
-                message: format!(
-                    "tap-fc0 not found (ip link exit {}: {}); run `sudo bash scripts/setup-tap.sh`",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            },
-            Err(e) => CheckResult {
-                name,
-                ok: false,
-                message: format!("could not run `ip link show tap-fc0`: {e}"),
-            },
+        CheckResult {
+            name,
+            ok: true,
+            message: format!(
+                "/dev/net/tun present and openable by {FIRECRACKER_USER} (per-slot taps created at boot)"
+            ),
         }
     }
     #[cfg(not(unix))]
@@ -522,18 +492,9 @@ fn check_tap_openable() -> CheckResult {
         CheckResult {
             name,
             ok: false,
-            message: "TAP openability checks require a Unix host".to_owned(),
+            message: "TAP checks require a Unix host".to_owned(),
         }
     }
-}
-
-/// Returns true when `ip tuntap show` output assigns the TAP to `user`.
-pub fn tap_owned_by_user(tuntap_output: &str, user: &str) -> bool {
-    tuntap_output
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair.first() == Some(&"user") && pair.get(1) == Some(&user))
 }
 
 fn parse_firecracker_version(output: &str) -> Option<(u32, u32)> {
@@ -685,54 +646,56 @@ fn check_slots_dir(config: &RoomsConfig) -> CheckResult {
 
 fn check_orphaned_taps(config: &RoomsConfig) -> CheckResult {
     let name = "orphaned_taps".to_owned();
+    let orphans = orphaned_pool_taps(config);
+    if orphans.is_empty() {
+        return CheckResult {
+            name,
+            ok: true,
+            message: "no orphaned pool taps".to_owned(),
+        };
+    }
+    let list = orphans
+        .iter()
+        .map(|k| format!("tap-fc{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    CheckResult {
+        name,
+        ok: true,
+        message: format!("warn: orphaned tap(s) with no live slot: {list}; `rooms gc` sweeps them"),
+    }
+}
+
+/// Pool taps (`tap-fc<k>`, k≥1) present on the host with no claimed slot file.
+///
+/// The true orphans a boot-path or reconcile crash can strand (a slot file
+/// removed, then its tap-delete failed). Empty on a non-unix host or when `ip
+/// link show` can't be read. Shared by `doctor` (which flags them) and
+/// `registry::gc` (which sweeps them), so the two never disagree.
+#[must_use]
+#[cfg_attr(
+    not(unix),
+    allow(
+        clippy::missing_const_for_fn,
+        reason = "non-unix body is const-trivial; the unix body shells out to ip"
+    )
+)]
+pub fn orphaned_pool_taps(config: &RoomsConfig) -> Vec<u8> {
     #[cfg(unix)]
     {
         let claimed = claimed_slot_indices(config);
-        let output = Command::new("ip").args(["-o", "link", "show"]).output();
-        let Ok(out) = output else {
-            return CheckResult {
-                name,
-                ok: true,
-                message: "warn: could not run `ip link show` to scan for orphaned taps".to_owned(),
-            };
+        let Ok(out) = Command::new("ip").args(["-o", "link", "show"]).output() else {
+            return Vec::new();
         };
         if !out.status.success() {
-            return CheckResult {
-                name,
-                ok: true,
-                message: "warn: `ip link show` failed; skipping orphaned-tap scan".to_owned(),
-            };
+            return Vec::new();
         }
-        let dump = String::from_utf8_lossy(&out.stdout);
-        let orphans = orphaned_tap_indices(&dump, &claimed);
-        if orphans.is_empty() {
-            return CheckResult {
-                name,
-                ok: true,
-                message: "no orphaned pool taps".to_owned(),
-            };
-        }
-        let list = orphans
-            .iter()
-            .map(|k| format!("tap-fc{k}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        CheckResult {
-            name,
-            ok: true,
-            message: format!(
-                "warn: orphaned tap(s) with no live slot: {list}; `rooms gc` sweeps them"
-            ),
-        }
+        orphaned_tap_indices(&String::from_utf8_lossy(&out.stdout), &claimed)
     }
     #[cfg(not(unix))]
     {
         let _ = config;
-        CheckResult {
-            name,
-            ok: false,
-            message: "orphaned-tap checks require a Unix host".to_owned(),
-        }
+        Vec::new()
     }
 }
 
@@ -823,57 +786,6 @@ fn parse_tap_index(line: &str) -> Option<u8> {
     let index: u8 = suffix.parse().ok()?;
     // Slot 0 is the reserved legacy shared tap — never an orphan candidate.
     (index >= 1).then_some(index)
-}
-
-fn check_tap() -> CheckResult {
-    let name = "tap".to_owned();
-    #[cfg(unix)]
-    {
-        // Verifies the runtime prerequisites without needing CAP_NET_ADMIN:
-        // firecracker opens the existing `tap-fc0` via `/dev/net/tun` at boot;
-        // tap creation is `scripts/setup-tap.sh`'s job, not the probe's.
-        let tun = Path::new("/dev/net/tun");
-        if !tun.exists() {
-            return CheckResult {
-                name,
-                ok: false,
-                message: "/dev/net/tun missing; load the tun kernel module (sudo modprobe tun)"
-                    .to_owned(),
-            };
-        }
-        let show = Command::new("ip")
-            .args(["link", "show", "tap-fc0"])
-            .output();
-        match show {
-            Ok(out) if out.status.success() => CheckResult {
-                name,
-                ok: true,
-                message: "/dev/net/tun present and tap-fc0 exists".to_owned(),
-            },
-            Ok(out) => CheckResult {
-                name,
-                ok: false,
-                message: format!(
-                    "tap-fc0 not found (ip link exit {}: {}); run `sudo bash scripts/setup-tap.sh`",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            },
-            Err(e) => CheckResult {
-                name,
-                ok: false,
-                message: format!("could not run `ip link show tap-fc0`: {e}"),
-            },
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        CheckResult {
-            name,
-            ok: false,
-            message: "TAP checks require a Unix host".to_owned(),
-        }
-    }
 }
 
 fn check_nested_virt() -> CheckResult {
@@ -1065,7 +977,7 @@ mod tests {
 
     use super::{
         check_sha_drift, default_rootfs_path, drift_target_path, parse_checksums,
-        parse_firecracker_version, tap_owned_by_user, version_meets_min, RoomsConfig,
+        parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
 
@@ -1111,18 +1023,6 @@ mod tests {
         // With every pool tap claimed, none are orphaned.
         let all: HashSet<u8> = [1u8, 2, 7].into_iter().collect();
         assert!(orphaned_tap_indices(dump, &all).is_empty());
-    }
-
-    #[test]
-    fn tap_owned_by_user_detects_tuntap_owner() {
-        assert!(tap_owned_by_user(
-            "tap-fc0: tap persist user firecracker\n",
-            "firecracker"
-        ));
-        assert!(!tap_owned_by_user(
-            "tap-fc0: tap persist user mh\n",
-            "firecracker"
-        ));
     }
 
     #[test]

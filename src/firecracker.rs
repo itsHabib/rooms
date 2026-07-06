@@ -107,7 +107,7 @@ impl SlotRelease {
 /// tap-then-slot ordering is unit-testable without root or a real `ip`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReleaseStep {
-    /// `ip link del` the owned tap (tolerate already-gone).
+    /// `ip tuntap del` the owned tap (tolerate already-gone).
     DeleteTap(String),
     /// `slot::free` the slot file (compare-and-delete on `room_id`).
     FreeSlot { index: u8, room_id: String },
