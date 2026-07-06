@@ -32,6 +32,10 @@ pub struct RoomsConfig {
     pub min_firecracker_version: (u32, u32),
     /// Minimum rootfs image size in bytes.
     pub min_rootfs_bytes: u64,
+    /// Host-global pool ceiling: the most rooms allowed to hold slots at once.
+    /// `slots/` is host-global, so this — not a per-caller flag — is the source
+    /// of truth; a `--max-pool` / `ROOMS_MAX_POOL` override can only lower it.
+    pub max_pool: u8,
 }
 
 impl Default for RoomsConfig {
@@ -57,6 +61,7 @@ impl Default for RoomsConfig {
             state_base: None,
             min_firecracker_version: (1, 7),
             min_rootfs_bytes: 64 * 1024 * 1024,
+            max_pool: crate::slot::DEFAULT_MAX_POOL,
         }
     }
 }
@@ -82,6 +87,18 @@ impl RoomsConfig {
     /// slot. `None` only when the base can't resolve (HOME unset).
     pub fn slots_dir(&self) -> Option<PathBuf> {
         Some(self.resolved_state_base()?.join(crate::slot::SLOTS_DIR))
+    }
+
+    /// The pool ceiling for one invocation. The host cap ([`Self::max_pool`]) is
+    /// the source of truth; a per-invocation `flag` (`--max-pool` /
+    /// `ROOMS_MAX_POOL`) can only lower it, never raise it. The result is
+    /// clamped to the addressing ceiling ([`crate::slot::MAX_SLOT`]) so a
+    /// misconfigured host cap can never drive a claim off the /24 carve.
+    #[must_use]
+    pub fn effective_max_pool(&self, flag: Option<u8>) -> u8 {
+        flag.unwrap_or(self.max_pool)
+            .min(self.max_pool)
+            .min(crate::slot::MAX_SLOT)
     }
 
     /// Jailer chroot base: the `jailer_chroot_base` override, else
@@ -167,6 +184,48 @@ mod tests {
                 "/s/jailer/firecracker/{id}/root/api.sock"
             )))
         );
+    }
+
+    #[test]
+    fn effective_max_pool_defaults_to_the_host_cap() {
+        // No flag → the host cap (default 8) is walked as-is.
+        let c = RoomsConfig::default();
+        assert_eq!(c.max_pool, crate::slot::DEFAULT_MAX_POOL);
+        assert_eq!(
+            c.effective_max_pool(None),
+            crate::slot::DEFAULT_MAX_POOL,
+            "with no override the effective cap is the host cap"
+        );
+    }
+
+    #[test]
+    fn max_pool_flag_only_lowers_never_raises() {
+        // Host cap 8: a lower flag wins; a higher flag clamps back down to it —
+        // the cap is a host fact, a per-caller flag can't raise it.
+        let c = with_base("/s");
+        assert_eq!(c.max_pool, 8);
+        assert_eq!(
+            c.effective_max_pool(Some(3)),
+            3,
+            "a lower flag lowers the cap"
+        );
+        assert_eq!(
+            c.effective_max_pool(Some(20)),
+            8,
+            "a flag above the host cap clamps down to it"
+        );
+    }
+
+    #[test]
+    fn effective_max_pool_clamps_to_the_addressing_ceiling() {
+        // A host cap misconfigured past the /24 carve can never drive a claim
+        // off the addressing ceiling — flag or no flag.
+        let c = RoomsConfig {
+            max_pool: 200,
+            ..RoomsConfig::default()
+        };
+        assert_eq!(c.effective_max_pool(None), crate::slot::MAX_SLOT);
+        assert_eq!(c.effective_max_pool(Some(u8::MAX)), crate::slot::MAX_SLOT);
     }
 
     #[test]
