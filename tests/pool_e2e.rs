@@ -367,8 +367,16 @@ async fn claim_and_boot(
     Result<firecracker::BootedVm, FirecrackerError>,
 ) {
     let room_id = firecracker::mint_room_id();
-    let claimed = slot::claim(state_base, &room_id, me, slot::DEFAULT_MAX_POOL, None)
-        .expect("claim a pool slot");
+    // Claim through the same cap path the CLI takes (effective_max_pool), not the
+    // bare constant, so this gate tracks a future RoomsConfig default change.
+    let claimed = slot::claim(
+        state_base,
+        &room_id,
+        me,
+        config.effective_max_pool(None),
+        None,
+    )
+    .expect("claim a pool slot");
     // Scope the borrows of room_id/claimed so they end before the return move.
     let result = {
         let network = net_of(&claimed);
@@ -452,17 +460,41 @@ async fn probe_all_reachable(booted: &[BootedRoom]) -> Vec<String> {
     logins
 }
 
+/// Line index of the guest→guest isolation DROP in a `ROOMS_FWD` dump. Per-line
+/// exact match, used for the presence check and both ordering checks alike — so a
+/// decorated line can never make presence (loose) and ordering (strict) disagree
+/// and panic confusingly.
+fn isolation_drop_line(fwd_dump: &str) -> Option<usize> {
+    fwd_dump.lines().position(|l| l.trim() == ISOLATION_DROP)
+}
+
 /// True when the guest→guest DROP sits before the egress ACCEPT in the chain
 /// dump — the order that makes the DROP bite (a preceding broad ACCEPT would let
 /// inter-slot traffic through first). A dump with the DROP and no egress ACCEPT
 /// line still passes: there's nothing for a packet to slip past.
 fn isolation_precedes_egress(fwd_dump: &str) -> bool {
-    let drop_line = fwd_dump.lines().position(|l| l.trim() == ISOLATION_DROP);
     let egress_line = fwd_dump.lines().position(|l| {
         l.contains("-s 172.16.0.0/24") && l.contains("-o ") && l.contains("-j ACCEPT")
     });
-    match (drop_line, egress_line) {
+    match (isolation_drop_line(fwd_dump), egress_line) {
         (Some(d), Some(e)) => d < e,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// True when no ACCEPT to the guest supernet precedes the isolation DROP.
+/// `isolation_precedes_egress` proves the DROP beats the *egress* ACCEPT, but a
+/// different supernet-destined ACCEPT placed above the DROP would match an
+/// inter-slot packet first and pass every other assert while cross-talk stayed
+/// open — so the gate must also prove nothing accepts inter-slot traffic before
+/// the DROP.
+fn no_accept_before_drop(fwd_dump: &str) -> bool {
+    let accept_to_supernet = fwd_dump
+        .lines()
+        .position(|l| l.contains("-d 172.16.0.0/24") && l.contains("-j ACCEPT"));
+    match (isolation_drop_line(fwd_dump), accept_to_supernet) {
+        (Some(d), Some(a)) => a > d,
         (Some(_), None) => true,
         _ => false,
     }
@@ -501,10 +533,10 @@ fn guest_reaches_peer(source: &str, peer: &str, key: &Path) -> bool {
 /// Assert guest→guest isolation. The structural proof (always run) pins the
 /// whole packet path, not just the chain text: `ROOMS_FWD` is jumped from
 /// `FORWARD` **first** (so no prior ACCEPT preempts it), the guest→guest DROP is
-/// present, and it's ordered **before** the egress ACCEPT. The behavioral proof
-/// (when a guest login exists) confirms guest k cannot actually reach guest j.
-/// Without a key-paired rootfs the structural proof stands alone and the
-/// behavioral gap is noted, never failed.
+/// present, **no supernet ACCEPT precedes it**, and it's ordered **before** the
+/// egress ACCEPT. The behavioral proof (when a guest login exists) confirms
+/// guest k cannot actually reach guest j. Without a key-paired rootfs the
+/// structural proof stands alone and the behavioral gap is noted, never failed.
 fn assert_isolation(booted: &[BootedRoom], logins: &[String]) {
     // Packet path: the chain must be jumped from FORWARD and be first, else the
     // DROP below reads clean but never sees an inter-slot packet.
@@ -516,8 +548,12 @@ fn assert_isolation(booted: &[BootedRoom], logins: &[String]) {
 
     let fwd = rooms_fwd_dump();
     assert!(
-        fwd.contains(ISOLATION_DROP),
+        isolation_drop_line(&fwd).is_some(),
         "ROOMS_FWD is missing the guest->guest isolation DROP:\n{fwd}"
+    );
+    assert!(
+        no_accept_before_drop(&fwd),
+        "an ACCEPT to the guest supernet precedes the isolation DROP in ROOMS_FWD — an inter-slot packet could match it first:\n{fwd}"
     );
     assert!(
         isolation_precedes_egress(&fwd),
