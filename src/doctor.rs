@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::RoomsConfig;
 #[cfg(unix)]
@@ -24,6 +24,13 @@ const DRIFT_ARTIFACTS: &[&str] = &[
 
 /// Schema version for `--json` output (ED-4: forward-compatible).
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
+
+/// Prefix doctor stamps on a passing-but-non-fatal check's message.
+///
+/// A gate lets these through (logged); the human `rooms doctor` output renders
+/// them `WARN`. The single source both surfaces key on — see
+/// [`CheckResult::is_warning`].
+pub const WARN_PREFIX: &str = "warn:";
 
 /// The rooms-owned FORWARD sub-chain.
 pub const ROOMS_FWD_CHAIN: &str = "ROOMS_FWD";
@@ -123,15 +130,25 @@ pub fn classify_rooms_fwd_dump(dump: &str) -> RoomsFwdStatus {
 }
 
 /// Outcome of a single doctor check.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
     pub name: String,
     pub ok: bool,
     pub message: String,
 }
 
+impl CheckResult {
+    /// A *warning* — surfaced but non-fatal — is a check that passed yet whose
+    /// message carries the [`WARN_PREFIX`]. A preflight gate lets warnings
+    /// through (logged); only a not-`ok` check is a hard failure.
+    #[must_use]
+    pub fn is_warning(&self) -> bool {
+        self.ok && self.message.starts_with(WARN_PREFIX)
+    }
+}
+
 /// Full doctor report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub schema_version: u32,
     pub checks: Vec<CheckResult>,

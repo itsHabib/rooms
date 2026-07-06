@@ -5,6 +5,7 @@ pub mod config;
 pub mod doctor;
 pub mod error;
 pub mod firecracker;
+pub mod preflight;
 pub mod registry;
 pub mod room;
 pub mod rootfs;
