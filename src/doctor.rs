@@ -952,6 +952,17 @@ fn resolve_in_path(binary: &Path) -> Option<PathBuf> {
 }
 
 fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
+    check_sha_drift_with(config, image, drift_target_path)
+}
+
+fn check_sha_drift_with<F>(
+    config: &RoomsConfig,
+    image: Option<&Path>,
+    resolve_target: F,
+) -> CheckResult
+where
+    F: Fn(&str, &RoomsConfig, Option<&Path>) -> Option<PathBuf>,
+{
     let name = "sha_drift".to_owned();
     let pins = parse_checksums(CHECKSUMS_TXT);
     let mut warnings = Vec::new();
@@ -964,7 +975,7 @@ fn check_sha_drift(config: &RoomsConfig, image: Option<&Path>) -> CheckResult {
             ));
             continue;
         };
-        let Some(path) = drift_target_path(artifact, config, image) else {
+        let Some(path) = resolve_target(artifact, config, image) else {
             continue;
         };
         if !path.exists() {
@@ -1008,8 +1019,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
     use super::{
-        anthropic_api_key_result, check_sha_drift, default_rootfs_path, drift_target_path,
-        parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
+        anthropic_api_key_result, check_sha_drift, check_sha_drift_with, default_rootfs_path,
+        drift_target_path, parse_checksums, parse_firecracker_version, version_meets_min,
+        RoomsConfig,
     };
     use std::path::PathBuf;
 
@@ -1096,7 +1108,7 @@ mod tests {
             firecracker_binary: PathBuf::from("/nonexistent/firecracker"),
             ..RoomsConfig::default()
         };
-        let result = check_sha_drift(&config, None);
+        let result = check_sha_drift_with(&config, None, |_, _, _| None);
         assert!(result.ok, "missing artifacts should warn-only, not fail");
         assert!(
             result.message.contains("no pinned artifacts present"),
