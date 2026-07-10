@@ -92,6 +92,26 @@ Results:
 - final `rooms ls --json` returned an empty list
 - final Firecracker process count was zero
 
+### Post-reboot live snapshot
+
+After a Windows restart changed the Hyper-V DHCP address, the host auto-started
+cleanly. A second N=3 readonly run captured the previously omitted live process
+and memory evidence while all three commands overlapped:
+
+```text
+room 01kx6k1hkd6ns77vscpqzedy6x  slot=3  tap=tap-fc3  guest=172.16.0.14  pid=54303
+room 01kx6k1hkdf0p6bwgaseecz44x  slot=2  tap=tap-fc2  guest=172.16.0.10  pid=54304
+room 01kx6k1hkd8wbbrwj9vqwgke6w  slot=1  tap=tap-fc1  guest=172.16.0.6   pid=54311
+
+pid=54303  rss=56,788 KiB
+pid=54304  rss=56,720 KiB
+pid=54311  rss=56,712 KiB
+total_rss=170,220 KiB  mean_rss=56,740 KiB
+```
+
+All three output tokens matched their invocation. The terminal snapshot again
+showed an empty room registry and zero Firecracker processes.
+
 The first pass used `--readonly-rootfs` and found a production-path failure.
 The rootfs journal had been dirtied by an earlier read-write E2E boot. Because
 Firecracker correctly exposed the drive as read-only, ext4 could not replay the
@@ -162,6 +182,30 @@ branches exist on GitHub exactly one commit ahead of `main`. Each room collected
 `events.ndjson`, logs, `result.json`, summary, and overlay changes before
 teardown. Final `rooms ls --json` was empty and the Firecracker process count
 was zero.
+
+### Ordered event evidence
+
+Alpha preserved 255 Cursor event records. The boundary ordering, combining the
+Rooms lifecycle log with the first and last durable agent events, was:
+
+```text
+16:40:10.268  Rooms invocation accepted
+16:40:10.283  Firecracker process spawned
+16:40:10.356  network attached (tap-fc2, 172.16.0.10)
+16:40:10.388  Firecracker InstanceStart accepted
+16:40:13.585  guest SSH ready
+16:40:19.704  Cursor status RUNNING
+16:40:21.689  first retained thinking event
+...           tool calls, thinking, and assistant events
+16:40:44.014  Cursor status FINISHED
+16:40:44.199  Cursor result event
+16:40:46.911  /workspace/out collected
+16:40:47.089  overlay changes collected
+```
+
+This is evidence for two streams, not yet one protocol: Rooms lifecycle events
+are timestamped logs, while agent events are durable NDJSON. The later contract
+must merge them without pretending `InstanceStart` means guest readiness.
 
 The host upgrade exposed one final setup issue before dispatch: Ship's
 `better-sqlite3` addon had been installed under Node 20 and could not load under
