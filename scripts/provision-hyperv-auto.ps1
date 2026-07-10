@@ -236,30 +236,46 @@ Set-VM -Name $VMName -AutomaticCheckpointsEnabled $false
 Log "starting VM"
 Start-VM -Name $VMName
 
-# --- wait for the guest to report an IPv4 -------------------------------------
-# First boot runs cloud-init (user + keys + package install) -- allow a few
-# minutes. The IP appears via Hyper-V KVP once linux-cloud-tools is up; DHCP
-# on the Default Switch means the address is fresh each rebuild.
-Log "waiting for guest IPv4 (first boot runs cloud-init; up to ~8 min)"
-$deadline = (Get-Date).AddMinutes(8)
+# --- discover the guest IPv4 and wait for SSH --------------------------------
+# Prefer the host ARP/neighbor table (the guest shows up there as soon as it
+# DHCPs, early in boot) over Hyper-V KVP (Get-VMNetworkAdapter IPAddresses),
+# which only reports once the guest tools install during first-boot cloud-init
+# -- slow, and on some cloud images it never lands within a sane window. Match
+# on the VM's own MAC so another guest is never mistaken for this one, and accept
+# an address only once sshd actually answers.
+$macDash = (((Get-VMNetworkAdapter -VMName $VMName).MacAddress -replace '(..)(?=.)', '$1-')).ToUpper()
+$timeoutMin = 6
+Log "waiting for guest IPv4 (host neighbor table + KVP fallback; up to ~$timeoutMin min)"
+$deadline = (Get-Date).AddMinutes($timeoutMin)
 $ip = $null
 while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 10
-    $ips = (Get-VMNetworkAdapter -VMName $VMName).IPAddresses |
-        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '169.254.*' }
-    if ($ips) { $ip = $ips | Select-Object -First 1; break }
+    Start-Sleep -Seconds 5
+    # Fast path: the VM's MAC resolved in the host neighbor table.
+    $cand = Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.LinkLayerAddress -eq $macDash -and $_.IPAddress -match '^\d+\.\d+\.\d+\.\d+$' -and $_.IPAddress -notlike '169.254.*' } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+    # Fallback: KVP, if the guest tools happen to already be up.
+    if (-not $cand) {
+        $cand = (Get-VMNetworkAdapter -VMName $VMName).IPAddresses |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '169.254.*' } |
+            Select-Object -First 1
+    }
+    # Done only once sshd answers -- an ARP entry alone can precede a live sshd.
+    if ($cand -and (Test-NetConnection -ComputerName $cand -Port 22 -WarningAction SilentlyContinue).TcpTestSucceeded) {
+        $ip = $cand
+        break
+    }
 }
 
 if ($ip) {
-    $reachable = (Test-NetConnection -ComputerName $ip -Port 22 -WarningAction SilentlyContinue).TcpTestSucceeded
-    Log "guest up: $ip (ssh port 22 reachable: $reachable)"
+    Log "guest up: $ip (ssh port 22 open)"
     Write-Host ""
     Write-Host "  ssh $Username@$ip" -ForegroundColor Green
     Write-Host ""
     Log "next: clone the rooms repo in the guest and run scripts/setup-rooms-host.sh"
 }
 else {
-    Log "no IPv4 reported yet -- the guest may still be installing packages."
-    Log "check: Get-VMNetworkAdapter -VMName $VMName | Select -Expand IPAddresses"
+    Log "no SSH-reachable IPv4 within $timeoutMin min -- the guest may still be booting."
+    Log "find it: Get-NetNeighbor -InterfaceAlias 'vEthernet ($SwitchName)' | Where-Object LinkLayerAddress -eq '$macDash'"
     Log "or open the VM console: vmconnect.exe localhost $VMName"
 }

@@ -199,6 +199,7 @@ Host layout (v0): Windows → Hyper-V → Ubuntu `rooms-host` → Firecracker mi
 | Doc | Purpose |
 | --- | --- |
 | [`docs/vision.md`](docs/vision.md) | What/why/non-goals/roadmap — operator-facing |
+| [`docs/rooms-host-runbook.md`](docs/rooms-host-runbook.md) | Rebuild/reach/provision/validate the rooms-host VM end-to-end (+ gotchas) |
 | [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md) | v0 contract — read first |
 | [`docs/features/<slug>/spec.md`](docs/features/) | One spec per productionization task |
 | [`docs/features/01-productionization/driver.md`](docs/features/01-productionization/driver.md) | Batched work-driver manifest |
