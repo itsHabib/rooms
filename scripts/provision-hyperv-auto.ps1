@@ -225,6 +225,16 @@ $vm = New-VM -Name $VMName -Generation 2 -MemoryStartupBytes ([int64]$MemoryGB *
 # Nested virtualization requires static memory.
 Set-VMMemory -VMName $VMName -DynamicMemoryEnabled $false
 Set-VMProcessor -VMName $VMName -Count $VCpus -ExposeVirtualizationExtensions $true
+# Fail fast if the host CPU / Hyper-V didn't actually enable nested virt --
+# without it /dev/kvm never appears in the guest and Firecracker can't boot.
+if (-not (Get-VMProcessor -VMName $VMName).ExposeVirtualizationExtensions) {
+    throw "nested virtualization did not enable on '$VMName'; the host CPU or Hyper-V may not support it"
+}
+# Firecracker's per-room TAPs put frames with the microVMs' own MACs onto the
+# guest vNIC; without MAC spoofing the Hyper-V switch drops them. (NAT egress
+# happens to survive since MASQUERADE rewrites to eth0's MAC, but bridged/
+# guest-visible paths need this -- matches the sibling provision-hyperv.ps1.)
+Set-VMNetworkAdapter -VMName $VMName -MacAddressSpoofing On
 # Ubuntu boots fine with secure boot off; keeping it off avoids template drift.
 Set-VMFirmware -VMName $VMName -EnableSecureBoot Off
 # The cloud-init seed rides as a DVD (cidata ISO), not a data disk.
