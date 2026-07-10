@@ -124,4 +124,5 @@ sudo ./scripts/test-tap-rules.sh
 
 From inside a booted guest, confirm `curl https://api.anthropic.com` succeeds while ping/connect to an RFC1918 host on the operator LAN is blocked.
 | `bake-rootfs-ssh.sh` | POC helper for the quickstart bionic image (superseded by `build-rootfs.sh` for new images) |
-| `provision-hyperv.ps1` | Create the Hyper-V VM from Windows |
+| `provision-hyperv.ps1` | Create the Hyper-V VM from Windows (interactive Ubuntu Server installer) |
+| `provision-hyperv-auto.ps1` | Hands-free rooms-host VM from an Ubuntu **cloud image** + cloud-init seed ISO (built in WSL, attached as a DVD) — one elevated command to SSH-reachable. Sidesteps the interactive installer and the BitLocker-To-Go removable-write policy on locked-down hosts |
