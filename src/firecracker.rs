@@ -343,6 +343,12 @@ impl BootedVm {
     pub fn guard_mut(&mut self) -> &mut RoomGuard {
         &mut self.guard
     }
+
+    /// The firecracker process id (the jailer child `exec`s firecracker in
+    /// place); `None` once the process has been reaped.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
 }
 
 /// Resolved jailer invocation plan (pure data for tests and spawn).
