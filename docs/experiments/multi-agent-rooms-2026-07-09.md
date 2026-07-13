@@ -270,9 +270,11 @@ This should be an explicit WorkSpec input, not ambient host state.
 ### WorkSpec
 
 Observed inputs are image path, runner kind, command or agent task, repository,
-base SHA, model, push branch, environment, wall-clock limit, and output path.
-Several are currently split between CLI arguments, inherited environment, and
-files.
+base SHA, model, push branch, environment, and output path. A wall-clock limit
+was notably **absent** — `RoomCursorRunner` does not pass `--max-wall` (see
+"Agent execution needs a hard cap" above) — and must become a required input
+rather than be assumed observed. Several inputs are currently split between
+CLI arguments, inherited environment, and files.
 
 ### Placement
 

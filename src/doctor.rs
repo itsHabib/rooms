@@ -15,11 +15,16 @@ use crate::rootfs::{kernel_sibling, validate_kernel, validate_rootfs};
 const CHECKSUMS_TXT: &str = include_str!("../scripts/checksums.txt");
 
 /// Artifact names in `checksums.txt` checked against on-disk installs.
+///
+/// `bionic.rootfs.ext4` is deliberately absent: its pin is verified at
+/// download time by `setup-rooms-host.sh`, and the provisioning runbook then
+/// replaces the default rootfs path with a locally built agent image — so a
+/// resting-state drift check against the bionic digest would warn on every
+/// correctly provisioned host.
 const DRIFT_ARTIFACTS: &[&str] = &[
     "firecracker-v1.10.1-x86_64",
     "jailer-v1.10.1-x86_64",
     "vmlinux-6.1.155.bin",
-    "bionic.rootfs.ext4",
 ];
 
 /// Schema version for `--json` output (ED-4: forward-compatible).
@@ -929,10 +934,6 @@ fn drift_target_path(
         // RoomsConfig, so resolve the conventional name on PATH.
         "jailer-v1.10.1-x86_64" => resolve_in_path(Path::new("jailer")),
         "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
-        // The bionic pin only applies to the quickstart download at its default
-        // path — never to an arbitrary --image, which may be a built agent
-        // rootfs that legitimately differs from the bionic digest.
-        "bionic.rootfs.ext4" => Some(default_rootfs_path()),
         _ => None,
     }
 }
@@ -1019,9 +1020,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
     use super::{
-        anthropic_api_key_result, check_sha_drift, check_sha_drift_with, default_rootfs_path,
-        drift_target_path, parse_checksums, parse_firecracker_version, version_meets_min,
-        RoomsConfig,
+        anthropic_api_key_result, check_sha_drift, check_sha_drift_with, drift_target_path,
+        parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
 
@@ -1141,22 +1141,20 @@ mod tests {
     }
 
     #[test]
-    fn bionic_drift_ignores_image_override() {
-        // `--image` may point at a built agent rootfs that legitimately differs
-        // from the bionic pin; the bionic drift target must stay the default
-        // quickstart path regardless, so it never spuriously warns.
+    fn bionic_rootfs_is_not_a_resting_drift_target() {
+        // The bionic pin is verified at download time by setup-rooms-host.sh;
+        // the runbook then replaces the default rootfs path with a built agent
+        // image, so a resting-state drift check would warn on every correctly
+        // provisioned host. Doctor must not resolve it as a drift target.
         let config = RoomsConfig::default();
-        let custom = PathBuf::from("/custom/agent-alpine.ext4");
-        let target = drift_target_path("bionic.rootfs.ext4", &config, Some(custom.as_path()));
-        assert_ne!(
-            target.as_deref(),
-            Some(custom.as_path()),
-            "bionic pin must not follow --image"
+        assert!(
+            !super::DRIFT_ARTIFACTS.contains(&"bionic.rootfs.ext4"),
+            "bionic must not be drift-checked at rest"
         );
         assert_eq!(
-            target,
-            Some(default_rootfs_path()),
-            "bionic pin must resolve to the default quickstart rootfs path"
+            drift_target_path("bionic.rootfs.ext4", &config, None),
+            None,
+            "bionic must not resolve to any on-disk drift target"
         );
     }
 
