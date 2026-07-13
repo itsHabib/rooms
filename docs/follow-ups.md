@@ -18,6 +18,7 @@ Surfaced 2026-05-29 by the first end-to-end dogfood (a `claude -p` session run i
 Surfaced 2026-07-12 by the multi-agent qualification review ([#67](https://github.com/itsHabib/rooms/pull/67)):
 
 - 2026-07-12 — `rootflags=noload` on readonly boots skips ext4 journal replay, so a canonical image left dirty by a prior read-write boot mounts with unreplayed updates instead of failing. Codex suggested rejecting dirty images outright; the right seam is a **doctor check** (e.g. `dumpe2fs -h` `needs_recovery` flag on the image) that warns the operator to rebuild/fsck, keeping the boot path simple. (PR #67 review)
+- 2026-07-12 — `control_failures` e2e drifts on the rebuilt rooms-host (fails on `main` too): `api_socket_never_appears` now sees the jailer's own "Failed to exec into Firecracker" exit (-1, classified `ProcessExitedEarly`) instead of `ApiSocketNeverAppeared`, and `firecracker_exits_early_is_caught` expects exit 2 but gets -1 — the jailer error path changed the observable failure shape. Re-align the test expectations (or the classification) with the jailed launch. (host validation during #67/lifecycle work)
 
 Surfaced 2026-06-17 by the security-hardening batch (review + on-host e2e of [#42](https://github.com/itsHabib/rooms/pull/42)/[#43](https://github.com/itsHabib/rooms/pull/43)/[#44](https://github.com/itsHabib/rooms/pull/44)); declined from those PRs to keep them focused:
 
