@@ -50,9 +50,9 @@ externally visible transition of the run.
 | `guest_unreachable` | `error` | guest never became usable within the reach timeout |
 | `workload_started` | `command` | workload handed to the guest |
 | `workload_exited` | `exit_code`, `status` | workload finished or was aborted; `status` uses `result.json`'s vocabulary (`succeeded` / `failed` / `timed_out` / `cancelled`) |
-| `workload_failed` | `error` | exec machinery failed — no guest exit code exists |
+| `workload_failed` | `error` | exec machinery failed; when the workload finished first and a post-run step failed (e.g. `--push-branch`), a `workload_exited` with the real exit precedes this |
 | `collection_started` / `collection_done` / `collection_failed` | `error` on failure | `--out` artifact collection |
-| `cleanup_done` / `cleanup_failed` | `error` on failure | teardown outcome (`--keep` records neither: cleanup is suppressed, not done) |
+| `cleanup_done` / `cleanup_failed` | `error` on failure | teardown outcome (`--keep` records neither: cleanup is suppressed, not done). `cleanup_done` is **verified** against on-disk residue (room dir, jail dir, slot claim), never inferred from teardown returning — a partial teardown that parks the room for `rooms gc` reports `cleanup_failed` |
 
 Terminal failures are **distinct kinds** — admission (`pool_full`), boot
 (`boot_failed`), readiness (`guest_unreachable`), workload (`workload_failed`
@@ -79,8 +79,17 @@ wait.
 
 - `workload_exited` may appear **without** a prior `workload_started` when
   Ctrl-C or the `--max-wall` cap fires during the readiness wait — mirroring
-  the `result.json` an aborted run records (`cancelled` / `timed_out`).
+  the `result.json` an aborted run records (`cancelled` / `timed_out`). On an
+  abort the event is emitted the instant the outcome is decided, before the
+  best-effort (grace-bounded) `result.json` write to the possibly-unresponsive
+  guest.
 - A `--keep` run ends without a cleanup event, by design.
+- Only `pool_full` is a structured admission rejection. Any other slot-claim
+  error (e.g. a reserve-by-index collision) leaves an **empty stream** and a
+  generic exit 2 — the `--json` terminal record is the fallback surface there.
+- A write failure after the stream is created never advances `seq`, so the
+  on-disk sequence stays contiguous; the failed event itself is lost (logged
+  on stderr) rather than blocking the run.
 
 ## Non-goals
 

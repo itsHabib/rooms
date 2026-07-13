@@ -39,6 +39,9 @@ pub enum Event {
     PoolFull { cap: u8 },
     /// The firecracker process is up, its API answered, and the instance was
     /// started. Not readiness — the guest kernel may still fail to boot.
+    /// `pid` is typed `Option` only because the process handle reports a
+    /// reaped child as `None`; on the emit path the process was just spawned,
+    /// so consumers can expect it present.
     VmmStarted { pid: Option<u32> },
     /// Boot never reached a started VMM (jail prep, tap create, API timeout).
     BootFailed { error: String },
@@ -58,7 +61,10 @@ pub enum Event {
         exit_code: i32,
         status: WorkloadStatus,
     },
-    /// The exec machinery itself failed — no guest exit code exists.
+    /// The exec machinery failed. Usually no guest exit code exists; when the
+    /// workload itself finished first and a post-run step failed (e.g. the
+    /// requested branch push), a [`Event::WorkloadExited`] with the real exit
+    /// precedes this.
     WorkloadFailed { error: String },
     /// Artifact collection into the host `--out` directory began.
     CollectionStarted,
@@ -111,10 +117,13 @@ impl Lifecycle {
     }
 
     /// Create the stream file — truncating a stale one, the stream is per-run —
-    /// and bind every subsequent record to `room_id`.
+    /// and bind every subsequent record to `room_id`. The parent directory is
+    /// synced so the file's existence is itself durable, not just its lines.
     pub fn create(path: &Path, room_id: &str) -> std::io::Result<Self> {
+        let file = File::create(path)?;
+        sync_parent_dir(path)?;
         let writer = Writer {
-            file: File::create(path)?,
+            file,
             seq: 0,
             room_id: room_id.to_owned(),
         };
@@ -153,8 +162,9 @@ struct Writer {
 }
 
 impl Writer {
-    /// Serialize, append, flush, and sync one record. `seq` advances only on a
-    /// serializable event, so the on-disk sequence stays contiguous from 1.
+    /// Serialize, append, flush, and sync one record. `seq` advances only
+    /// after the line is durable, so a failed write retries the same number
+    /// with the next event instead of leaving a gap in the contiguous stream.
     fn append(&mut self, event: &Event) -> std::io::Result<()> {
         let record = Record {
             seq: self.seq + 1,
@@ -164,11 +174,34 @@ impl Writer {
         };
         let line = serde_json::to_string(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        self.seq += 1;
         writeln!(self.file, "{line}")?;
         self.file.flush()?;
-        self.file.sync_data()
+        self.file.sync_data()?;
+        self.seq += 1;
+        Ok(())
     }
+}
+
+/// Sync the directory holding `path`, making the just-created file's directory
+/// entry durable. A relative bare filename syncs the cwd. No-op off unix,
+/// where a directory cannot be opened for syncing.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    File::open(parent)?.sync_data()
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    reason = "the signature must match the unix variant, which does fallible I/O"
+)]
+fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

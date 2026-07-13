@@ -570,14 +570,71 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     if let Some(out_dir) = args.out_dir.as_deref() {
         collect_and_record(&network.guest_ip, &key, &action, out_dir, &lifecycle).await;
     }
-    teardown(vm, args.keep, &lifecycle).await;
+    let residue = CleanupResidue {
+        room_dir: config.room_dir(&room_id),
+        jail_dir: config.jail_instance_dir(&room_id),
+        slot_file: state_base
+            .join(slot::SLOTS_DIR)
+            .join(claimed.index.to_string()),
+        room_id: room_id.clone(),
+    };
+    teardown(vm, args.keep, &lifecycle, &residue).await;
     outcome
+}
+
+/// The on-disk traces a completed teardown must have erased. `cleanup` keeps
+/// them on purpose when it can't finish (a stranded jail mount, a failed
+/// room-dir removal) so `rooms gc` can retry — which is exactly what the
+/// stream must report as not-done.
+struct CleanupResidue {
+    room_dir: Option<PathBuf>,
+    jail_dir: Option<PathBuf>,
+    slot_file: PathBuf,
+    room_id: String,
+}
+
+impl CleanupResidue {
+    /// What teardown left behind, or `None` when the room is fully reaped.
+    fn remaining(&self) -> Option<String> {
+        let mut left = Vec::new();
+        if self.room_dir.as_deref().is_some_and(Path::exists) {
+            left.push("room dir");
+        }
+        if self.jail_dir.as_deref().is_some_and(Path::exists) {
+            left.push("jail dir");
+        }
+        if self.slot_still_ours() {
+            left.push("slot claim");
+        }
+        if left.is_empty() {
+            return None;
+        }
+        Some(left.join(" + "))
+    }
+
+    /// Whether the slot file still names this room. A missing file is freed;
+    /// a file naming a different room is a sibling's fresh claim of the reused
+    /// index, never this room's residue.
+    fn slot_still_ours(&self) -> bool {
+        let Ok(token) = std::fs::read_to_string(&self.slot_file) else {
+            return false;
+        };
+        token.lines().next() == Some(self.room_id.as_str())
+    }
 }
 
 /// Tear the room down — or preserve it under `--keep` — recording the cleanup
 /// outcome on the lifecycle stream. A `--keep` run records nothing: cleanup is
-/// deliberately suppressed, not done and not failed.
-async fn teardown(mut vm: firecracker::BootedVm, keep: bool, lifecycle: &Lifecycle) {
+/// deliberately suppressed, not done and not failed. `cleanup_done` is
+/// verified against the on-disk residue, never inferred from shutdown's
+/// return — cleanup deliberately keeps the room dir + slot behind on a
+/// partial teardown so `rooms gc` can retry, and the stream must say so.
+async fn teardown(
+    mut vm: firecracker::BootedVm,
+    keep: bool,
+    lifecycle: &Lifecycle,
+    residue: &CleanupResidue,
+) {
     if keep {
         vm.guard_mut().dismiss();
         // Prevent kill_on_drop from terminating the microVM — operator inspects manually.
@@ -585,14 +642,18 @@ async fn teardown(mut vm: firecracker::BootedVm, keep: bool, lifecycle: &Lifecyc
         info!("--keep: cleanup suppressed; firecracker process and state dir preserved");
         return;
     }
-    match vm.shutdown().await {
-        Ok(()) => lifecycle.emit(&Event::CleanupDone),
-        Err(e) => {
-            warn!(error = %e, "shutdown reported an error after post-boot");
-            lifecycle.emit(&Event::CleanupFailed {
-                error: e.to_string(),
-            });
-        }
+    if let Err(e) = vm.shutdown().await {
+        warn!(error = %e, "shutdown reported an error after post-boot");
+        lifecycle.emit(&Event::CleanupFailed {
+            error: e.to_string(),
+        });
+        return;
+    }
+    match residue.remaining() {
+        None => lifecycle.emit(&Event::CleanupDone),
+        Some(left) => lifecycle.emit(&Event::CleanupFailed {
+            error: format!("{left} left behind; `rooms gc` will retry"),
+        }),
     }
 }
 
@@ -783,6 +844,15 @@ async fn exec_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8
             exit_code: outcome.exit_code,
             status: workload_status(outcome.status),
         });
+        // A post-run push failure fails the run (the persist step the caller
+        // asked for didn't happen) but never erases the workload's real exit —
+        // result.json and the stream both already carry it.
+        if let Some(push_error) = outcome.push_error {
+            lifecycle.emit(&Event::WorkloadFailed {
+                error: push_error.clone(),
+            });
+            return Err(RoomsError::Internal(push_error));
+        }
         Ok::<u8, RoomsError>(u8::try_from(outcome.exit_code).unwrap_or(2))
     };
     // started_at captures when rooms began attempting exec (SSH probe,
@@ -806,16 +876,19 @@ async fn exec_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8
         // the cap fired, honor its real result instead of a spurious 124.
         biased;
         res = &mut work => res,
+        // The abort outcome is decided the instant the arm fires; the stream
+        // records it BEFORE the best-effort guest write below, which can stall
+        // up to its grace bound on the very guest that just went unresponsive.
         _ = tokio::signal::ctrl_c() => {
             info!("ctrl-c received during exec setup or run; aborting and shutting down");
-            record_aborted_run(&guest_ip, env.key, 130, RunStatus::Cancelled, started_at, run.command_argv()).await;
             lifecycle.emit(&Event::WorkloadExited { exit_code: 130, status: WorkloadStatus::Cancelled });
+            record_aborted_run(&guest_ip, env.key, 130, RunStatus::Cancelled, started_at, run.command_argv()).await;
             Ok(130)
         }
         () = &mut cap => {
             warn!(max_wall = ?env.max_wall, "max wall-clock cap reached during exec; aborting and shutting down");
-            record_aborted_run(&guest_ip, env.key, 124, RunStatus::TimedOut, started_at, run.command_argv()).await;
             lifecycle.emit(&Event::WorkloadExited { exit_code: 124, status: WorkloadStatus::TimedOut });
+            record_aborted_run(&guest_ip, env.key, 124, RunStatus::TimedOut, started_at, run.command_argv()).await;
             Ok(124)
         }
     }
@@ -1412,6 +1485,37 @@ mod tests {
             .is_err(),
             "--max-pool 64 must fail to parse"
         );
+    }
+
+    #[test]
+    fn cleanup_residue_reports_leftovers_and_ignores_reused_slots() {
+        let dir = tempdir().expect("tempdir");
+        let room_dir = dir.path().join("room");
+        let slot_file = dir.path().join("slots-1");
+        let residue = super::CleanupResidue {
+            room_dir: Some(room_dir.clone()),
+            jail_dir: Some(dir.path().join("jail")),
+            slot_file: slot_file.clone(),
+            room_id: "room-a".to_owned(),
+        };
+        // Fully reaped: nothing on disk.
+        assert_eq!(residue.remaining(), None);
+
+        // A surviving room dir and a slot file still naming this room are
+        // residue; both must be reported.
+        std::fs::create_dir(&room_dir).expect("create room dir");
+        std::fs::write(&slot_file, "room-a\n1 2\n").expect("write slot file");
+        let left = residue.remaining().expect("residue detected");
+        assert!(
+            left.contains("room dir") && left.contains("slot claim"),
+            "expected both leftovers named; got: {left}"
+        );
+
+        // A slot file naming a DIFFERENT room is a sibling's fresh claim of
+        // the reused index — never this room's residue.
+        std::fs::remove_dir(&room_dir).expect("remove room dir");
+        std::fs::write(&slot_file, "room-b\n3 4\n").expect("rewrite slot file");
+        assert_eq!(residue.remaining(), None);
     }
 
     #[test]

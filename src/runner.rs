@@ -221,6 +221,10 @@ pub struct GuestExecOutcome {
     pub status: RunStatus,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
+    /// A post-run branch-push failure (cursor + `--push-branch` only). The
+    /// workload finished and `exit_code`/`result.json` are real; the caller
+    /// decides whether the persist failure fails the run.
+    pub push_error: Option<String>,
 }
 
 /// Drive `runner` in the guest, writing `result.json` per the runner contract.
@@ -447,6 +451,7 @@ pub async fn exec_in_guest(
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
+        push_error: None,
     })
 }
 
@@ -536,17 +541,16 @@ pub async fn exec_cursor_in_guest(
     result.pushed_branch = pushed_branch;
     write_guest_result_json(guest_ip, key_path, &result).await?;
 
-    // result.json is recorded; surface a push failure last, so a push error never
-    // eats the run's artifact (the High finding).
-    if let Some(err) = push_err {
-        return Err(err);
-    }
-
+    // result.json is recorded before the push failure surfaces, so a push
+    // error never eats the run's artifact. The outcome carries the failure
+    // alongside the real exit code instead of replacing it: the caller keeps
+    // both facts — the workload's exit and the persist step that failed.
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
+        push_error: push_err.map(|e| e.to_string()),
     })
 }
 
