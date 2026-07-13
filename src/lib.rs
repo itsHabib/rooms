@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod error;
 pub mod firecracker;
 pub mod isolation;
+pub mod lifecycle;
 pub mod preflight;
 pub mod registry;
 pub mod room;

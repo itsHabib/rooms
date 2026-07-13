@@ -7,6 +7,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
+use rooms::lifecycle::{Event, Lifecycle, WorkloadStatus};
 use rooms::{
     artifacts,
     config::RoomsConfig,
@@ -95,6 +96,14 @@ enum Command {
         /// the field without matching an exit code or a message string.
         #[arg(long)]
         json: bool,
+        /// Append a machine-readable lifecycle stream to this host path:
+        /// NDJSON, one event per line, monotonic seq from 1. The stream
+        /// distinguishes slot allocation (and structured `pool_full`), VMM
+        /// start, guest readiness vs SSH readiness, workload start/exit,
+        /// collection, and cleanup, so a supervising process can track the run
+        /// without parsing logs.
+        #[arg(long)]
+        lifecycle: Option<PathBuf>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -177,6 +186,7 @@ struct RunArgs {
     max_wall: Option<Duration>,
     max_pool: Option<u8>,
     json: bool,
+    lifecycle: Option<PathBuf>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -360,6 +370,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             max_wall,
             max_pool,
             json,
+            lifecycle,
         } => {
             run_room(
                 RunArgs {
@@ -377,6 +388,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     max_wall,
                     max_pool,
                     json,
+                    lifecycle,
                 },
                 &config,
             )
@@ -488,12 +500,27 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     // contents, the room dir name, and room.json.id. Then claim a pool slot and
     // derive the guest network from it.
     let room_id = firecracker::mint_room_id();
+    // The lifecycle stream is also a fallible host-side input: create it before
+    // the claim so an unwritable path fails fast without leaking a slot.
+    let lifecycle = resolve_lifecycle(args.lifecycle.as_deref(), &room_id)?;
     let me = slot::Claimer::current().ok_or_else(|| {
         RoomsError::Internal("cannot read this process's identity for the slot claim".to_owned())
     })?;
     // The cap is a host fact; --max-pool / ROOMS_MAX_POOL can only lower it.
     let cap = config.effective_max_pool(args.max_pool);
-    let claimed = slot::claim(&state_base, &room_id, me, cap, None)?;
+    let claimed = match slot::claim(&state_base, &room_id, me, cap, None) {
+        Ok(claimed) => claimed,
+        Err(e) => {
+            if let SlotError::PoolFull { cap } = &e {
+                lifecycle.emit(&Event::PoolFull { cap: *cap });
+            }
+            return Err(e.into());
+        }
+    };
+    lifecycle.emit(&Event::SlotAllocated {
+        slot: claimed.index,
+        tap: claimed.tap.clone(),
+    });
     let network = firecracker::NetworkConfig {
         tap_name: claimed.tap.clone(),
         guest_ip: claimed.guest.to_string(),
@@ -516,6 +543,9 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,
         Err(e) => {
+            lifecycle.emit(&Event::BootFailed {
+                error: e.to_string(),
+            });
             // boot's guard frees the slot when it got far enough to take
             // ownership; this covers an early failure before that. Compare-and-
             // delete makes the double-free safe (AlreadyFree / AlreadyReassigned).
@@ -523,56 +553,109 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             return Err(e.into());
         }
     };
+    lifecycle.emit(&Event::VmmStarted { pid: vm.pid() });
 
     if args.keep {
         vm.guard_mut().set_suppress_cleanup(true);
     }
 
-    let outcome = post_boot(&network, &key, &action, &mut vm, config, args.max_wall).await;
+    let env = PostBootEnv {
+        network: &network,
+        key: &key,
+        config,
+        max_wall: args.max_wall,
+        lifecycle: &lifecycle,
+    };
+    let outcome = post_boot(&env, &action, &mut vm).await;
     if let Some(out_dir) = args.out_dir.as_deref() {
-        // Bound collection too: its SSH is only `ConnectTimeout`-bounded, and a
-        // wall cap fires precisely when the guest may be unresponsive, so an
-        // unbounded collect could hang teardown — force it past the grace.
-        let collect = collect_if_exec(&network.guest_ip, &key, &action, out_dir);
-        if tokio::time::timeout(PRE_TEARDOWN_GRACE, collect)
-            .await
-            .is_err()
-        {
-            warn!("artifact collection timed out (guest unresponsive); proceeding to teardown");
-        }
+        collect_and_record(&network.guest_ip, &key, &action, out_dir, &lifecycle).await;
     }
-    if args.keep {
+    teardown(vm, args.keep, &lifecycle).await;
+    outcome
+}
+
+/// Tear the room down — or preserve it under `--keep` — recording the cleanup
+/// outcome on the lifecycle stream. A `--keep` run records nothing: cleanup is
+/// deliberately suppressed, not done and not failed.
+async fn teardown(mut vm: firecracker::BootedVm, keep: bool, lifecycle: &Lifecycle) {
+    if keep {
         vm.guard_mut().dismiss();
         // Prevent kill_on_drop from terminating the microVM — operator inspects manually.
         std::mem::forget(vm);
         info!("--keep: cleanup suppressed; firecracker process and state dir preserved");
-    } else if let Err(e) = vm.shutdown().await {
-        warn!(error = %e, "shutdown reported an error after post-boot");
+        return;
     }
-    outcome
+    match vm.shutdown().await {
+        Ok(()) => lifecycle.emit(&Event::CleanupDone),
+        Err(e) => {
+            warn!(error = %e, "shutdown reported an error after post-boot");
+            lifecycle.emit(&Event::CleanupFailed {
+                error: e.to_string(),
+            });
+        }
+    }
 }
 
-/// Best-effort collect `/workspace/out` to the host after an exec (no-op for Idle/Keep); a failure is logged, never fatal.
-async fn collect_if_exec(guest_ip: &str, key: &Path, action: &Action, out_dir: &Path) {
+/// The `--lifecycle` sink for this run: disabled without the flag, otherwise
+/// the created stream file. A create failure is an input error, mapped so the
+/// caller can fail fast before any slot is claimed.
+fn resolve_lifecycle(path: Option<&Path>, room_id: &str) -> Result<Lifecycle, RoomsError> {
+    let Some(path) = path else {
+        return Ok(Lifecycle::disabled());
+    };
+    Lifecycle::create(path, room_id).map_err(|e| {
+        RoomsError::Internal(format!("create --lifecycle stream {}: {e}", path.display()))
+    })
+}
+
+/// Best-effort collect `/workspace/out` to the host after an exec (no-op for
+/// Idle/Keep), recording the collection transitions on the lifecycle stream.
+/// A failure is logged and recorded, never fatal to the run. Bounded by
+/// [`PRE_TEARDOWN_GRACE`]: collection's SSH is only `ConnectTimeout`-bounded,
+/// and a wall cap fires precisely when the guest may be unresponsive, so an
+/// unbounded collect could hang teardown.
+async fn collect_and_record(
+    guest_ip: &str,
+    key: &Path,
+    action: &Action,
+    out_dir: &Path,
+    lifecycle: &Lifecycle,
+) {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
     if !matches!(action, Action::Exec(_)) {
         return;
     }
-    match runner::collect_out_to_host(guest_ip, key, out_dir).await {
-        Ok(()) => {
-            info!(out = %out_dir.display(), "collected /workspace/out to host");
-        }
-        Err(e) => {
-            warn!(error = %e, out = %out_dir.display(), "collect /workspace/out to host failed");
+    lifecycle.emit(&Event::CollectionStarted);
+    let collect = collect_to_host(guest_ip, key, out_dir);
+    match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
+        Ok(Ok(())) => lifecycle.emit(&Event::CollectionDone),
+        Ok(Err(error)) => lifecycle.emit(&Event::CollectionFailed { error }),
+        Err(_) => {
+            warn!("artifact collection timed out (guest unresponsive); proceeding to teardown");
+            lifecycle.emit(&Event::CollectionFailed {
+                error: "timed out (guest unresponsive)".to_owned(),
+            });
         }
     }
-    // The overlay change set (cursor / --readonly-rootfs runs only). Best-effort:
-    // an absent overlay or a read failure never affects the run's result.
+}
+
+/// Pull `/workspace/out` and the overlay change set to the host. The out-dir
+/// collect is the primary artifact — its failure is the returned error; the
+/// change set stays best-effort (an absent overlay is normal on a
+/// writable-rootfs run and never affects the result).
+async fn collect_to_host(guest_ip: &str, key: &Path, out_dir: &Path) -> Result<(), String> {
+    let primary = runner::collect_out_to_host(guest_ip, key, out_dir).await;
     match runner::collect_changeset_to_host(guest_ip, key, out_dir).await {
         Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
         Err(e) => warn!(error = %e, "collect overlay changeset failed"),
     }
+    if let Err(e) = primary {
+        warn!(error = %e, out = %out_dir.display(), "collect /workspace/out to host failed");
+        return Err(e.to_string());
+    }
+    info!(out = %out_dir.display(), "collected /workspace/out to host");
+    Ok(())
 }
 
 /// Translate parsed flags into the post-boot [`Action`], reading the `--task`
@@ -627,76 +710,36 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
     }
 }
 
+/// Everything the post-boot phase needs besides the action and the VM itself,
+/// bundled to stay under the argument-count cap.
+struct PostBootEnv<'a> {
+    network: &'a firecracker::NetworkConfig,
+    key: &'a Path,
+    config: &'a RoomsConfig,
+    max_wall: Option<Duration>,
+    lifecycle: &'a Lifecycle,
+}
+
 async fn post_boot(
-    network: &firecracker::NetworkConfig,
-    key: &Path,
+    env: &PostBootEnv<'_>,
     action: &Action,
     vm: &mut firecracker::BootedVm,
-    config: &RoomsConfig,
-    max_wall: Option<Duration>,
 ) -> Result<u8, RoomsError> {
     match action {
         Action::Keep => {
             info!(
-                guest_ip = %network.guest_ip,
+                guest_ip = %env.network.guest_ip,
                 "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
-                network.guest_ip,
+                env.network.guest_ip,
             );
             tokio::signal::ctrl_c()
                 .await
                 .map_err(|e| RoomsError::Internal(e.to_string()))?;
             Ok(0)
         }
-        Action::Exec(run) => {
-            let guest_ip = network.guest_ip.clone();
-            // Wrap the entire setup-and-exec sequence (probe sshd, then exec) in
-            // one tokio::select! vs ctrl_c. Dropping `work` cascades through each
-            // child future — kill_on_drop fires on every spawned ssh client — so
-            // a Ctrl-C at any point still lets run_room's vm.shutdown() run cleanly.
-            let work = async {
-                runner::wait_for_ssh(&network.guest_ip, key, config)
-                    .await
-                    .map_err(RoomsError::Firecracker)?;
-                let outcome = runner::exec(&network.guest_ip, key, run)
-                    .await
-                    .map_err(|e| RoomsError::Internal(e.to_string()))?;
-                Ok::<u8, RoomsError>(u8::try_from(outcome.exit_code).unwrap_or(2))
-            };
-            // started_at captures when rooms began attempting exec (SSH probe,
-            // then runner). Exec writes its own started_at into result.json on
-            // the success path; this outer one only surfaces in the abort
-            // (cancel / timeout) branches below, where the guest command may
-            // never have begun.
-            let started_at = Utc::now();
-            tokio::pin!(work);
-            // Fires at the wall-clock cap, or never when there's no cap — so an
-            // unset --max-wall leaves the select racing only work vs ctrl_c.
-            let cap = async {
-                match max_wall {
-                    Some(limit) => tokio::time::sleep(limit).await,
-                    None => std::future::pending::<()>().await,
-                }
-            };
-            tokio::pin!(cap);
-            tokio::select! {
-                // Bias toward completed work: if the exec finished the same instant
-                // the cap fired, honor its real result instead of a spurious 124.
-                biased;
-                res = &mut work => res,
-                _ = tokio::signal::ctrl_c() => {
-                    info!("ctrl-c received during exec setup or run; aborting and shutting down");
-                    record_aborted_run(&guest_ip, key, 130, RunStatus::Cancelled, started_at, run.command_argv()).await;
-                    Ok(130)
-                }
-                () = &mut cap => {
-                    warn!(?max_wall, "max wall-clock cap reached during exec; aborting and shutting down");
-                    record_aborted_run(&guest_ip, key, 124, RunStatus::TimedOut, started_at, run.command_argv()).await;
-                    Ok(124)
-                }
-            }
-        }
+        Action::Exec(run) => exec_workload(env, run).await,
         Action::Idle => {
-            if max_wall.is_some() {
+            if env.max_wall.is_some() {
                 warn!("--max-wall set but no exec to bound (idle run); the cap has no effect");
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -712,6 +755,122 @@ async fn post_boot(
                 ))
             }
         }
+    }
+}
+
+/// Drive the exec path — wait for the workload channel, run the workload —
+/// racing the whole sequence against Ctrl-C and the wall-clock cap, and
+/// recording each transition on the lifecycle stream.
+async fn exec_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8, RoomsError> {
+    let guest_ip = env.network.guest_ip.clone();
+    let lifecycle = env.lifecycle;
+    // Wrap the entire setup-and-exec sequence (probe sshd, then exec) in
+    // one tokio::select! vs ctrl_c. Dropping `work` cascades through each
+    // child future — kill_on_drop fires on every spawned ssh client — so
+    // a Ctrl-C at any point still lets run_room's vm.shutdown() run cleanly.
+    let work = async {
+        wait_for_channel(env, run).await?;
+        let outcome = match runner::exec(&env.network.guest_ip, env.key, run).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                lifecycle.emit(&Event::WorkloadFailed {
+                    error: e.to_string(),
+                });
+                return Err(RoomsError::Internal(e.to_string()));
+            }
+        };
+        lifecycle.emit(&Event::WorkloadExited {
+            exit_code: outcome.exit_code,
+            status: workload_status(outcome.status),
+        });
+        Ok::<u8, RoomsError>(u8::try_from(outcome.exit_code).unwrap_or(2))
+    };
+    // started_at captures when rooms began attempting exec (SSH probe,
+    // then runner). Exec writes its own started_at into result.json on
+    // the success path; this outer one only surfaces in the abort
+    // (cancel / timeout) branches below, where the guest command may
+    // never have begun.
+    let started_at = Utc::now();
+    tokio::pin!(work);
+    // Fires at the wall-clock cap, or never when there's no cap — so an
+    // unset --max-wall leaves the select racing only work vs ctrl_c.
+    let cap = async {
+        match env.max_wall {
+            Some(limit) => tokio::time::sleep(limit).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(cap);
+    tokio::select! {
+        // Bias toward completed work: if the exec finished the same instant
+        // the cap fired, honor its real result instead of a spurious 124.
+        biased;
+        res = &mut work => res,
+        _ = tokio::signal::ctrl_c() => {
+            info!("ctrl-c received during exec setup or run; aborting and shutting down");
+            record_aborted_run(&guest_ip, env.key, 130, RunStatus::Cancelled, started_at, run.command_argv()).await;
+            lifecycle.emit(&Event::WorkloadExited { exit_code: 130, status: WorkloadStatus::Cancelled });
+            Ok(130)
+        }
+        () = &mut cap => {
+            warn!(max_wall = ?env.max_wall, "max wall-clock cap reached during exec; aborting and shutting down");
+            record_aborted_run(&guest_ip, env.key, 124, RunStatus::TimedOut, started_at, run.command_argv()).await;
+            lifecycle.emit(&Event::WorkloadExited { exit_code: 124, status: WorkloadStatus::TimedOut });
+            Ok(124)
+        }
+    }
+}
+
+/// Wait for the guest's workload channel, reporting guest/SSH readiness on the
+/// lifecycle stream, then record the workload handoff. The ping probe runs
+/// only when a stream consumes it, so runs without `--lifecycle` keep the
+/// exact probe behavior they had.
+async fn wait_for_channel(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<(), RoomsError> {
+    let lifecycle = env.lifecycle;
+    let waited = runner::wait_for_ssh_observed(
+        &env.network.guest_ip,
+        env.key,
+        env.config,
+        lifecycle.is_enabled(),
+        |signal| match signal {
+            runner::GuestSignal::GuestReady => lifecycle.emit(&Event::GuestReady),
+            runner::GuestSignal::SshReady => lifecycle.emit(&Event::SshReady),
+        },
+    )
+    .await;
+    if let Err(e) = waited {
+        emit_readiness_failure(lifecycle, &e);
+        return Err(RoomsError::Firecracker(e));
+    }
+    lifecycle.emit(&Event::WorkloadStarted {
+        command: run.command_argv(),
+    });
+    Ok(())
+}
+
+/// Classify a readiness failure for the stream: a probe timeout means the
+/// guest never became usable (`guest_unreachable`); anything else is a
+/// host-side probe fault (`workload_failed`) — the guest may be fine.
+fn emit_readiness_failure(lifecycle: &Lifecycle, e: &rooms::error::FirecrackerError) {
+    if matches!(e, rooms::error::FirecrackerError::GuestUnreachable { .. }) {
+        lifecycle.emit(&Event::GuestUnreachable {
+            error: e.to_string(),
+        });
+        return;
+    }
+    lifecycle.emit(&Event::WorkloadFailed {
+        error: e.to_string(),
+    });
+}
+
+/// Map a `result.json` status onto the lifecycle vocabulary — the same terms,
+/// so the two surfaces never disagree about one run.
+const fn workload_status(status: RunStatus) -> WorkloadStatus {
+    match status {
+        RunStatus::Succeeded => WorkloadStatus::Succeeded,
+        RunStatus::Failed => WorkloadStatus::Failed,
+        RunStatus::TimedOut => WorkloadStatus::TimedOut,
+        RunStatus::Cancelled => WorkloadStatus::Cancelled,
     }
 }
 
@@ -1256,6 +1415,33 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_flag_parses_onto_run_and_defaults_off() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "run",
+            "--image",
+            "x",
+            "--command",
+            "id",
+            "--lifecycle",
+            "/tmp/lc.ndjson",
+        ])
+        .expect("--lifecycle should parse");
+        match cli.command {
+            Command::Run { lifecycle, .. } => {
+                assert_eq!(lifecycle, Some(PathBuf::from("/tmp/lc.ndjson")));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
+        let bare = Cli::try_parse_from(["rooms", "run", "--image", "x", "--command", "id"])
+            .expect("bare run parses");
+        match bare.command {
+            Command::Run { lifecycle, .. } => assert!(lifecycle.is_none()),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn exit_code_reserves_four_for_pool_full() {
         assert_eq!(
             exit_code_for_error(&RoomsError::Slot(SlotError::PoolFull { cap: 8 })),
@@ -1489,6 +1675,7 @@ mod tests {
             max_wall: None,
             max_pool: None,
             json: false,
+            lifecycle: None,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(

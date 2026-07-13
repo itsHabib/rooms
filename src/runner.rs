@@ -73,6 +73,20 @@ pub struct CursorMeta {
     pub model_id: String,
 }
 
+/// A guest readiness signal observed while waiting for the workload channel.
+///
+/// The two are distinct on purpose: a kernel that booted is not yet a channel
+/// a workload can use, and collapsing them is what hides a guest panic behind
+/// a "booted" log line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestSignal {
+    /// The guest kernel is up: it answered a network probe (ICMP echo), or —
+    /// when ICMP never answers — sshd itself proved the kernel alive.
+    GuestReady,
+    /// sshd accepted a pubkey connection: the workload channel is usable.
+    SshReady,
+}
+
 /// Probe the guest's sshd until it accepts a pubkey connection, or the
 /// configured timeout elapses.
 ///
@@ -86,12 +100,32 @@ pub async fn wait_for_ssh(
     key_path: &Path,
     config: &RoomsConfig,
 ) -> Result<(), FirecrackerError> {
+    wait_for_ssh_observed(guest_ip, key_path, config, false, |_| {}).await
+}
+
+/// [`wait_for_ssh`], reporting readiness signals to `observe` as they happen.
+///
+/// `observe` sees [`GuestSignal::GuestReady`] exactly once and then
+/// [`GuestSignal::SshReady`] exactly once, in that order, on the success path;
+/// nothing on timeout. With `probe_ping` set, each poll cycle also pings the
+/// guest until it first answers — the kernel-is-up signal that is *earlier*
+/// than (and independent of) sshd. Without it the ordering guarantee still
+/// holds: an accepted SSH connection proves the kernel booted, so both signals
+/// fire back-to-back. One deadline bounds the whole wait either way.
+pub async fn wait_for_ssh_observed(
+    guest_ip: &str,
+    key_path: &Path,
+    config: &RoomsConfig,
+    probe_ping: bool,
+    mut observe: impl FnMut(GuestSignal),
+) -> Result<(), FirecrackerError> {
     let key = key_path
         .to_str()
         .ok_or_else(|| FirecrackerError::Internal("key path not utf-8".to_owned()))?;
     let timeout = config.guest_reach_timeout;
     let poll = config.guest_reach_poll_interval;
     let deadline = Instant::now() + timeout;
+    let mut guest_seen = false;
     let mut last_err = String::new();
 
     loop {
@@ -103,39 +137,81 @@ pub async fn wait_for_ssh(
             });
         }
 
-        let output = Command::new("ssh")
-            .args([
-                "-i",
-                key,
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=2",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                &format!("{GUEST_USER}@{guest_ip}"),
-                "true",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| FirecrackerError::Internal(format!("ssh probe spawn failed: {e}")))?;
-
-        if output.status.success() {
-            info!(guest_ip, "sshd accepted pubkey connection");
-            return Ok(());
+        match probe_ssh_once(guest_ip, key).await? {
+            None => {
+                info!(guest_ip, "sshd accepted pubkey connection");
+                signal_ready(&mut observe, guest_seen);
+                return Ok(());
+            }
+            Some(stderr) => last_err = stderr,
         }
-
-        last_err = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         debug!(guest_ip, stderr = %last_err, "sshd probe failed; retrying");
+
+        if probe_ping && !guest_seen && probe_ping_once(guest_ip).await {
+            info!(guest_ip, "guest answered ping (kernel up; sshd not yet)");
+            guest_seen = true;
+            observe(GuestSignal::GuestReady);
+        }
         sleep(poll).await;
     }
+}
+
+/// Emit the terminal readiness signals: `GuestReady` first when ping never
+/// answered (an accepted SSH connection proves the kernel booted), then
+/// `SshReady`.
+fn signal_ready(observe: &mut impl FnMut(GuestSignal), guest_seen: bool) {
+    if !guest_seen {
+        observe(GuestSignal::GuestReady);
+    }
+    observe(GuestSignal::SshReady);
+}
+
+/// One sshd pubkey probe: `Ok(None)` accepted, `Ok(Some(stderr))` refused,
+/// `Err` when the host-side ssh client couldn't even spawn.
+async fn probe_ssh_once(guest_ip: &str, key: &str) -> Result<Option<String>, FirecrackerError> {
+    let output = Command::new("ssh")
+        .args([
+            "-i",
+            key,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=2",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            &format!("{GUEST_USER}@{guest_ip}"),
+            "true",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| FirecrackerError::Internal(format!("ssh probe spawn failed: {e}")))?;
+
+    if output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    ))
+}
+
+/// One ICMP echo probe (`ping -c 1 -W 1`). Best-effort observation: any
+/// failure — no ping binary, ICMP filtered, no reply — is just `false`.
+async fn probe_ping_once(guest_ip: &str) -> bool {
+    Command::new("ping")
+        .args(["-c", "1", "-W", "1", guest_ip])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
 }
 
 /// Outcome of a guest command exec, including artifact metadata.
