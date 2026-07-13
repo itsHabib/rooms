@@ -13,164 +13,53 @@ Live state — what's shipped, what's in flight, and what's next — lives in do
 <!-- BEGIN dev-workbench (managed by /dev-workbench skill — re-run to refresh; hand-edits inside this block will be overwritten) -->
 ## Dev workbench
 
-Several MCP servers + skills are available in any Claude session on this machine. Same shape across every repo in the portfolio — refresh with `/dev-workbench` when the canonical set evolves. Stuck on a *knowledge* question about another portfolio repo — how it behaves, its conventions, what's in flight there — `/consult` its steward instead of asking the operator; only *authority* questions (direction, spend, irreversible calls) go to the operator.
+These MCPs, planes, and skills are available in any agent session on this machine; the harness injects each tool's signature, so this is the *map* — how they compose — not the per-verb manual. When the signal matches, call the verb; don't ask permission. Stuck on a *knowledge* question about another portfolio repo → `/consult` its steward; only *authority* questions (direction, spend, irreversible calls) go to the operator.
 
-### dossier — project memory plane
+**MCPs (in-session):**
+- **dossier** — durable project memory: projects → phases → tasks → artifacts (markdown-on-disk).
+- **ship** — the driver engine: dispatch a task to a cloud/local agent and persist the run (dispatch→poll→judgment→land→record); inspect/cancel/replay.
+- **huddle** — *optional* multi-seat coordination (Slack-backed); off the normal PR path.
+- **playwright** — browser automation when a task needs a real DOM.
 
-Markdown-on-disk corpus + Rust MCP server. Owns state across sessions: tasks, decisions, cross-repo links, session handoffs. Source of truth for "what's the current goal and what's been tried."
+**Planes (CLIs, composed via exit codes + JSONL — not MCPs):**
+- **gate** — authorization: evaluates the *exact* PR head, emits governed-path merge authorization. Findings ≠ authorization; gate is the merge boundary.
+- **flare** — notification: best-effort escalation sink over authoritative receipts → its own Slack app/channel. Pure sink; never gates; not built on huddle.
 
-**Use proactively for:**
-
-- *"start a session on rooms"* → `mcp__dossier__project_get` + `mcp__dossier__task_list`
-- *"this just landed"* → `mcp__dossier__task_complete` with merge SHA in the artifact link
-- *"what's left in productionization"* → `mcp__dossier__phase_list` / `task_list --phase`
-- *"where did we decide X"* → `mcp__dossier__search` across decisions and task bodies
-
-**Don't use for:**
-
-- Ephemeral within-session todos (the harness's task tool covers those)
-- GitHub-issue-style external collaboration — follow-ups live in in-repo status docs, not `gh issue create`
-
-### ship — workflow execution
-
-TypeScript MCP server that hands a spec doc to cursor (local or cloud), persists the run, lets you inspect/cancel/replay. The agent runner you fire when a spec is ready to implement.
-
-**Use proactively for:**
-
-- *"implement this spec"* → `mcp__ship__ship` with the spec path + runtime
-- *"fire batch 2 in parallel"* → `mcp__ship__ship` with N stream entries
-- *"is that cursor run still going"* → `mcp__ship__get_workflow_run`
-- *"cancel that"* → `mcp__ship__cancel_workflow_run`
-
-**Cloud defaults for this repo** (canonical, locked 2026-05-25):
-
-```js
-cloud: { repos: [{ url: "https://github.com/itsHabib/rooms" }], env: { type: "cloud" }, autoCreatePR: true }
-```
-
-Prefer local runtime when the PR needs heavy framing (architecture pivots, discovery logs).
-
-**Don't use for:**
-
-- Single ad-hoc commands (`make check`, a one-shot test) — just shell them
-- Work without a written spec doc — write the spec first, then ship
-
-### huddle — multi-seat coordination
-
-Per-seat keys + Slack channels for when more than one operator/agent is in the loop. Synchronizes context + handoff notes across machines.
-
-**Use proactively for:**
-
-- *"pairing on this with codex"* → `/huddle` at session start
-- *"resume from the laptop"* → `mcp__huddle__huddle_read` for current state
-
-**Don't use for:**
-
-- Solo single-machine sessions (overhead without payoff)
-
-### playwright — browser automation
-
-Playwright MCP plugin. Snapshot + act on DOM. For tasks that need a real browser, not curl.
-
-**Use proactively for:**
-
-- *"verify the OAuth flow"* → `mcp__plugin_playwright_playwright__browser_navigate` + friends
-- *"screenshot the deployed page"* → `mcp__plugin_playwright_playwright__browser_take_screenshot`
-
-**Don't use for:**
-
-- Anything reachable via plain HTTP / curl
-- rooms substrate work in v0 (no web surface yet)
-
-### `/work-driver` — drive impl end-to-end
-
-Orchestrates spec-doc tasks from a driver manifest: pre-flight worktrees, fan out via `mcp__ship__ship` (single stream or N parallel; mixed-runtime batches admitted), poll terminal states, verify auto-commit (local) or trust cloud's terminal status (cloud), open PRs, coordinate reviews, merge in dep order.
-
-**Triggers:** "drive batch 1", "ship these specs in parallel", "run the productionization", explicit `/work-driver`.
-
-**This repo's manifest:** [`docs/features/01-productionization/driver.md`](docs/features/01-productionization/driver.md).
-
-```sh
-/work-driver docs/features/01-productionization/driver.md           # whole manifest
-/work-driver docs/features/01-productionization/driver.md --batch 1 # one batch
-```
-
-**Pair with:** `/work-driver-prep` to generate the manifest beforehand; `/shipped` for the post-run recap.
-
-### `/work-driver-prep` — build the spec docs + manifest
-
-Resolves dossier task IDs or a phase slug, generates one `docs/features/<slug>/spec.md` per task, detects file-overlap conflicts, groups into parallel-safe batches, emits a ready `/work-driver` command.
-
-**Triggers:** "prep the productionization batch", "spec out these tasks for parallel ship", explicit `/work-driver-prep`.
-
-**Pair with:** `/work-driver` — prep is the planning seam, driver is the execution seam.
-
-### `/shipped` — retrospective recap after work lands
-
-Pulls work-driver manifests (ground truth) + git/gh/dossier signals: PRs merged with shas + weighted-LOC, dossier task closures, chips filed, friction-log delta, what's still open, what to do next.
-
-**Triggers:** "what just shipped", "what merged today", "post-run summary", explicit `/shipped`.
-
-**Pair with:** Use after `/work-driver` exits, after a chip blitz, or any time you need a punch-list of "what landed and what's next." Distinct from `/status` — `/shipped` is retrospective on landed work, `/status` is in-flight.
-
-### `/status` — tight 4-section in-flight ping
-
-Produces a 4-section update: What happened / What's next / What I recommend / What I need from you. 1-3 sentences each. Skip-when-empty rather than padding.
-
-**Triggers:** "give me an update", "sitrep", "where are we", "recap", explicit `/status`.
-
-**Pair with:** `/shipped` for the retrospective. `/status` is mid-session; `/shipped` is post-landing.
-
-### `/consult` — summon a sibling repo's steward
-
-Summons another portfolio repo's steward (an ephemeral subagent scoped to that repo) for a same-turn answer; knowledge questions go to a peer, authority questions to the operator. Read-only, no side effects.
-
-**Triggers:** "ask the ship agent", "what does the dossier steward think", "consult <repo> about X", explicit `/consult <repo> "<question>"`.
-
-**Pair with:** the stuck path — reach for it mid-task before escalating to the operator.
-
-### `/worktree-*` — manage secondary git worktrees
-
-Thin skill family over plain `git worktree`. Use these instead of an MCP — the verbs that mattered (add, list, remove, transfer, where) cover the common cases without an external state store. Convention in this repo: feature branches use `prod-<slug>` prefix; worktrees live at `.claude/worktrees/<branch>/`.
-
-- **`/worktree-add`** — *"spin up a worktree for cursor-sdk-runner"* → creates `.claude/worktrees/prod-cursor-sdk-runner/`
-- **`/worktree-list`** — *"what worktrees do I have"* → branch, dirty state, optional PR/CI from `gh`
-- **`/worktree-remove`** — *"clean up the worktree"* → dirty-state aware (commit-WIP / stash / discard)
-- **`/worktree-transfer`** — *"bring this work over to main"* → removes secondary, checks out branch in root
-- **`/worktree-where`** — *"where am I"* → which worktree, branch, and cwd this session is pointing at
+**Skills:**
+- **/work-driver** [+ **/work-driver-prep**] — drive agent-led impl end-to-end; prep builds the specs + conflict-batched plan.
+- **/pr-risk** — size how much review a PR needs (deterministic floor + agent advisory); upstream of the reviewers — it decides *how much*, they *do* it.
+- **/review-coordinator** [+ **/review-digest**] — consolidate the AI PR reviewers into one verdict (the judge over the finders); digest pre-triages the bot pile locally.
+- **/shipped** · **/status** · **/wip** — retrospective recap · in-flight update · cross-store live board.
+- **/consult** — summon a sibling repo's steward for a same-turn answer; knowledge → peer, authority → operator.
+- **/worktree-*** — add · list · remove · transfer · where, over `git worktree`.
 
 ### The loop
 
 ```
-┌─────────────┐   ┌──────────────────┐   ┌─────────────────┐
-│  dossier    │──▶│ /work-driver-    │──▶│ /worktree-add   │
-│  (memory)   │   │     prep         │   │  + ship.ship    │
-└──────┬──────┘   └──────────────────┘   └────────┬────────┘
-       ▲                                          │
-       │          ┌──────────────────┐            ▼
-       │          │  make check      │   ┌─────────────────┐
-       │          │  + review        │◀──│   implement     │
-       │          │  (@codex,        │   │   (branch)      │
-       │          │   @claude,       │   └─────────────────┘
-       │          │   Copilot)       │            │
-       │          └────────┬─────────┘            │
-       │                   │                      ▼
-       │                   ▼              ┌─────────────────┐
-       └──────[ /shipped recap ]──────────│  merge + PR     │
-                                          │  + worktree-rm  │
-                                          └─────────────────┘
+dossier task → /worktree-add → spec → ship driver (cloud-first: dispatch→poll→judgment→land→record)
+   → PR + CI → /pr-risk tiers it → reviewers fire → /review-coordinator → one verdict
+   → gate evaluates the exact head → governed-path authorization → merge
+   → authoritative receipts → dossier close-out → /worktree-remove
+        ↘ any attention/terminal receipt → best-effort flare sweep → Slack   (independent; never gates)
 ```
 
-1. Task lands in dossier → `/work-driver-prep` writes spec(s) + manifest.
-2. `/worktree-add` per stream → `mcp__ship__ship` fires the agent.
-3. Agent implements on a feature branch; `make check` locally before push.
-4. PR opened; Copilot + `@codex review` + `@claude review`. CI green before merge.
-5. Merge; `/worktree-remove` (or `/worktree-transfer` back to root); dossier task closed with artifact link.
-6. `/shipped` post-landing or `/status` mid-stream as the chain runs.
+`/work-driver` coordinates dispatch→poll→land and runs its own review triage inline. `/pr-risk` and `/review-coordinator` are steps you *invoke* — the driver→pr-risk / driver→coordinator wiring is planned, not built, so nothing here auto-delegates.
 
 ### Why this shape
 
-Each layer swappable, seams deliberate. dossier could be Linear; ship could be a different agent runner; `/worktree-*` could be hand-rolled `git worktree` calls; playwright is one MCP among many that might serve a given browser task. The canonical set is what worked in this portfolio's actual day-to-day — substituting one tier doesn't ripple into the others, which is the value of the shape. `/consult` owns the stuck path: peer knowledge before operator attention.
+Each layer owns one responsibility and is swappable without rippling: dossier owns *what needs doing*; worktree skills own *where work happens*; ship owns *drive an agent + persist the run*; pr-risk owns *how much review*; review-coordinator owns *consolidate the finders* (the bots are swappable under it); **gate owns *authorization* — is this exact head allowed to merge — which is not the reviewers' findings**; **flare owns *notification* — a best-effort sink on authoritative receipts, its own Slack app, never blocking the driver, never depending on huddle**; consult owns the stuck path; huddle owns optional multi-seat; playwright owns browser. The workbench is a menu, not a checklist — skip what a flow doesn't need.
+
+### The shape underneath
+
+These tools instantiate the redesign's five contract planes — coupled only by typed artifacts (`evidence → verdict → action`), never call stacks:
+
+- **State** (remembers) — dossier + run/verdict/grant/receipt artifacts; the append-only substrate.
+- **Execution** (does) — ship's driver; emits evidence, never judges itself.
+- **Verification** (judges) — the escalate-only ladder (deterministic floor → local → premium), monotone `worst`/`max`: gate's reducer, review-coordinator, sense/triage/tracelens.
+- **Capability** (bounds) — scoped/timed grants; every effectful verb needs a live grant + a supporting verdict.
+- **Observability** (explains) — read-only, storeless views from State: flare, /wip, /shipped, /status.
+
+This section is the sixth — **Composition**: the agent + thin policy choosing which planes a task needs. The boundaries above *are* the plane laws, not conventions.
 <!-- END dev-workbench -->
 
 ## Architecture
