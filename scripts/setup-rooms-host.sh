@@ -17,7 +17,7 @@ CHECKSUMS="${SCRIPT_DIR}/checksums.txt"
 
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.10.1}"
 RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-NODE_MAJOR="${NODE_MAJOR:-20}"
+NODE_MAJOR="${NODE_MAJOR:-22}"
 IMAGES_DIR="${IMAGES_DIR:-$HOME/rooms/images}"
 ARCH="$(uname -m)"
 
@@ -44,7 +44,7 @@ require_cmd() {
 
 lookup_checksum() {
     local artifact="$1"
-    awk -v name="$artifact" '$1 ~ /^[0-9a-f]{64}$/ && $2 == name { print $1; exit }' "$CHECKSUMS"
+    awk -v name="$artifact" '{ sub(/\r$/, "", $2) } $1 ~ /^[0-9a-f]{64}$/ && $2 == name { print $1; exit }' "$CHECKSUMS"
 }
 
 verify_sha256() {
@@ -182,6 +182,11 @@ fi
 
 # --- Rust ---
 
+if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.cargo/env"
+fi
+
 if command -v cargo >/dev/null 2>&1; then
     log "Rust already installed: $(cargo --version)"
 else
@@ -189,7 +194,7 @@ else
     rustup_tmp="$(mktemp)"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$rustup_tmp"
     verify_sha256 "$rustup_tmp" "rustup-init.sh"
-    sh "$rustup_tmp" -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN"
+    sh "$rustup_tmp" -y --default-toolchain "$RUSTUP_TOOLCHAIN"
     rm -f "$rustup_tmp"
     # shellcheck disable=SC1090
     source "$HOME/.cargo/env"
@@ -240,7 +245,7 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     warn "  add to ~/.bashrc:   export ANTHROPIC_API_KEY=\"sk-ant-...\""
 fi
 if [[ -z "${CURSOR_API_KEY:-}" ]]; then
-    log "CURSOR_API_KEY is not set — only needed once task #4 (cursor SDK runner) lands"
+    log "CURSOR_API_KEY is not set — required only for --runner cursor"
 fi
 
 # --- summary ---
@@ -256,7 +261,8 @@ log "  node:        $(node --version 2>/dev/null || echo MISSING)"
 log "  claude:      $(command -v claude >/dev/null && echo present || echo MISSING)"
 log ""
 log "next:"
-log "  1. cd ~/rooms && make check         (sanity-check the toolchain)"
-log "  2. build the agent image: sudo ./scripts/build-rootfs-alpine.sh --out images/agent-alpine.ext4 --ssh-key ~/.ssh/id_rooms.pub"
-log "  3. smoke test: ./scripts/test-rootfs-alpine.sh images/agent-alpine.ext4"
+log "  1. cd ${SCRIPT_DIR}/.. && make check"
+log "  2. create the guest key if absent: ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_rooms"
+log "  3. build the canonical image: sudo ./scripts/build-rootfs-alpine.sh --out $IMAGES_DIR/rootfs.ext4 --ssh-key ~/.ssh/id_rooms.pub"
+log "  4. smoke test: ./scripts/test-rootfs-alpine.sh $IMAGES_DIR/rootfs.ext4"
 log ""

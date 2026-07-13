@@ -1065,6 +1065,7 @@ fn build_boot_args(network: Option<&NetworkConfig>, readonly_rootfs: bool) -> St
     // boots rather than panicking on a missing init.
     let mut base = String::from("console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on");
     if readonly_rootfs {
+        base.push_str(" rootflags=noload");
         base.push_str(" init=");
         base.push_str(OVERLAY_INIT);
     }
@@ -1522,6 +1523,10 @@ mod tests {
             "readonly boot args must hand off to overlay-init: {on}"
         );
         assert!(
+            on.contains("rootflags=noload"),
+            "readonly boot must not replay an ext4 journal: {on}"
+        );
+        assert!(
             !on.contains(" ip="),
             "no network suffix without config: {on}"
         );
@@ -1530,6 +1535,10 @@ mod tests {
         assert!(
             !off.contains("init="),
             "non-readonly boot must not force an init= (any image boots): {off}"
+        );
+        assert!(
+            !off.contains("rootflags="),
+            "non-readonly boot must allow normal journal recovery: {off}"
         );
     }
 

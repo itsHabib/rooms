@@ -70,8 +70,26 @@ Build the binary and the **agent rootfs** (bakes the `rooms` guest user + key):
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"                       # cargo isn't on the non-login SSH PATH
 make release
-bash scripts/build-rootfs-alpine.sh                        # current builder; build-rootfs.sh (noble) + bake-rootfs-ssh.sh are legacy/POC
+test -f ~/.ssh/id_rooms || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_rooms
+sudo ./scripts/build-rootfs-alpine.sh \
+  --out "$HOME/rooms/images/rootfs.ext4" \
+  --ssh-key "$HOME/.ssh/id_rooms.pub"                      # canonical image used by doctor + e2e
+sudo chown mh:firecracker "$HOME/rooms/images/rootfs.ext4"
+sudo chmod 0664 "$HOME/rooms/images/rootfs.ext4"
 sudo bash scripts/setup-tap.sh --host                      # installs the ROOMS_FWD chain (gone after every reboot)
+```
+
+Ship's Cursor runtime needs a separate image. Its native SDK build temporarily
+exceeds the base image's 512 MiB capacity, so build it with 1 GiB:
+
+```bash
+sudo ./scripts/build-rootfs-alpine.sh \
+  --size 1G \
+  --out "$HOME/rooms/images/agent-alpine-cursor.ext4" \
+  --ssh-key "$HOME/.ssh/id_rooms.pub" \
+  --extend scripts/rootfs/install-cursor.sh
+sudo chown mh:firecracker "$HOME/rooms/images/agent-alpine-cursor.ext4"
+sudo chmod 0664 "$HOME/rooms/images/agent-alpine-cursor.ext4"
 ```
 
 ## 3. Validate
