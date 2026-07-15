@@ -7,7 +7,6 @@
 e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2  vmlinux-6.1.155.bin
 2a840feeccb5cb161c6eab1ecd86667c06ed5e307da534d2d3c9e39a6ec6c30a  bionic.rootfs.ext4
 6c30b75a75b28a96fd913a037c8581b580080b6ee9b8169a3c0feb1af7fe8caf  rustup-init.sh
-575583bbac2fccc0b5edd0dbc03e222d9f9dc8d724da996d22754d6411104fd1  nodesource-setup-22.x.sh
 # Installed binaries (rooms doctor sha-drift check):
 96d25e000e5fcbf5b11dca0e1275b5d7dc0922ff8b8206aeaed98e515a8468dc  firecracker-v1.10.1-x86_64
 8965e9ee855537561ac3adaf0b086a3882456fdc55472691f3bbe489199014ce  jailer-v1.10.1-x86_64

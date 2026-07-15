@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # setup-rooms-host.sh — run INSIDE the Ubuntu VM that hosts rooms.
 #
-# Installs Firecracker, the quickstart kernel + rootfs, Rust, Node + claude-code
-# CLI; verifies /dev/kvm; sets up the work-dir layout. Idempotent — re-running
-# this script after a partial install is safe.
+# Installs Firecracker, the quickstart kernel + rootfs, Rust; verifies /dev/kvm;
+# sets up the work-dir layout. The agent binary (claude-code) lives in the guest
+# rootfs, not on the host. Idempotent — re-running after a partial install is safe.
 #
 # Run as the 'rooms' user (or any non-root user with sudo). Uses sudo for the
 # steps that require root.
@@ -17,7 +17,6 @@ CHECKSUMS="${SCRIPT_DIR}/checksums.txt"
 
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.10.1}"
 RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-NODE_MAJOR="${NODE_MAJOR:-22}"
 IMAGES_DIR="${IMAGES_DIR:-$HOME/rooms/images}"
 ARCH="$(uname -m)"
 
@@ -190,46 +189,18 @@ fi
 if command -v cargo >/dev/null 2>&1; then
     log "Rust already installed: $(cargo --version)"
 else
-    log "installing Rust via rustup ($RUSTUP_TOOLCHAIN)"
-    rustup_tmp="$(mktemp)"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$rustup_tmp"
-    verify_sha256 "$rustup_tmp" "rustup-init.sh"
-    sh "$rustup_tmp" -y --default-toolchain "$RUSTUP_TOOLCHAIN"
-    rm -f "$rustup_tmp"
+    log "installing Rust via rustup ($RUSTUP_TOOLCHAIN, profile minimal)"
+    # canonical TLS-authenticated installer; intentionally unpinned (unlike the
+    # artifacts above) — the wrapper fetches an unpinned rustup-init at runtime.
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN" --profile minimal
     # shellcheck disable=SC1090
     source "$HOME/.cargo/env"
 fi
 
-# --- Node + claude-code ---
-
-if command -v node >/dev/null 2>&1 && [[ "$(node -v)" =~ ^v${NODE_MAJOR}\. ]]; then
-    log "Node $NODE_MAJOR already installed: $(node -v)"
-else
-    log "installing Node $NODE_MAJOR via NodeSource"
-    nodesource_tmp="$(mktemp)"
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o "$nodesource_tmp"
-    verify_sha256 "$nodesource_tmp" "nodesource-setup-${NODE_MAJOR}.x.sh"
-    sudo -E bash "$nodesource_tmp"
-    rm -f "$nodesource_tmp"
-    sudo apt-get install -y -qq nodejs
-fi
-
-if command -v claude >/dev/null 2>&1; then
-    log "claude-code already installed: $(claude --version 2>/dev/null || echo present)"
-else
-    log "installing @anthropic-ai/claude-code from vendored package-lock.json"
-    claude_dir="${SCRIPT_DIR}/claude-code"
-    [[ -f "${claude_dir}/package.json" && -f "${claude_dir}/package-lock.json" ]] \
-        || fatal "vendored claude-code npm files missing under ${claude_dir}"
-    claude_install="$(mktemp -d)"
-    cp "${claude_dir}/package.json" "${claude_dir}/package-lock.json" "$claude_install/"
-    ( cd "$claude_install" && npm ci --strict-peer-deps --omit=dev --no-audit --no-fund )
-    sudo install -d -m 0755 /usr/local/lib/rooms/claude-code
-    sudo cp -a "$claude_install/node_modules" /usr/local/lib/rooms/claude-code/
-    sudo cp "$claude_install/package.json" "$claude_install/package-lock.json" /usr/local/lib/rooms/claude-code/
-    sudo ln -sf /usr/local/lib/rooms/claude-code/node_modules/.bin/claude /usr/local/bin/claude
-    rm -rf "$claude_install"
-fi
+# clippy + rustfmt on every path (fresh install or re-run where cargo already
+# exists); guarded so a non-rustup cargo (distro package) can't abort the run.
+command -v rustup >/dev/null 2>&1 && rustup component add clippy rustfmt
 
 # --- work dir layout ---
 
@@ -257,8 +228,6 @@ log "  firecracker: $(firecracker --version 2>/dev/null || echo MISSING)"
 log "  kernel:      $IMAGES_DIR/vmlinux.bin"
 log "  rootfs:      $IMAGES_DIR/rootfs.ext4"
 log "  rust:        $(cargo --version 2>/dev/null || echo MISSING)"
-log "  node:        $(node --version 2>/dev/null || echo MISSING)"
-log "  claude:      $(command -v claude >/dev/null && echo present || echo MISSING)"
 log ""
 log "next:"
 log "  1. cd ${SCRIPT_DIR}/.. && make check"
