@@ -190,12 +190,17 @@ if command -v cargo >/dev/null 2>&1; then
     log "Rust already installed: $(cargo --version)"
 else
     log "installing Rust via rustup ($RUSTUP_TOOLCHAIN, profile minimal)"
+    # canonical TLS-authenticated installer; intentionally unpinned (unlike the
+    # artifacts above) — the wrapper fetches an unpinned rustup-init at runtime.
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain "$RUSTUP_TOOLCHAIN" --profile minimal
     # shellcheck disable=SC1090
     source "$HOME/.cargo/env"
-    rustup component add clippy rustfmt
 fi
+
+# clippy + rustfmt on every path (fresh install or re-run where cargo already
+# exists); guarded so a non-rustup cargo (distro package) can't abort the run.
+command -v rustup >/dev/null 2>&1 && rustup component add clippy rustfmt
 
 # --- work dir layout ---
 
