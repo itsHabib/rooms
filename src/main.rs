@@ -858,7 +858,7 @@ enum ExecRace {
 /// The workload has NO fixed timeout of its own: an unset `max_wall` leaves the
 /// select racing `work` only against Ctrl-C (the cap arm is a future that never
 /// resolves), so a guest whose sshd becomes reachable seconds after boot still
-/// runs to completion. This is the bug this module guards against — the exec
+/// runs to completion. This is the bug this function guards against — the exec
 /// path must outlive the bare-boot 3s placeholder, never be cut by it — so the
 /// race lives here, isolated and tested, rather than inline where a fixed bound
 /// could creep back in unnoticed.
