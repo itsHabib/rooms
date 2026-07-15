@@ -74,6 +74,10 @@ Surfaced 2026-07-15 by `rooms run --command` shutdown-race review ([#71](https:/
 
 - 2026-07-15 — **`idle_linger` doesn't handle Ctrl-C during the bare-boot linger.** The no-exec path `tokio::time::sleep(BARE_BOOT_LINGER)`s for ~3s with no `ctrl_c()` arm, so a Ctrl-C during a bare `rooms run` (no `--command`) isn't delivered until the linger returns. Inherited from the pre-#71 code (no regression); the exec path handles Ctrl-C via `race_workload`. Wrap the linger in a `select!` vs `ctrl_c()` if the POC linger ever grows. (claude review on [#71](https://github.com/itsHabib/rooms/pull/71))
 
+Surfaced 2026-07-15 by `rooms run --command` workspace-provisioning review ([#72](https://github.com/itsHabib/rooms/pull/72)):
+
+- 2026-07-15 — **`ensure_guest_artifact_skeleton` mkdirs `/workspace/out/logs` without the workspace-unwritable guard.** The cancelled-run skeleton path (`runner.rs`) creates the artifact dir via `run_setup_ssh`, which is status-checked and surfaces its "create cancelled-run artifact skeleton" context + stderr (so it's not silent like the old exec path) — but it doesn't emit the specific `ROOMS_WORKSPACE_UNWRITABLE` guidance `run_wrapped` now gives. If ever invoked on an unprovisioned image it fails less specifically than the exec path. Lift the marker check into a shared helper if a second caller needs it. (claude review on [#72](https://github.com/itsHabib/rooms/pull/72))
+
 ## Closed
 
 Resolved by the `--out` transport-out work ([#40](https://github.com/itsHabib/rooms/pull/40) `973534b`):

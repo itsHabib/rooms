@@ -74,11 +74,9 @@ provision_rooms_user() {
     printf '%s\n' "$pubkey" | sudo tee -a "$ak" >/dev/null
 }
 
-# Provision the agent workspace root. The runner stages /workspace/out and clones
-# into /workspace/repo as the unprivileged guest user, which can't create a
-# top-level /workspace itself — without this a baked stock image fails
-# `rooms run --command` at `mkdir /workspace/out/logs`. Agent images built with
-# build-rootfs-alpine.sh already carry it; mkdir -p keeps this idempotent.
+# Bake a rooms-owned /workspace root. The unprivileged guest user can't mkdir at
+# /, so without this a baked stock image fails `rooms run --command`; agent images
+# (build-rootfs-alpine.sh) already carry it. Idempotent.
 provision_workspace() {
     local mnt="$1"
     local workspace="$mnt/workspace"
