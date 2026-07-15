@@ -807,10 +807,12 @@ async fn post_boot(
 /// before auto-shutdown — a POC placeholder that just proves the boot came up.
 ///
 /// This is the ONLY fixed auto-shutdown in a run, and it is scoped to the
-/// no-exec path alone: an exec run ([`Action::Exec`]) never touches it — its
-/// workload is bounded only by `--max-wall` and Ctrl-C (see [`race_workload`]).
-/// A `--command` whose guest becomes SSH-ready after this window must still
-/// run, so this must never leak into the exec path.
+/// no-exec path alone: an exec run ([`Action::Exec`]) never touches it. Its
+/// workload is never cut by *this* fixed timer — only an explicit `--max-wall`
+/// cap or Ctrl-C ends the exec race (see [`race_workload`]); the SSH-readiness
+/// probe keeps its own `guest_reach_timeout`. A `--command` whose guest becomes
+/// SSH-ready after this window must still run, so this must never leak into the
+/// exec path.
 const BARE_BOOT_LINGER: Duration = Duration::from_secs(3);
 
 /// The bare-boot (`Action::Idle`) path: linger [`BARE_BOOT_LINGER`], confirm the

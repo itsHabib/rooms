@@ -36,6 +36,9 @@ fn image_path(name: &str) -> PathBuf {
     PathBuf::from(home).join("rooms/images").join(name)
 }
 
+/// The guest SSH key path. Must stay in lockstep with the binary's own
+/// `key_path()` (`~/.ssh/id_rooms`); this only guards the skip below, so a
+/// silent divergence would run the test without the key instead of skipping.
 fn guest_key() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
     PathBuf::from(home).join(".ssh/id_rooms")
