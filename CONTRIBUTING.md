@@ -23,7 +23,7 @@ Other useful targets: `make fmt` (apply rustfmt), `make lint`, `make test`, `mak
 
 Running `rooms run` or `cargo test --features e2e` requires a Linux host with `/dev/kvm`. The v0 dev layout is an Ubuntu Server VM under Hyper-V on Windows (`rooms-host`), with nested virtualization enabled so `/dev/kvm` exists inside the guest.
 
-Bootstrap the in-VM stack with [`scripts/setup-rooms-host.sh`](scripts/setup-rooms-host.sh) (Firecracker, images, Rust, TAP, work-dir layout). If `/dev/kvm` is missing inside the Hyper-V VM, enable nested virt on the host processor settings, reboot, and verify `ls /dev/kvm`.
+Bootstrap the in-VM stack with [`scripts/setup-rooms-host.sh`](scripts/setup-rooms-host.sh) (Firecracker, images, Rust, TAP, work-dir layout). The agent binary (`claude-code`) is baked into the guest rootfs by [`scripts/build-rootfs-alpine.sh`](scripts/build-rootfs-alpine.sh), not installed on the host. If `/dev/kvm` is missing inside the Hyper-V VM, enable nested virt on the host processor settings, reboot, and verify `ls /dev/kvm`.
 
 We do not yet ship a one-size-fits-all dev environment for non-Hyper-V hosts; that is a separate engineering effort.
 

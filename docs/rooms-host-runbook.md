@@ -60,11 +60,14 @@ drive sidesteps the policy entirely; cloud-init reads a `cidata` CD identically.
 
 ## 2. Provision the in-guest stack
 
+The host is substrate only — Firecracker, kernel, Rust, work dirs. The `claude`
+binary runs inside the guest rootfs (built in the next step), not on the host.
+
 SSH in as `mh`, then:
 ```bash
 git clone https://github.com/itsHabib/rooms ~/dev/rooms   # canonical clone path
 cd ~/dev/rooms
-bash scripts/setup-rooms-host.sh                          # Firecracker, kernel, Rust, Node, /dev/kvm, work dirs (idempotent)
+bash scripts/setup-rooms-host.sh                          # Firecracker, kernel, Rust, /dev/kvm, work dirs (idempotent; no host-side Node)
 ```
 Build the binary and the **agent rootfs** (bakes the `rooms` guest user + key):
 ```bash
