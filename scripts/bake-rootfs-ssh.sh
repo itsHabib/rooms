@@ -246,15 +246,17 @@ set_directive PasswordAuthentication no
 # AcceptEnv is additive (sshd accepts multiple lines) and Ubuntu defaults
 # ship `AcceptEnv LANG LC_*` — using set_directive here would replace that
 # whole value with our one token and silently drop locale forwarding for
-# every SSH session. Instead, append a fresh `AcceptEnv ANTHROPIC_API_KEY`
-# line iff no existing AcceptEnv already grants that exact token. Cheap
+# every SSH session. Instead, append a fresh `AcceptEnv <var>` line per
+# credential iff no existing AcceptEnv already grants that exact token. Cheap
 # idempotent grep avoids accumulating duplicate lines on re-runs.
-if sudo grep -qE "^AcceptEnv[[:space:]].*\bANTHROPIC_API_KEY\b" "$CONFIG"; then
-    log "AcceptEnv already grants ANTHROPIC_API_KEY"
-else
-    log "appending AcceptEnv ANTHROPIC_API_KEY (preserves existing AcceptEnv lines)"
-    echo "AcceptEnv ANTHROPIC_API_KEY" | sudo tee -a "$CONFIG" >/dev/null
-fi
+for env_var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; do
+    if sudo grep -qE "^AcceptEnv[[:space:]].*\b${env_var}\b" "$CONFIG"; then
+        log "AcceptEnv already grants ${env_var}"
+    else
+        log "appending AcceptEnv ${env_var} (preserves existing AcceptEnv lines)"
+        echo "AcceptEnv ${env_var}" | sudo tee -a "$CONFIG" >/dev/null
+    fi
+done
 
 # 7b. Replace the quickstart rootfs's stale /etc/resolv.conf.
 # The bionic quickstart image was built on AWS EC2 and ships with a
@@ -302,4 +304,4 @@ log "done."
 log "    pubkey baked into:  $ROOTFS"
 log "    private key:        $KEY_PATH"
 log "    verify after boot:  ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null ${GUEST_USER}@172.16.0.2 'uname -a'"
-log "    env passthrough:    set ANTHROPIC_API_KEY before invoking rooms (SendEnv plumbs it to the guest)"
+log "    env passthrough:    set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN before invoking rooms (SendEnv plumbs it to the guest)"

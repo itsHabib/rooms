@@ -582,31 +582,45 @@ fn check_rootfs(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
 }
 
 fn check_anthropic_api_key() -> CheckResult {
-    anthropic_api_key_result(std::env::var("ANTHROPIC_API_KEY").ok().as_deref())
+    anthropic_credential_result(
+        std::env::var("ANTHROPIC_API_KEY").ok().as_deref(),
+        std::env::var("ANTHROPIC_AUTH_TOKEN").ok().as_deref(),
+    )
 }
 
-/// Decide the Anthropic-key check from the resolved env value — policy split
-/// from the env read so it's unit-testable without mutating process env.
+/// Decide the Anthropic-credential check from the resolved env values — policy
+/// split from the env read so it's unit-testable without mutating process env.
 ///
-/// The base substrate (boot / network / `--command` exec) runs without a key;
-/// only the cursor runner path needs one. So an unset, empty, or whitespace-only
-/// key is a [`WARN_PREFIX`] warning, not a failure — else the preflight gate
-/// would abort substrate-only e2e on a host that merely lacks the key.
-fn anthropic_api_key_result(value: Option<&str>) -> CheckResult {
+/// Either `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` (subscription OAuth)
+/// satisfies the agent runner — both are forwarded to the guest and the guest
+/// CLI honors both. The base substrate (boot / network / `--command` exec) runs
+/// without a credential; only the agent runner path needs one. So unset, empty,
+/// or whitespace-only values are a [`WARN_PREFIX`] warning, not a failure —
+/// else the preflight gate would abort substrate-only e2e on a host that merely
+/// lacks a credential.
+fn anthropic_credential_result(api_key: Option<&str>, auth_token: Option<&str>) -> CheckResult {
     let name = "anthropic_api_key".to_owned();
-    match value {
-        Some(v) if !v.trim().is_empty() => CheckResult {
+    let is_set = |v: Option<&str>| v.is_some_and(|v| !v.trim().is_empty());
+    if is_set(api_key) {
+        return CheckResult {
             name,
             ok: true,
             message: "ANTHROPIC_API_KEY is set".to_owned(),
-        },
-        _ => CheckResult {
+        };
+    }
+    if is_set(auth_token) {
+        return CheckResult {
             name,
             ok: true,
-            message: format!(
-                "{WARN_PREFIX} ANTHROPIC_API_KEY unset — required for --runner cursor, not for --command / e2e"
-            ),
-        },
+            message: "ANTHROPIC_AUTH_TOKEN is set".to_owned(),
+        };
+    }
+    CheckResult {
+        name,
+        ok: true,
+        message: format!(
+            "{WARN_PREFIX} ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset — one is required for --runner cursor, neither for --command / e2e"
+        ),
     }
 }
 
@@ -1020,7 +1034,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
     use super::{
-        anthropic_api_key_result, check_sha_drift, check_sha_drift_with, drift_target_path,
+        anthropic_credential_result, check_sha_drift, check_sha_drift_with, drift_target_path,
         parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
@@ -1159,30 +1173,41 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_api_key_unset_empty_or_blank_warns_not_fails() {
-        // The base substrate runs without a key, so an unset, empty, or
-        // whitespace-only key is a WARN (ok=true + `warn:` prefix), never a hard
-        // FAIL that would abort the preflight gate on substrate-only e2e.
+    fn anthropic_credentials_unset_empty_or_blank_warn_not_fail() {
+        // The base substrate runs without a credential, so unset, empty, or
+        // whitespace-only values for BOTH vars are a WARN (ok=true + `warn:`
+        // prefix), never a hard FAIL that would abort the preflight gate on
+        // substrate-only e2e.
         for value in [None, Some(""), Some("   ")] {
-            let result = anthropic_api_key_result(value);
-            assert!(result.ok, "unset/blank key must not fail: {value:?}");
+            let result = anthropic_credential_result(value, value);
+            assert!(
+                result.ok,
+                "unset/blank credentials must not fail: {value:?}"
+            );
             assert!(
                 result.is_warning(),
-                "unset/blank key must be a WARN, got: {}",
+                "unset/blank credentials must be a WARN, got: {}",
                 result.message
             );
         }
     }
 
     #[test]
-    fn anthropic_api_key_set_is_a_plain_pass() {
-        let result = anthropic_api_key_result(Some("sk-ant-example"));
-        assert!(result.ok);
-        assert!(
-            !result.is_warning(),
-            "a set key is a pass, not a warn: {}",
-            result.message
-        );
+    fn either_anthropic_credential_set_is_a_plain_pass() {
+        for (api_key, auth_token) in [
+            (Some("sk-ant-example"), None),
+            (None, Some("sk-ant-oat-example")),
+            // A blank API key must not mask a real OAuth token.
+            (Some("   "), Some("sk-ant-oat-example")),
+        ] {
+            let result = anthropic_credential_result(api_key, auth_token);
+            assert!(result.ok);
+            assert!(
+                !result.is_warning(),
+                "a set credential is a pass, not a warn: {}",
+                result.message
+            );
+        }
     }
 
     mod version_parser_properties {

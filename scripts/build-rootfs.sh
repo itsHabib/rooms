@@ -166,6 +166,9 @@ set_sshd PasswordAuthentication no
 if ! grep -qE '^AcceptEnv[[:space:]].*\\bANTHROPIC_API_KEY\\b' "\$SSHD"; then
     echo 'AcceptEnv ANTHROPIC_API_KEY' >> "\$SSHD"
 fi
+if ! grep -qE '^AcceptEnv[[:space:]].*\\bANTHROPIC_AUTH_TOKEN\\b' "\$SSHD"; then
+    echo 'AcceptEnv ANTHROPIC_AUTH_TOKEN' >> "\$SSHD"
+fi
 
 mkdir -p /etc/systemd/system/multi-user.target.wants
 ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service

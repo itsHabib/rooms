@@ -221,6 +221,9 @@ set_sshd UseDNS no
 if ! grep -qE '^AcceptEnv[[:space:]].*\bANTHROPIC_API_KEY\b' "$SSHD"; then
     printf 'AcceptEnv ANTHROPIC_API_KEY\n' >>"$SSHD"
 fi
+if ! grep -qE '^AcceptEnv[[:space:]].*\bANTHROPIC_AUTH_TOKEN\b' "$SSHD"; then
+    printf 'AcceptEnv ANTHROPIC_AUTH_TOKEN\n' >>"$SSHD"
+fi
 
 log "creating ${GUEST_USER} user + enabling services + baking host keys inside chroot"
 chroot "$MNT" /bin/sh -s -- "$GUEST_USER" "$GUEST_UID" <<'CHROOT_CONFIG'
