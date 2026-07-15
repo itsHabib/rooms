@@ -799,23 +799,92 @@ async fn post_boot(
             Ok(0)
         }
         Action::Exec(run) => exec_workload(env, run).await,
-        Action::Idle => {
-            if env.max_wall.is_some() {
-                warn!("--max-wall set but no exec to bound (idle run); the cap has no effect");
-            }
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            if vm.is_alive().map_err(RoomsError::Firecracker)? {
-                info!("microVM is up; shutting down (POC: no exec yet)");
-                Ok(0)
-            } else {
-                Err(RoomsError::Firecracker(
-                    rooms::error::FirecrackerError::ProcessExitedEarly {
-                        exit_code: -1,
-                        stderr_tail: String::new(),
-                    },
-                ))
-            }
+        Action::Idle => idle_linger(env, vm).await,
+    }
+}
+
+/// How long a bare `rooms run` (no `--command`, no `--runner cursor`) lingers
+/// before auto-shutdown — a POC placeholder that just proves the boot came up.
+///
+/// This is the ONLY fixed auto-shutdown in a run, and it is scoped to the
+/// no-exec path alone: an exec run ([`Action::Exec`]) never touches it. Its
+/// workload is never cut by *this* fixed timer — only an explicit `--max-wall`
+/// cap or Ctrl-C ends the exec race (see [`race_workload`]); the SSH-readiness
+/// probe keeps its own `guest_reach_timeout`. A `--command` whose guest becomes
+/// SSH-ready after this window must still run, so this must never leak into the
+/// exec path.
+const BARE_BOOT_LINGER: Duration = Duration::from_secs(3);
+
+/// The bare-boot (`Action::Idle`) path: linger [`BARE_BOOT_LINGER`], confirm the
+/// VMM is still alive, then shut down. No workload runs here, so `--max-wall`
+/// has nothing to bound.
+async fn idle_linger(
+    env: &PostBootEnv<'_>,
+    vm: &mut firecracker::BootedVm,
+) -> Result<u8, RoomsError> {
+    if env.max_wall.is_some() {
+        warn!("--max-wall set but no exec to bound (idle run); the cap has no effect");
+    }
+    tokio::time::sleep(BARE_BOOT_LINGER).await;
+    if vm.is_alive().map_err(RoomsError::Firecracker)? {
+        info!("microVM is up; shutting down (POC: no exec yet)");
+        return Ok(0);
+    }
+    Err(RoomsError::Firecracker(
+        rooms::error::FirecrackerError::ProcessExitedEarly {
+            exit_code: -1,
+            stderr_tail: String::new(),
+        },
+    ))
+}
+
+/// Which arm of the exec race won. Split from its side effects (lifecycle
+/// emit + the abort-run record) so the race itself — the correctness-critical
+/// invariant that the workload is bounded ONLY by an explicit `--max-wall` and
+/// Ctrl-C, never a fixed auto-shutdown timer — is unit-testable without SSH,
+/// KVM, or an OS signal. `Completed` carries the workload's own `Result` so a
+/// real exec error keeps its message; the abort arms carry no result — their
+/// exit code (130 / 124) is decided by the arm, not the workload.
+#[derive(Debug)]
+enum ExecRace {
+    /// The workload ran to completion; carries its own result.
+    Completed(Result<u8, RoomsError>),
+    /// Ctrl-C fired first (exit 130).
+    Cancelled,
+    /// The `--max-wall` cap fired first (exit 124).
+    TimedOut,
+}
+
+/// Race the workload future against Ctrl-C and the optional wall-clock cap.
+///
+/// The workload has NO fixed timeout of its own: an unset `max_wall` leaves the
+/// select racing `work` only against Ctrl-C (the cap arm is a future that never
+/// resolves), so a guest whose sshd becomes reachable seconds after boot still
+/// runs to completion. This is the bug this function guards against — the exec
+/// path must outlive the bare-boot 3s placeholder, never be cut by it — so the
+/// race lives here, isolated and tested, rather than inline where a fixed bound
+/// could creep back in unnoticed.
+///
+/// `biased` means a `work` that finished the same instant the cap fired keeps
+/// its real result rather than a spurious 124.
+async fn race_workload<W>(work: W, max_wall: Option<Duration>) -> ExecRace
+where
+    W: std::future::Future<Output = Result<u8, RoomsError>>,
+{
+    tokio::pin!(work);
+    // Fires at the wall-clock cap, or never when there's no cap.
+    let cap = async {
+        match max_wall {
+            Some(limit) => tokio::time::sleep(limit).await,
+            None => std::future::pending::<()>().await,
         }
+    };
+    tokio::pin!(cap);
+    tokio::select! {
+        biased;
+        res = &mut work => ExecRace::Completed(res),
+        _ = tokio::signal::ctrl_c() => ExecRace::Cancelled,
+        () = &mut cap => ExecRace::TimedOut,
     }
 }
 
@@ -825,73 +894,86 @@ async fn post_boot(
 async fn exec_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8, RoomsError> {
     let guest_ip = env.network.guest_ip.clone();
     let lifecycle = env.lifecycle;
-    // Wrap the entire setup-and-exec sequence (probe sshd, then exec) in
-    // one tokio::select! vs ctrl_c. Dropping `work` cascades through each
-    // child future — kill_on_drop fires on every spawned ssh client — so
-    // a Ctrl-C at any point still lets run_room's vm.shutdown() run cleanly.
-    let work = async {
-        wait_for_channel(env, run).await?;
-        let outcome = match runner::exec(&env.network.guest_ip, env.key, run).await {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                lifecycle.emit(&Event::WorkloadFailed {
-                    error: e.to_string(),
-                });
-                return Err(RoomsError::Internal(e.to_string()));
-            }
-        };
-        lifecycle.emit(&Event::WorkloadExited {
-            exit_code: outcome.exit_code,
-            status: workload_status(outcome.status),
-        });
-        // A post-run push failure fails the run (the persist step the caller
-        // asked for didn't happen) but never erases the workload's real exit —
-        // result.json and the stream both already carry it.
-        if let Some(push_error) = outcome.push_error {
-            lifecycle.emit(&Event::WorkloadFailed {
-                error: push_error.clone(),
-            });
-            return Err(RoomsError::Internal(push_error));
-        }
-        Ok::<u8, RoomsError>(u8::try_from(outcome.exit_code).unwrap_or(2))
-    };
+    // Wrap the entire setup-and-exec sequence (probe sshd, then exec). Dropping
+    // `work` cascades through each child future — kill_on_drop fires on every
+    // spawned ssh client — so a Ctrl-C at any point still lets run_room's
+    // vm.shutdown() run cleanly.
+    let work = run_workload(env, run);
     // started_at captures when rooms began attempting exec (SSH probe,
     // then runner). Exec writes its own started_at into result.json on
     // the success path; this outer one only surfaces in the abort
     // (cancel / timeout) branches below, where the guest command may
     // never have begun.
     let started_at = Utc::now();
-    tokio::pin!(work);
-    // Fires at the wall-clock cap, or never when there's no cap — so an
-    // unset --max-wall leaves the select racing only work vs ctrl_c.
-    let cap = async {
-        match env.max_wall {
-            Some(limit) => tokio::time::sleep(limit).await,
-            None => std::future::pending::<()>().await,
-        }
-    };
-    tokio::pin!(cap);
-    tokio::select! {
-        // Bias toward completed work: if the exec finished the same instant
-        // the cap fired, honor its real result instead of a spurious 124.
-        biased;
-        res = &mut work => res,
+    match race_workload(work, env.max_wall).await {
+        ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
         // records it BEFORE the best-effort guest write below, which can stall
         // up to its grace bound on the very guest that just went unresponsive.
-        _ = tokio::signal::ctrl_c() => {
+        ExecRace::Cancelled => {
             info!("ctrl-c received during exec setup or run; aborting and shutting down");
-            lifecycle.emit(&Event::WorkloadExited { exit_code: 130, status: WorkloadStatus::Cancelled });
-            record_aborted_run(&guest_ip, env.key, 130, RunStatus::Cancelled, started_at, run.command_argv()).await;
+            lifecycle.emit(&Event::WorkloadExited {
+                exit_code: 130,
+                status: WorkloadStatus::Cancelled,
+            });
+            record_aborted_run(
+                &guest_ip,
+                env.key,
+                130,
+                RunStatus::Cancelled,
+                started_at,
+                run.command_argv(),
+            )
+            .await;
             Ok(130)
         }
-        () = &mut cap => {
+        ExecRace::TimedOut => {
             warn!(max_wall = ?env.max_wall, "max wall-clock cap reached during exec; aborting and shutting down");
-            lifecycle.emit(&Event::WorkloadExited { exit_code: 124, status: WorkloadStatus::TimedOut });
-            record_aborted_run(&guest_ip, env.key, 124, RunStatus::TimedOut, started_at, run.command_argv()).await;
+            lifecycle.emit(&Event::WorkloadExited {
+                exit_code: 124,
+                status: WorkloadStatus::TimedOut,
+            });
+            record_aborted_run(
+                &guest_ip,
+                env.key,
+                124,
+                RunStatus::TimedOut,
+                started_at,
+                run.command_argv(),
+            )
+            .await;
             Ok(124)
         }
     }
+}
+
+/// Wait for the workload channel, then run the workload, recording the
+/// workload's own transitions on the lifecycle stream. Returns the resolved
+/// exit code; a post-run push failure fails the run without erasing the
+/// workload's real exit (which the stream + result.json already carry).
+async fn run_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8, RoomsError> {
+    let lifecycle = env.lifecycle;
+    wait_for_channel(env, run).await?;
+    let outcome = match runner::exec(&env.network.guest_ip, env.key, run).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            lifecycle.emit(&Event::WorkloadFailed {
+                error: e.to_string(),
+            });
+            return Err(RoomsError::Internal(e.to_string()));
+        }
+    };
+    lifecycle.emit(&Event::WorkloadExited {
+        exit_code: outcome.exit_code,
+        status: workload_status(outcome.status),
+    });
+    if let Some(push_error) = outcome.push_error {
+        lifecycle.emit(&Event::WorkloadFailed {
+            error: push_error.clone(),
+        });
+        return Err(RoomsError::Internal(push_error));
+    }
+    Ok(u8::try_from(outcome.exit_code).unwrap_or(2))
 }
 
 /// Wait for the guest's workload channel, reporting guest/SSH readiness on the
@@ -1335,8 +1417,8 @@ mod tests {
 
     use super::{
         changeset_exit_code, diff_changeset, exit_code_for_error, humanize_secs, parse_max_pool,
-        parse_max_wall, resolve_action, run_error_record, truncate_label, Cli, Command, RoomsError,
-        RunArgs, RunnerKind, SlotError,
+        parse_max_wall, race_workload, resolve_action, run_error_record, truncate_label, Cli,
+        Command, ExecRace, RoomsError, RunArgs, RunnerKind, SlotError, BARE_BOOT_LINGER,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
@@ -1345,6 +1427,89 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// The regression for the silent-reap bug: a `--command` run whose guest
+    /// only becomes SSH-ready AFTER the bare-boot auto-shutdown window
+    /// ([`BARE_BOOT_LINGER`], 3s) must still execute the command and return its
+    /// exit code. With no `--max-wall`, the exec race is bounded only by Ctrl-C
+    /// (never fires here) — no fixed timer may cut it. The paused clock lets us
+    /// model a guest that takes 5s to accept SSH without a real 5s sleep.
+    #[tokio::test(start_paused = true)]
+    async fn exec_survives_when_guest_ready_after_auto_shutdown_window() {
+        // Simulate a guest that only becomes reachable well past the 3s window,
+        // then runs the command to exit code 7.
+        let ready_at = BARE_BOOT_LINGER + Duration::from_secs(2);
+        let work = async move {
+            tokio::time::sleep(ready_at).await;
+            Ok::<u8, RoomsError>(7)
+        };
+        // No cap: the race is work-vs-Ctrl-C only, so a slow-ready guest is not
+        // reaped mid-exec.
+        match race_workload(work, None).await {
+            ExecRace::Completed(res) => assert_eq!(
+                res.expect("the workload completed"),
+                7,
+                "a guest ready after the bare-boot window must still run its command"
+            ),
+            ExecRace::Cancelled => panic!("nothing sent Ctrl-C; the race must not cancel"),
+            ExecRace::TimedOut => {
+                panic!("no --max-wall was set; a fixed timer must not cut the exec")
+            }
+        }
+    }
+
+    /// A completed workload's own error propagates through the race unchanged —
+    /// the `Completed` arm carries the workload's `Result`, so a genuine exec
+    /// failure is not masked as a success or an abort.
+    #[tokio::test(start_paused = true)]
+    async fn exec_race_propagates_workload_error() {
+        let work = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err::<u8, RoomsError>(RoomsError::Internal("guest exec blew up".to_owned()))
+        };
+        match race_workload(work, None).await {
+            ExecRace::Completed(res) => {
+                let err = res.expect_err("the workload failed");
+                assert!(
+                    err.to_string().contains("guest exec blew up"),
+                    "the workload's own error must survive the race; got: {err}"
+                );
+            }
+            other => panic!("expected Completed(Err), got a different arm: {other:?}"),
+        }
+    }
+
+    /// `--max-wall` still bites: a workload that outlasts the cap loses the race
+    /// to the timeout arm (exit 124). This is the counterpart to the survival
+    /// test — the cap is the *explicit* bound, and it must still fire.
+    #[tokio::test(start_paused = true)]
+    async fn exec_race_times_out_when_workload_outlasts_max_wall() {
+        let cap = Duration::from_secs(1);
+        let work = async {
+            // Outlasts the cap by a wide margin.
+            tokio::time::sleep(cap + Duration::from_secs(30)).await;
+            Ok::<u8, RoomsError>(0)
+        };
+        assert!(
+            matches!(race_workload(work, Some(cap)).await, ExecRace::TimedOut),
+            "a workload past --max-wall must lose the race to the cap"
+        );
+    }
+
+    /// The exact-tie bias: when work completes the same instant the cap fires,
+    /// the `biased` select honors the real result, not a spurious 124.
+    #[tokio::test(start_paused = true)]
+    async fn exec_race_biases_completed_work_over_a_simultaneous_cap() {
+        let cap = Duration::from_secs(5);
+        let work = async move {
+            tokio::time::sleep(cap).await;
+            Ok::<u8, RoomsError>(3)
+        };
+        match race_workload(work, Some(cap)).await {
+            ExecRace::Completed(res) => assert_eq!(res.expect("completed"), 3),
+            other => panic!("completed work must win the tie, got: {other:?}"),
+        }
     }
 
     #[test]

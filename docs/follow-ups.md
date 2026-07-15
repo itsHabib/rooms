@@ -70,6 +70,10 @@ Surfaced 2026-06-29 by `rooms kill <id>` review ([#53](https://github.com/itsHab
 - 2026-06-29 — **a `reap_paths` failure after a successful terminate exits 2, not 1.** `reap_after_kill` takes `reap_paths(...)?`, so a `PathEscape`/`HomeUnset` from path re-resolution bubbles out of `kill` as a `RegistryError` (CLI exit **2**) instead of a `KillDisposition::Failed` outcome (exit **1**) — the kill/gc contract's code for an incomplete reap. The `reap_orphan` error already maps to `Failed`; `reap_paths` should too (map its error into a `Failed` outcome rather than `?`). (cursor Medium on [#53](https://github.com/itsHabib/rooms/pull/53))
 - 2026-06-29 — **a non-`NotFound` stat error on the room dir reads as "room gone" → exit 0.** `find_entry` uses `symlink_metadata(...).is_ok_and(|m| m.is_dir())`, so a permission/traversal error (e.g. a root-owned `0700` state base under `sudo`) collapses to `false` → `kill <id>` reports an empty set and exits 0 as if already reaped, while a live room is stranded. Only `NotFound` should become `None`; other stat errors should surface/refuse. (codex P2 on [#53](https://github.com/itsHabib/rooms/pull/53))
 
+Surfaced 2026-07-15 by `rooms run --command` shutdown-race review ([#71](https://github.com/itsHabib/rooms/pull/71)):
+
+- 2026-07-15 — **`idle_linger` doesn't handle Ctrl-C during the bare-boot linger.** The no-exec path `tokio::time::sleep(BARE_BOOT_LINGER)`s for ~3s with no `ctrl_c()` arm, so a Ctrl-C during a bare `rooms run` (no `--command`) isn't delivered until the linger returns. Inherited from the pre-#71 code (no regression); the exec path handles Ctrl-C via `race_workload`. Wrap the linger in a `select!` vs `ctrl_c()` if the POC linger ever grows. (claude review on [#71](https://github.com/itsHabib/rooms/pull/71))
+
 ## Closed
 
 Resolved by the `--out` transport-out work ([#40](https://github.com/itsHabib/rooms/pull/40) `973534b`):
