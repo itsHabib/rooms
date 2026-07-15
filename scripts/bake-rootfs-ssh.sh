@@ -74,6 +74,18 @@ provision_rooms_user() {
     printf '%s\n' "$pubkey" | sudo tee -a "$ak" >/dev/null
 }
 
+# Bake a rooms-owned /workspace root. The unprivileged guest user can't mkdir at
+# /, so without this a baked stock image fails `rooms run --command`; agent images
+# (build-rootfs-alpine.sh) already carry it. Idempotent.
+provision_workspace() {
+    local mnt="$1"
+    local workspace="$mnt/workspace"
+    log "provisioning /workspace (owned ${GUEST_USER})"
+    sudo mkdir -p "$workspace"
+    sudo chown "${GUEST_UID}:${GUEST_GID}" "$workspace"
+    sudo chmod 755 "$workspace"
+}
+
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     # shellcheck disable=SC2317
     return 0 2>/dev/null || exit 0
@@ -207,6 +219,9 @@ fi
 # 6b. Provision the unprivileged guest user (substrate SSHes as rooms@).
 log "provisioning ${GUEST_USER} user in rootfs"
 provision_rooms_user "$MNT" "$PUBKEY"
+
+# 6c. Provision the agent workspace root (substrate stages /workspace/out here).
+provision_workspace "$MNT"
 
 # 7. Configure sshd (idempotent, handles bionic's commented defaults)
 CONFIG="$MNT/etc/ssh/sshd_config"

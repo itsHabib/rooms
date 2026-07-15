@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fixture harness for bake-rootfs-ssh.sh's provision_rooms_user helper.
-# Exercises flat-file user provisioning without a loop-mounted rootfs.
+# Fixture harness for bake-rootfs-ssh.sh's provision_rooms_user +
+# provision_workspace helpers. Exercises flat-file user provisioning and the
+# /workspace root without a loop-mounted rootfs.
 #
 # CI-runnable: needs passwordless sudo (GitHub Actions ubuntu-latest).
 #
@@ -82,5 +83,13 @@ assert_eq "$(count_lines "$FIXTURE/etc/shadow" '^rooms:')" "1" "shadow rooms lin
 assert_eq "$(count_lines "$FIXTURE/etc/group" '^rooms:')" "1" "group rooms lines after re-run"
 assert_eq "$(grep -cF -- "$PUBKEY" "$FIXTURE/home/rooms/.ssh/authorized_keys")" "1" "authorized_keys pubkey count after re-run"
 assert_eq "$(stat -c '%a %u %g' "$FIXTURE/home/rooms")" "755 1000 1000" "home mode/owner after re-run"
+
+log "provision_workspace first run"
+provision_workspace "$FIXTURE"
+assert_eq "$(stat -c '%a %u %g' "$FIXTURE/workspace")" "755 1000 1000" "workspace mode/owner"
+
+log "provision_workspace second run (idempotent)"
+provision_workspace "$FIXTURE"
+assert_eq "$(stat -c '%a %u %g' "$FIXTURE/workspace")" "755 1000 1000" "workspace mode/owner after re-run"
 
 log "all assertions passed"
