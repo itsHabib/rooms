@@ -18,8 +18,15 @@ log()   { printf '\033[1;34m[test-bake-rootfs-ssh-user]\033[0m %s\n' "$*"; }
 fatal() { printf '\033[1;31m[test-bake-rootfs-ssh-user]\033[0m %s\n' "$*" >&2; exit 1; }
 
 count_lines() {
-    local file="$1" pattern="$2"
-    grep -cE "$pattern" "$file"
+    local file="$1" pattern="$2" n rc=0
+    # `grep -c` prints the count but exits 1 on zero matches, which would abort
+    # this script under `set -e` before assert_eq can report. Tolerate exit 1
+    # (no match -> n holds the printed 0); let a real grep error (exit >=2) surface.
+    n=$(grep -cE "$pattern" "$file") || rc=$?
+    if (( rc >= 2 )); then
+        return "$rc"
+    fi
+    printf '%s\n' "$n"
 }
 
 assert_eq() {
@@ -63,6 +70,7 @@ assert_eq "$(count_lines "$FIXTURE/etc/passwd" '^rooms:')" "1" "passwd rooms lin
 assert_eq "$(count_lines "$FIXTURE/etc/shadow" '^rooms:')" "1" "shadow rooms lines"
 assert_eq "$(count_lines "$FIXTURE/etc/group" '^rooms:')" "1" "group rooms lines"
 assert_grep "$FIXTURE/home/rooms/.ssh/authorized_keys" "$PUBKEY" "pubkey"
+assert_eq "$(stat -c '%a %u %g' "$FIXTURE/home/rooms")" "755 1000 1000" "home mode/owner"
 assert_eq "$(stat -c '%a %u %g' "$FIXTURE/home/rooms/.ssh")" "700 1000 1000" ".ssh mode/owner"
 assert_eq "$(stat -c '%a %u %g' "$FIXTURE/home/rooms/.ssh/authorized_keys")" "600 1000 1000" "authorized_keys mode/owner"
 
@@ -73,5 +81,6 @@ assert_eq "$(count_lines "$FIXTURE/etc/passwd" '^rooms:')" "1" "passwd rooms lin
 assert_eq "$(count_lines "$FIXTURE/etc/shadow" '^rooms:')" "1" "shadow rooms lines after re-run"
 assert_eq "$(count_lines "$FIXTURE/etc/group" '^rooms:')" "1" "group rooms lines after re-run"
 assert_eq "$(grep -cF -- "$PUBKEY" "$FIXTURE/home/rooms/.ssh/authorized_keys")" "1" "authorized_keys pubkey count after re-run"
+assert_eq "$(stat -c '%a %u %g' "$FIXTURE/home/rooms")" "755 1000 1000" "home mode/owner after re-run"
 
 log "all assertions passed"

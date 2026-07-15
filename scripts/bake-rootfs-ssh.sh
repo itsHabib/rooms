@@ -8,6 +8,19 @@ GUEST_USER="rooms"
 GUEST_UID=1000
 GUEST_GID=1000
 
+# Append the guest-user line to a flat account file iff it is not already there.
+# Keyed on the `^${GUEST_USER}:` prefix, so re-runs are a no-op. `label` names
+# the file for logging (e.g. "/etc/passwd").
+ensure_account_line() {
+    local file="$1" line="$2" label="$3"
+    if sudo grep -qE "^${GUEST_USER}:" "$file"; then
+        log "${GUEST_USER} already in ${label}"
+        return 0
+    fi
+    log "appending ${GUEST_USER} to ${label}"
+    printf '%s\n' "$line" | sudo tee -a "$file" >/dev/null
+}
+
 # Flat-file provision of the unprivileged guest user (matches runner's GUEST_USER).
 # Idempotent: skips passwd/shadow/group lines and authorized_keys entries that
 # already exist. Callable against a loop-mounted rootfs or a temp fixture dir.
@@ -21,27 +34,22 @@ provision_rooms_user() {
     local ssh_dir="$home/.ssh"
     local ak="$ssh_dir/authorized_keys"
 
-    if ! sudo grep -qE "^${GUEST_USER}:" "$passwd_file"; then
-        log "appending ${GUEST_USER} to /etc/passwd"
-        echo "${GUEST_USER}:x:${GUEST_UID}:${GUEST_GID}::/home/${GUEST_USER}:/bin/bash" \
-            | sudo tee -a "$passwd_file" >/dev/null
-    else
-        log "${GUEST_USER} already in /etc/passwd"
-    fi
+    # Preflight: the flat-file edits below assume a provisioned /etc. Fail loud
+    # and specific if the rootfs is missing one, rather than letting the first
+    # grep abort under `set -e` with a low-signal message.
+    local f
+    for f in "$passwd_file" "$shadow_file" "$group_file"; do
+        if [[ ! -f "$f" ]]; then
+            fatal "cannot provision ${GUEST_USER}: ${f} not found in rootfs"
+        fi
+    done
 
-    if ! sudo grep -qE "^${GUEST_USER}:" "$shadow_file"; then
-        log "appending ${GUEST_USER} to /etc/shadow (locked password)"
-        echo "${GUEST_USER}:*:19737:0:99999:7:::" | sudo tee -a "$shadow_file" >/dev/null
-    else
-        log "${GUEST_USER} already in /etc/shadow"
-    fi
-
-    if ! sudo grep -qE "^${GUEST_USER}:" "$group_file"; then
-        log "appending ${GUEST_USER} to /etc/group"
-        echo "${GUEST_USER}:x:${GUEST_GID}:" | sudo tee -a "$group_file" >/dev/null
-    else
-        log "${GUEST_USER} already in /etc/group"
-    fi
+    ensure_account_line "$passwd_file" \
+        "${GUEST_USER}:x:${GUEST_UID}:${GUEST_GID}::/home/${GUEST_USER}:/bin/bash" "/etc/passwd"
+    ensure_account_line "$shadow_file" \
+        "${GUEST_USER}:*:19737:0:99999:7:::" "/etc/shadow (locked password)"
+    ensure_account_line "$group_file" \
+        "${GUEST_USER}:x:${GUEST_GID}:" "/etc/group"
 
     if [[ ! -d "$home" ]]; then
         log "creating /home/${GUEST_USER}"
@@ -60,10 +68,10 @@ provision_rooms_user() {
 
     if sudo grep -qxF "$pubkey" "$ak"; then
         log "pubkey already present in ${GUEST_USER} authorized_keys"
-    else
-        log "appending pubkey to ${GUEST_USER} authorized_keys"
-        echo "$pubkey" | sudo tee -a "$ak" >/dev/null
+        return 0
     fi
+    log "appending pubkey to ${GUEST_USER} authorized_keys"
+    printf '%s\n' "$pubkey" | sudo tee -a "$ak" >/dev/null
 }
 
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
