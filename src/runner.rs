@@ -25,6 +25,12 @@ const GUEST_USER: &str = "rooms";
 /// Absolute path of the baked cursor runner script inside the guest image.
 const CURSOR_RUNNER_JS: &str = "/opt/rooms/cursor-runner/cursor-runner.js";
 
+/// Guest-side stderr marker the wrapper emits when it can't create
+/// `/workspace/out/logs` — i.e. the image gives the runner user no writable
+/// `/workspace`. Lets the substrate turn that into an actionable error instead of
+/// a phantom `EXIT=1` with empty logs.
+const WORKSPACE_UNWRITABLE_MARKER: &str = "ROOMS_WORKSPACE_UNWRITABLE";
+
 /// Which runner drives the guest. The substrate stays agent-agnostic — it only
 /// selects the guest-side command shape and, for cursor, clones the repo and
 /// stages the input dir first.
@@ -577,7 +583,7 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
     let started_at = Utc::now();
     let quoted_command = shell_single_quote(inner);
     let remote = format!(
-        "mkdir -p /workspace/out/logs && \
+        "if ! mkdir -p /workspace/out/logs; then echo {WORKSPACE_UNWRITABLE_MARKER} >&2; exit 1; fi; \
          bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
          echo EXIT=$?"
     );
@@ -591,6 +597,19 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
         .context("failed to spawn ssh; is openssh-client installed?")?;
 
     let ended_at = Utc::now();
+    // A failed `mkdir /workspace/out/logs` means the image gives the runner user
+    // no writable /workspace. Catch its marker first and fail with an actionable
+    // message — otherwise the `; echo EXIT=$?` trailer reports a phantom exit 1
+    // with empty logs (the old silent no-op).
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    if stderr_str.contains(WORKSPACE_UNWRITABLE_MARKER) {
+        anyhow::bail!(
+            "guest /workspace is not writable by the runner user ({GUEST_USER}); the image \
+             must provide a rooms-owned /workspace — agent images built with \
+             scripts/build-rootfs-alpine.sh carry it, and scripts/bake-rootfs-ssh.sh \
+             provisions it into a stock image"
+        );
+    }
     // Decide failure mode by looking for the EXIT= marker. If we see it, SSH ran
     // the wrapper to completion and the exit code is in `output.stdout` — even
     // if SSH itself returned non-zero (which it does when the inner command
@@ -598,9 +617,8 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
     // never ran and this is genuine SSH-transport failure.
     let stdout_str = String::from_utf8_lossy(&output.stdout);
     if !stdout_str.lines().any(|l| l.starts_with("EXIT=")) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "guest exec via SSH failed before wrapper completed (ssh exit {}): {stderr}",
+            "guest exec via SSH failed before wrapper completed (ssh exit {}): {stderr_str}",
             output.status
         );
     }
