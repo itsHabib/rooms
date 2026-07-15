@@ -1,6 +1,84 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+log()   { printf '\033[1;34m[bake-rootfs-ssh]\033[0m %s\n' "$*"; }
+fatal() { printf '\033[1;31m[bake-rootfs-ssh]\033[0m %s\n' "$*" >&2; exit 1; }
+
+GUEST_USER="rooms"
+GUEST_UID=1000
+GUEST_GID=1000
+
+# Append the guest-user line to a flat account file iff it is not already there.
+# Keyed on the `^${GUEST_USER}:` prefix, so re-runs are a no-op. `label` names
+# the file for logging (e.g. "/etc/passwd").
+ensure_account_line() {
+    local file="$1" line="$2" label="$3"
+    if sudo grep -qE "^${GUEST_USER}:" "$file"; then
+        log "${GUEST_USER} already in ${label}"
+        return 0
+    fi
+    log "appending ${GUEST_USER} to ${label}"
+    printf '%s\n' "$line" | sudo tee -a "$file" >/dev/null
+}
+
+# Flat-file provision of the unprivileged guest user (matches runner's GUEST_USER).
+# Idempotent: skips passwd/shadow/group lines and authorized_keys entries that
+# already exist. Callable against a loop-mounted rootfs or a temp fixture dir.
+provision_rooms_user() {
+    local mnt="$1"
+    local pubkey="$2"
+    local passwd_file="$mnt/etc/passwd"
+    local shadow_file="$mnt/etc/shadow"
+    local group_file="$mnt/etc/group"
+    local home="$mnt/home/$GUEST_USER"
+    local ssh_dir="$home/.ssh"
+    local ak="$ssh_dir/authorized_keys"
+
+    # Preflight: the flat-file edits below assume a provisioned /etc. Fail loud
+    # and specific if the rootfs is missing one, rather than letting the first
+    # grep abort under `set -e` with a low-signal message.
+    local f
+    for f in "$passwd_file" "$shadow_file" "$group_file"; do
+        if [[ ! -f "$f" ]]; then
+            fatal "cannot provision ${GUEST_USER}: ${f} not found in rootfs"
+        fi
+    done
+
+    ensure_account_line "$passwd_file" \
+        "${GUEST_USER}:x:${GUEST_UID}:${GUEST_GID}::/home/${GUEST_USER}:/bin/bash" "/etc/passwd"
+    ensure_account_line "$shadow_file" \
+        "${GUEST_USER}:*:19737:0:99999:7:::" "/etc/shadow (locked password)"
+    ensure_account_line "$group_file" \
+        "${GUEST_USER}:x:${GUEST_GID}:" "/etc/group"
+
+    if [[ ! -d "$home" ]]; then
+        log "creating /home/${GUEST_USER}"
+        sudo mkdir -p "$home"
+    fi
+    sudo chown "${GUEST_UID}:${GUEST_GID}" "$home"
+    sudo chmod 755 "$home"
+
+    sudo mkdir -p "$ssh_dir"
+    sudo chown "${GUEST_UID}:${GUEST_GID}" "$ssh_dir"
+    sudo chmod 700 "$ssh_dir"
+
+    sudo touch "$ak"
+    sudo chown "${GUEST_UID}:${GUEST_GID}" "$ak"
+    sudo chmod 600 "$ak"
+
+    if sudo grep -qxF "$pubkey" "$ak"; then
+        log "pubkey already present in ${GUEST_USER} authorized_keys"
+        return 0
+    fi
+    log "appending pubkey to ${GUEST_USER} authorized_keys"
+    printf '%s\n' "$pubkey" | sudo tee -a "$ak" >/dev/null
+}
+
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    # shellcheck disable=SC2317
+    return 0 2>/dev/null || exit 0
+fi
+
 # Refuse to run as root: HOME-derived defaults (ROOTFS, KEY_PATH) would
 # point at /root instead of the operator's home when invoked via `sudo
 # bash bake-rootfs-ssh.sh`, baking the wrong pubkey. The script invokes
@@ -18,9 +96,6 @@ PUB_PATH="${KEY_PATH}.pub"
 # reference them without tripping `set -u`.
 MNT=""
 LOOP=""
-
-log()   { printf '\033[1;34m[bake-rootfs-ssh]\033[0m %s\n' "$*"; }
-fatal() { printf '\033[1;31m[bake-rootfs-ssh]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Cleanup body. Idempotent — safe to invoke from EXIT, INT, or TERM.
 # Does NOT exit; the caller is responsible for the final exit code.
@@ -40,6 +115,7 @@ cleanup() {
 # Without this, $? inside the trap is whatever the last completed command
 # returned — often 0 during a sleep — so a Ctrl-C'd bake exits 0 and looks like
 # success to callers.
+rc=0
 trap 'rc=$?; cleanup; exit "$rc"' EXIT
 trap 'cleanup; trap - EXIT; exit 130' INT   # 128 + SIGINT(2)
 trap 'cleanup; trap - EXIT; exit 143' TERM  # 128 + SIGTERM(15)
@@ -128,6 +204,10 @@ else
     echo "$PUBKEY" | sudo tee -a "$AK" >/dev/null
 fi
 
+# 6b. Provision the unprivileged guest user (substrate SSHes as rooms@).
+log "provisioning ${GUEST_USER} user in rootfs"
+provision_rooms_user "$MNT" "$PUBKEY"
+
 # 7. Configure sshd (idempotent, handles bionic's commented defaults)
 CONFIG="$MNT/etc/ssh/sshd_config"
 
@@ -206,5 +286,5 @@ LOOP=""
 log "done."
 log "    pubkey baked into:  $ROOTFS"
 log "    private key:        $KEY_PATH"
-log "    verify after boot:  ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null root@172.16.0.2 'uname -a'"
+log "    verify after boot:  ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null ${GUEST_USER}@172.16.0.2 'uname -a'"
 log "    env passthrough:    set ANTHROPIC_API_KEY before invoking rooms (SendEnv plumbs it to the guest)"
