@@ -27,6 +27,9 @@ assert_cmd = "2"
 predicates = "3"
 proptest = "1"
 tempfile = "3"
+# test-util powers the paused-clock unit tests for the exec race (advance
+# virtual time past the bare-boot window without sleeping in wall-clock).
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 # End-to-end tests that require a real Firecracker binary + /dev/kvm + the
