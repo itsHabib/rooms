@@ -185,7 +185,7 @@ Adapted from ship's workflow:
 
 Rooms PRs merge through **gate** (the governed boundary — see the workbench map): `gate grant -repo itsHabib/rooms -action merge` → `gate gate -pr N -grant <id>` → judge → run the head-pinned `gh pr merge` gate prints. Gate parks the typical rooms PR at *"no review decision reported by GitHub"* — the AI reviewers comment rather than APPROVE — plus the bot-comment consolidation.
 
-**When the driver authored the PR, resolve that park with `gate judge -auto`, not `-decision pass`.** `-auto` has an independent frontier model (opus, high effort) rule from the recorded artifacts alone — a genuine second party — whereas the author asserting `-decision pass` is self-approval and defeats two-party review (the auto-mode classifier blocks it). Reserve `-decision pass` for a PR you did not author, or an explicit operator override.
+**When the driver authored the PR, resolve that park with `gate judge -auto`, not `-decision pass`.** `-auto` sends the decision to an independent frontier model (opus, high effort) that rules from the recorded artifacts alone — a genuine second party — whereas the author asserting `-decision pass` is self-approval and defeats two-party review (the auto-mode classifier blocks it). Reserve `-decision pass` for a PR you did not author, or an explicit operator override.
 
 ## Common gotchas
 
