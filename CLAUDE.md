@@ -181,6 +181,12 @@ Adapted from ship's workflow:
 5. CI green (`make check`).
 6. Address review comments; repeat ~3× before merge.
 
+## Merge authorization (gate)
+
+Rooms PRs merge through **gate** (the governed boundary — see the workbench map): `gate grant -repo itsHabib/rooms -action merge` → `gate gate -pr N -grant <id>` → judge → run the head-pinned `gh pr merge` gate prints. Gate parks the typical rooms PR at *"no review decision reported by GitHub"* — the AI reviewers comment rather than APPROVE — plus the bot-comment consolidation.
+
+**When the driver authored the PR, resolve that park with `gate judge -auto`, not `-decision pass`.** `-auto` has an independent frontier model (opus, high effort) rule from the recorded artifacts alone — a genuine second party — whereas the author asserting `-decision pass` is self-approval and defeats two-party review (the auto-mode classifier blocks it). Reserve `-decision pass` for a PR you did not author, or an explicit operator override.
+
 ## Common gotchas
 
 - **`/dev/kvm` missing** — nested virtualization off on the Hyper-V VM. Fix: `Set-VMProcessor -ExposeVirtualizationExtensions $true`, reboot guest, verify `ls /dev/kvm`.
