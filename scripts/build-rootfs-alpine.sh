@@ -30,7 +30,7 @@ source "${SCRIPT_DIR}/lib/rootfs-helpers.sh"
 # together and update scripts/checksums.txt.
 ALPINE_PINNED_VERSION="3.21.7"
 ALPINE_VERSION="$ALPINE_PINNED_VERSION"
-CLAUDE_VERSION="2.1.148-r1"
+CLAUDE_VERSION="2.1.204-r1"
 GUEST_USER="rooms"
 GUEST_UID="1000"
 OUT="images/agent-alpine.ext4"
