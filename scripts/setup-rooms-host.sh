@@ -211,9 +211,9 @@ log "per-room work dir root: $WORK_ROOT"
 # --- env hints ---
 
 log "checking required env vars"
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
-    warn "neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set — one is needed for 'claude -p' inside the room"
-    warn "  add to ~/.bashrc:   export ANTHROPIC_API_KEY=\"sk-ant-...\"   (or ANTHROPIC_AUTH_TOKEN for subscription OAuth)"
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    warn "no Anthropic credential set (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN) — one is needed for 'claude -p' inside the room"
+    warn "  add to ~/.bashrc:   export ANTHROPIC_API_KEY=\"sk-ant-...\"   (or CLAUDE_CODE_OAUTH_TOKEN from 'claude setup-token')"
 fi
 if [[ -z "${CURSOR_API_KEY:-}" ]]; then
     log "CURSOR_API_KEY is not set — required only for --runner cursor"

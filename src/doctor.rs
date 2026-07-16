@@ -581,45 +581,54 @@ fn check_rootfs(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
     }
 }
 
+/// Env vars that satisfy the Anthropic-credential check, in report order:
+/// the direct API key, the `claude setup-token` subscription credential, and
+/// the bearer-token override for custom gateways. All three are forwarded to
+/// the guest and honored by the guest CLI.
+const ANTHROPIC_CREDENTIAL_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+];
+
 fn check_anthropic_api_key() -> CheckResult {
-    anthropic_credential_result(
-        std::env::var("ANTHROPIC_API_KEY").ok().as_deref(),
-        std::env::var("ANTHROPIC_AUTH_TOKEN").ok().as_deref(),
-    )
+    let values: Vec<(&str, Option<String>)> = ANTHROPIC_CREDENTIAL_VARS
+        .iter()
+        .map(|var| (*var, std::env::var(var).ok()))
+        .collect();
+    anthropic_credential_result(&values)
 }
 
 /// Decide the Anthropic-credential check from the resolved env values — policy
 /// split from the env read so it's unit-testable without mutating process env.
 ///
-/// Either `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` (subscription OAuth)
-/// satisfies the agent runner — both are forwarded to the guest and the guest
-/// CLI honors both. The base substrate (boot / network / `--command` exec) runs
-/// without a credential; only the agent runner path needs one. So unset, empty,
-/// or whitespace-only values are a [`WARN_PREFIX`] warning, not a failure —
-/// else the preflight gate would abort substrate-only e2e on a host that merely
-/// lacks a credential.
-fn anthropic_credential_result(api_key: Option<&str>, auth_token: Option<&str>) -> CheckResult {
+/// Any one of [`ANTHROPIC_CREDENTIAL_VARS`] satisfies the agent runner; the
+/// first set (non-blank) var, in list order, is the one reported. The base
+/// substrate (boot / network / `--command` exec) runs without a credential;
+/// only the agent runner path needs one. So all-unset/blank is a
+/// [`WARN_PREFIX`] warning, not a failure — else the preflight gate would
+/// abort substrate-only e2e on a host that merely lacks a credential.
+///
+/// The check name stays `anthropic_api_key` for preflight consumers; the
+/// message names whichever var actually satisfied it.
+fn anthropic_credential_result(values: &[(&str, Option<String>)]) -> CheckResult {
     let name = "anthropic_api_key".to_owned();
-    let is_set = |v: Option<&str>| v.is_some_and(|v| !v.trim().is_empty());
-    if is_set(api_key) {
+    let set = values
+        .iter()
+        .find(|(_, v)| v.as_deref().is_some_and(|v| !v.trim().is_empty()));
+    if let Some((var, _)) = set {
         return CheckResult {
             name,
             ok: true,
-            message: "ANTHROPIC_API_KEY is set".to_owned(),
-        };
-    }
-    if is_set(auth_token) {
-        return CheckResult {
-            name,
-            ok: true,
-            message: "ANTHROPIC_AUTH_TOKEN is set".to_owned(),
+            message: format!("{var} is set"),
         };
     }
     CheckResult {
         name,
         ok: true,
         message: format!(
-            "{WARN_PREFIX} ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset — one is required for --runner cursor, neither for --command / e2e"
+            "{WARN_PREFIX} no Anthropic credential set ({}) — one is required for --runner cursor, none for --command / e2e",
+            ANTHROPIC_CREDENTIAL_VARS.join(" / ")
         ),
     }
 }
@@ -1175,11 +1184,16 @@ mod tests {
     #[test]
     fn anthropic_credentials_unset_empty_or_blank_warn_not_fail() {
         // The base substrate runs without a credential, so unset, empty, or
-        // whitespace-only values for BOTH vars are a WARN (ok=true + `warn:`
+        // whitespace-only values for ALL vars are a WARN (ok=true + `warn:`
         // prefix), never a hard FAIL that would abort the preflight gate on
         // substrate-only e2e.
-        for value in [None, Some(""), Some("   ")] {
-            let result = anthropic_credential_result(value, value);
+        for value in [None, Some(String::new()), Some("   ".to_owned())] {
+            let values = [
+                ("ANTHROPIC_API_KEY", value.clone()),
+                ("CLAUDE_CODE_OAUTH_TOKEN", value.clone()),
+                ("ANTHROPIC_AUTH_TOKEN", value.clone()),
+            ];
+            let result = anthropic_credential_result(&values);
             assert!(
                 result.ok,
                 "unset/blank credentials must not fail: {value:?}"
@@ -1193,18 +1207,36 @@ mod tests {
     }
 
     #[test]
-    fn either_anthropic_credential_set_is_a_plain_pass() {
-        for (api_key, auth_token) in [
-            (Some("sk-ant-example"), None),
-            (None, Some("sk-ant-oat-example")),
-            // A blank API key must not mask a real OAuth token.
-            (Some("   "), Some("sk-ant-oat-example")),
+    fn any_anthropic_credential_set_is_a_plain_pass() {
+        // One case per var, plus blank-values-don't-mask-a-later-real-one; the
+        // message must name the var that satisfied the check.
+        for satisfied in [
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_AUTH_TOKEN",
         ] {
-            let result = anthropic_credential_result(api_key, auth_token);
+            let values = [
+                ("ANTHROPIC_API_KEY", Some("   ".to_owned())),
+                ("CLAUDE_CODE_OAUTH_TOKEN", None),
+                ("ANTHROPIC_AUTH_TOKEN", None),
+            ]
+            .map(|(var, blank)| {
+                if var == satisfied {
+                    (var, Some("sk-ant-example".to_owned()))
+                } else {
+                    (var, blank)
+                }
+            });
+            let result = anthropic_credential_result(&values);
             assert!(result.ok);
             assert!(
                 !result.is_warning(),
                 "a set credential is a pass, not a warn: {}",
+                result.message
+            );
+            assert!(
+                result.message.contains(satisfied),
+                "message must name the satisfying var {satisfied}: {}",
                 result.message
             );
         }

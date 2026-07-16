@@ -249,7 +249,7 @@ set_directive PasswordAuthentication no
 # every SSH session. Instead, append a fresh `AcceptEnv <var>` line per
 # credential iff no existing AcceptEnv already grants that exact token. Cheap
 # idempotent grep avoids accumulating duplicate lines on re-runs.
-for env_var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; do
+for env_var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; do
     if sudo grep -qE "^AcceptEnv[[:space:]].*\b${env_var}\b" "$CONFIG"; then
         log "AcceptEnv already grants ${env_var}"
     else
@@ -304,4 +304,4 @@ log "done."
 log "    pubkey baked into:  $ROOTFS"
 log "    private key:        $KEY_PATH"
 log "    verify after boot:  ssh -i $KEY_PATH -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null ${GUEST_USER}@172.16.0.2 'uname -a'"
-log "    env passthrough:    set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN before invoking rooms (SendEnv plumbs it to the guest)"
+log "    env passthrough:    set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or ANTHROPIC_AUTH_TOKEN before invoking rooms (SendEnv plumbs it to the guest)"
