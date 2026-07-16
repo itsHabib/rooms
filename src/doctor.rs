@@ -581,32 +581,55 @@ fn check_rootfs(image: Option<&Path>, config: &RoomsConfig) -> CheckResult {
     }
 }
 
+/// Env vars that satisfy the Anthropic-credential check, in report order:
+/// the direct API key, the `claude setup-token` subscription credential, and
+/// the bearer-token override for custom gateways. All three are forwarded to
+/// the guest and honored by the guest CLI.
+const ANTHROPIC_CREDENTIAL_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKEN",
+];
+
 fn check_anthropic_api_key() -> CheckResult {
-    anthropic_api_key_result(std::env::var("ANTHROPIC_API_KEY").ok().as_deref())
+    let values: Vec<(&str, Option<String>)> = ANTHROPIC_CREDENTIAL_VARS
+        .iter()
+        .map(|var| (*var, std::env::var(var).ok()))
+        .collect();
+    anthropic_credential_result(&values)
 }
 
-/// Decide the Anthropic-key check from the resolved env value — policy split
-/// from the env read so it's unit-testable without mutating process env.
+/// Decide the Anthropic-credential check from the resolved env values — policy
+/// split from the env read so it's unit-testable without mutating process env.
 ///
-/// The base substrate (boot / network / `--command` exec) runs without a key;
-/// only the cursor runner path needs one. So an unset, empty, or whitespace-only
-/// key is a [`WARN_PREFIX`] warning, not a failure — else the preflight gate
-/// would abort substrate-only e2e on a host that merely lacks the key.
-fn anthropic_api_key_result(value: Option<&str>) -> CheckResult {
+/// Any one of [`ANTHROPIC_CREDENTIAL_VARS`] satisfies the agent runner; the
+/// first set (non-blank) var, in list order, is the one reported. The base
+/// substrate (boot / network / `--command` exec) runs without a credential;
+/// only the agent runner path needs one. So all-unset/blank is a
+/// [`WARN_PREFIX`] warning, not a failure — else the preflight gate would
+/// abort substrate-only e2e on a host that merely lacks a credential.
+///
+/// The check name stays `anthropic_api_key` for preflight consumers; the
+/// message names whichever var actually satisfied it.
+fn anthropic_credential_result(values: &[(&str, Option<String>)]) -> CheckResult {
     let name = "anthropic_api_key".to_owned();
-    match value {
-        Some(v) if !v.trim().is_empty() => CheckResult {
+    let set = values
+        .iter()
+        .find(|(_, v)| v.as_deref().is_some_and(|v| !v.trim().is_empty()));
+    if let Some((var, _)) = set {
+        return CheckResult {
             name,
             ok: true,
-            message: "ANTHROPIC_API_KEY is set".to_owned(),
-        },
-        _ => CheckResult {
-            name,
-            ok: true,
-            message: format!(
-                "{WARN_PREFIX} ANTHROPIC_API_KEY unset — required for --runner cursor, not for --command / e2e"
-            ),
-        },
+            message: format!("{var} is set"),
+        };
+    }
+    CheckResult {
+        name,
+        ok: true,
+        message: format!(
+            "{WARN_PREFIX} no Anthropic credential set ({}) — one is required for --runner cursor, none for --command / e2e",
+            ANTHROPIC_CREDENTIAL_VARS.join(" / ")
+        ),
     }
 }
 
@@ -1020,7 +1043,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test module")]
 
     use super::{
-        anthropic_api_key_result, check_sha_drift, check_sha_drift_with, drift_target_path,
+        anthropic_credential_result, check_sha_drift, check_sha_drift_with, drift_target_path,
         parse_checksums, parse_firecracker_version, version_meets_min, RoomsConfig,
     };
     use std::path::PathBuf;
@@ -1159,30 +1182,64 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_api_key_unset_empty_or_blank_warns_not_fails() {
-        // The base substrate runs without a key, so an unset, empty, or
-        // whitespace-only key is a WARN (ok=true + `warn:` prefix), never a hard
-        // FAIL that would abort the preflight gate on substrate-only e2e.
-        for value in [None, Some(""), Some("   ")] {
-            let result = anthropic_api_key_result(value);
-            assert!(result.ok, "unset/blank key must not fail: {value:?}");
+    fn anthropic_credentials_unset_empty_or_blank_warn_not_fail() {
+        // The base substrate runs without a credential, so unset, empty, or
+        // whitespace-only values for ALL vars are a WARN (ok=true + `warn:`
+        // prefix), never a hard FAIL that would abort the preflight gate on
+        // substrate-only e2e.
+        for value in [None, Some(String::new()), Some("   ".to_owned())] {
+            let values = [
+                ("ANTHROPIC_API_KEY", value.clone()),
+                ("CLAUDE_CODE_OAUTH_TOKEN", value.clone()),
+                ("ANTHROPIC_AUTH_TOKEN", value.clone()),
+            ];
+            let result = anthropic_credential_result(&values);
+            assert!(
+                result.ok,
+                "unset/blank credentials must not fail: {value:?}"
+            );
             assert!(
                 result.is_warning(),
-                "unset/blank key must be a WARN, got: {}",
+                "unset/blank credentials must be a WARN, got: {}",
                 result.message
             );
         }
     }
 
     #[test]
-    fn anthropic_api_key_set_is_a_plain_pass() {
-        let result = anthropic_api_key_result(Some("sk-ant-example"));
-        assert!(result.ok);
-        assert!(
-            !result.is_warning(),
-            "a set key is a pass, not a warn: {}",
-            result.message
-        );
+    fn any_anthropic_credential_set_is_a_plain_pass() {
+        // One case per var, plus blank-values-don't-mask-a-later-real-one; the
+        // message must name the var that satisfied the check.
+        for satisfied in [
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_AUTH_TOKEN",
+        ] {
+            let values = [
+                ("ANTHROPIC_API_KEY", Some("   ".to_owned())),
+                ("CLAUDE_CODE_OAUTH_TOKEN", None),
+                ("ANTHROPIC_AUTH_TOKEN", None),
+            ]
+            .map(|(var, blank)| {
+                if var == satisfied {
+                    (var, Some("sk-ant-example".to_owned()))
+                } else {
+                    (var, blank)
+                }
+            });
+            let result = anthropic_credential_result(&values);
+            assert!(result.ok);
+            assert!(
+                !result.is_warning(),
+                "a set credential is a pass, not a warn: {}",
+                result.message
+            );
+            assert!(
+                result.message.contains(satisfied),
+                "message must name the satisfying var {satisfied}: {}",
+                result.message
+            );
+        }
     }
 
     mod version_parser_properties {

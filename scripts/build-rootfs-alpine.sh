@@ -218,9 +218,11 @@ set_sshd PermitRootLogin no
 set_sshd PubkeyAuthentication yes
 set_sshd PasswordAuthentication no
 set_sshd UseDNS no
-if ! grep -qE '^AcceptEnv[[:space:]].*\bANTHROPIC_API_KEY\b' "$SSHD"; then
-    printf 'AcceptEnv ANTHROPIC_API_KEY\n' >>"$SSHD"
-fi
+for env_var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; do
+    if ! grep -qE "^AcceptEnv[[:space:]].*\b${env_var}\b" "$SSHD"; then
+        printf 'AcceptEnv %s\n' "$env_var" >>"$SSHD"
+    fi
+done
 
 log "creating ${GUEST_USER} user + enabling services + baking host keys inside chroot"
 chroot "$MNT" /bin/sh -s -- "$GUEST_USER" "$GUEST_UID" <<'CHROOT_CONFIG'

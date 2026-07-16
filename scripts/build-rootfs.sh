@@ -163,9 +163,11 @@ set_sshd() {
 set_sshd PermitRootLogin no
 set_sshd PubkeyAuthentication yes
 set_sshd PasswordAuthentication no
-if ! grep -qE '^AcceptEnv[[:space:]].*\\bANTHROPIC_API_KEY\\b' "\$SSHD"; then
-    echo 'AcceptEnv ANTHROPIC_API_KEY' >> "\$SSHD"
-fi
+for env_var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; do
+    if ! grep -qE "^AcceptEnv[[:space:]].*\\b\${env_var}\\b" "\$SSHD"; then
+        echo "AcceptEnv \${env_var}" >> "\$SSHD"
+    fi
+done
 
 mkdir -p /etc/systemd/system/multi-user.target.wants
 ln -sf /lib/systemd/system/ssh.service /etc/systemd/system/multi-user.target.wants/ssh.service

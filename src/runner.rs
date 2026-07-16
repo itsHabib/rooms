@@ -431,7 +431,9 @@ async fn run_host_tar(
 /// wrapper could emit its trailer — network, auth, sshd not listening — and
 /// the caller should treat it as a substrate-level transport failure.
 ///
-/// Forwards `ANTHROPIC_API_KEY` and `CURSOR_API_KEY` from the host process env
+/// Forwards `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` (the
+/// `claude setup-token` credential), `ANTHROPIC_AUTH_TOKEN`, and
+/// `CURSOR_API_KEY` from the host process env
 /// via SSH's `SendEnv` option; the matching `AcceptEnv` lines live in the guest's
 /// `/etc/ssh/sshd_config`. `GH_TOKEN` is not forwarded here — it is sent only on
 /// the cursor push step (see `push_branch_in_guest`), so a `--command` run and
@@ -918,6 +920,10 @@ fn ssh_command(
         "-o",
         "SendEnv=ANTHROPIC_API_KEY",
         "-o",
+        "SendEnv=CLAUDE_CODE_OAUTH_TOKEN",
+        "-o",
+        "SendEnv=ANTHROPIC_AUTH_TOKEN",
+        "-o",
         "SendEnv=CURSOR_API_KEY",
     ]);
     // GH_TOKEN is forwarded ONLY for the push step — never to the agent run or
@@ -980,6 +986,15 @@ mod tests {
             without.iter().any(|a| a == "SendEnv=CURSOR_API_KEY"),
             "agent keys should still be forwarded; got: {without:?}"
         );
+        for var in [
+            "SendEnv=CLAUDE_CODE_OAUTH_TOKEN",
+            "SendEnv=ANTHROPIC_AUTH_TOKEN",
+        ] {
+            assert!(
+                without.iter().any(|a| a == var),
+                "OAuth credentials should be forwarded like the API key; missing {var} in: {without:?}"
+            );
+        }
         let tok = with
             .iter()
             .position(|a| a == "SendEnv=GH_TOKEN")
