@@ -44,3 +44,27 @@ fn run_without_image_fails_fast() {
         .failure()
         .stderr(predicate::str::contains("--image"));
 }
+
+#[test]
+fn witness_without_tcpdump_fails_closed_before_boot() {
+    // The witness tcpdump check is the earliest guard in `run`, before kernel
+    // validation or any slot claim — so with PATH pointing at an empty dir (no
+    // tcpdump) the run must fail with a clear message and never reach boot. This
+    // is the acceptance criterion "`--witness` on a host without tcpdump fails
+    // before VMM start"; it needs no KVM, so it runs in `make check`.
+    let empty = tempfile::tempdir().unwrap();
+    Command::cargo_bin("rooms")
+        .unwrap()
+        .env("PATH", empty.path())
+        .args([
+            "run",
+            "--witness",
+            "--image",
+            "/tmp/nonexistent-rooms-image",
+            "--command",
+            "true",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--witness").and(predicate::str::contains("tcpdump")));
+}

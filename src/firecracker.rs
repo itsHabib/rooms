@@ -17,6 +17,7 @@ use ulid::Ulid;
 
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
+use crate::witness::Capture;
 use crate::{room, transport};
 
 /// Dedicated unprivileged user Firecracker runs as inside the jailer.
@@ -316,9 +317,20 @@ impl Drop for RoomGuard {
 pub struct BootedVm {
     guard: RoomGuard,
     child: Child,
+    /// The host-side egress capture, present only under `--witness`. Started
+    /// before the VMM so it captures the guest's whole lifetime; the caller
+    /// takes it before teardown to stop + summarize while the tap still exists.
+    witness: Option<Capture>,
 }
 
 impl BootedVm {
+    /// Take the running egress capture, if any, so the caller can stop and
+    /// summarize it before teardown deletes the tap. Leaves `None` behind, so a
+    /// later teardown never races a still-running capture against tap deletion.
+    pub fn take_witness(&mut self) -> Option<Capture> {
+        self.witness.take()
+    }
+
     /// Terminate the firecracker process and remove room state.
     pub async fn shutdown(mut self) -> Result<(), FirecrackerError> {
         if !self.guard.suppress_cleanup {
@@ -378,6 +390,10 @@ pub struct BootRequest<'a> {
     pub room_id: &'a str,
     pub readonly_rootfs: bool,
     pub descriptor: &'a room::RoomDescriptor,
+    /// Record host-side egress on the room's own tap (`rooms run --witness`).
+    /// Capture starts right after the tap is created and before the VMM starts,
+    /// so it sees the guest's whole lifetime. Off by default.
+    pub witness: bool,
 }
 
 /// Boot a Firecracker microVM with the given kernel + rootfs.
@@ -434,6 +450,15 @@ pub async fn boot(
         guard.set_tap(net.tap_name.clone());
     }
 
+    // Start the egress capture the moment the tap exists and before the VMM —
+    // so no guest packet predates it — but after the guard owns the tap, so an
+    // unwind still deletes the interface. A start failure here is fatal: the
+    // caller asked to be witnessed, and running unwitnessed would be worse.
+    let witness = match (req.witness, req.slot) {
+        (true, Some(slot)) => Some(start_witness(&slot.tap, &per_room_dir).await?),
+        _ => None,
+    };
+
     let launch = build_jailer_launch_plan(&JailerLaunchInput {
         jailer_binary: &jailer_binary,
         firecracker_binary: &firecracker_binary,
@@ -476,7 +501,21 @@ pub async fn boot(
     .await?;
 
     info!("microVM booted");
-    Ok(BootedVm { guard, child })
+    Ok(BootedVm {
+        guard,
+        child,
+        witness,
+    })
+}
+
+/// Start the host-side egress capture on `tap`, mapping a start failure into the
+/// substrate error type. The initial `--witness` start fails closed (a missing
+/// `tcpdump` or an unbindable tap is a hard error), unwinding the boot through
+/// the guard just like any other pre-VMM failure.
+async fn start_witness(tap: &str, room_dir: &Path) -> Result<Capture, FirecrackerError> {
+    Capture::start(tap, room_dir)
+        .await
+        .map_err(|e| FirecrackerError::Internal(format!("witness: {e}")))
 }
 
 /// Create a pool slot's tap: `ip tuntap add`, `ip addr add <gw>/<prefix>`, link
@@ -2032,6 +2071,7 @@ mod e2e_tests {
             room_id: &id,
             readonly_rootfs: false,
             descriptor: &descriptor,
+            witness: false,
         };
         let mut vm = boot(&req, &config).await.expect("boot should succeed");
 

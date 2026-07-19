@@ -258,6 +258,7 @@ async fn room_boots_on_slot_1_and_reaps_byte_identically() {
         room_id: &room_id,
         readonly_rootfs: false,
         descriptor: &descriptor,
+        witness: false,
     };
     let vm = match firecracker::boot(&req, &config).await {
         Ok(vm) => vm,
@@ -373,6 +374,7 @@ async fn claim_and_boot(
             room_id: &room_id,
             readonly_rootfs: false,
             descriptor: &descriptor,
+            witness: false,
         };
         firecracker::boot(&req, config).await
     };

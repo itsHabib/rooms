@@ -13,7 +13,7 @@ use rooms::{
     config::RoomsConfig,
     doctor,
     error::{RoomsError, SlotError},
-    firecracker, registry, room, rootfs, runner, slot,
+    firecracker, registry, room, rootfs, runner, slot, witness,
 };
 use tracing::{info, warn};
 
@@ -104,6 +104,13 @@ enum Command {
         /// without parsing logs.
         #[arg(long)]
         lifecycle: Option<PathBuf>,
+        /// Record the room's egress on the host side: capture packets on its own
+        /// tap with `tcpdump`, then emit `witness.json` + `witness.pcap` into
+        /// `--out`. The witness is observed outside the guest's trust boundary,
+        /// so a compromised guest can neither forge nor hide it. Requires
+        /// `tcpdump` on the host (a missing one is a hard error). Off by default.
+        #[arg(long)]
+        witness: bool,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -171,6 +178,10 @@ enum RunnerKind {
 
 /// Parsed `rooms run` inputs, bundled so the orchestration functions stay under
 /// the argument-count cap.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat DTO mirroring independent, orthogonal CLI flags 1:1 — not a state machine to fold into enums"
+)]
 struct RunArgs {
     image: PathBuf,
     keep: bool,
@@ -187,6 +198,7 @@ struct RunArgs {
     max_pool: Option<u8>,
     json: bool,
     lifecycle: Option<PathBuf>,
+    witness: bool,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -371,6 +383,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             max_pool,
             json,
             lifecycle,
+            witness,
         } => {
             run_room(
                 RunArgs {
@@ -389,6 +402,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     max_pool,
                     json,
                     lifecycle,
+                    witness,
                 },
                 &config,
             )
@@ -457,6 +471,13 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
 
 async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
+
+    // Fail closed on --witness without tcpdump, before anything else: a host that
+    // can't witness must never boot a room that would run unwitnessed (only the
+    // initial start fails closed; a mid-run capture death is tolerated).
+    if args.witness {
+        witness::ensure_tcpdump_available().map_err(RoomsError::Internal)?;
+    }
 
     let kernel = args
         .image
@@ -539,6 +560,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         room_id: &room_id,
         readonly_rootfs,
         descriptor: &descriptor,
+        witness: args.witness,
     };
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,
@@ -553,8 +575,11 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             return Err(e.into());
         }
     };
-    lifecycle.emit(&Event::VmmStarted { pid: vm.pid() });
-
+    emit_started(
+        &lifecycle,
+        vm.pid(),
+        args.witness.then(|| claimed.tap.clone()),
+    );
     if args.keep {
         vm.guard_mut().set_suppress_cleanup(true);
     }
@@ -567,17 +592,8 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         lifecycle: &lifecycle,
     };
     let outcome = post_boot(&env, &action, &mut vm).await;
-    if let Some(out_dir) = args.out_dir.as_deref() {
-        collect_and_record(&network.guest_ip, &key, &action, out_dir, &lifecycle).await;
-    }
-    let residue = CleanupResidue {
-        room_dir: config.room_dir(&room_id),
-        jail_dir: config.jail_instance_dir(&room_id),
-        slot_file: state_base
-            .join(slot::SLOTS_DIR)
-            .join(claimed.index.to_string()),
-        room_id: room_id.clone(),
-    };
+    collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
+    let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
     outcome
 }
@@ -594,6 +610,23 @@ struct CleanupResidue {
 }
 
 impl CleanupResidue {
+    /// The residue a run's teardown must erase, derived from its resolved paths.
+    fn for_room(
+        config: &RoomsConfig,
+        state_base: &Path,
+        claimed: &room::Slot,
+        room_id: &str,
+    ) -> Self {
+        Self {
+            room_dir: config.room_dir(room_id),
+            jail_dir: config.jail_instance_dir(room_id),
+            slot_file: state_base
+                .join(slot::SLOTS_DIR)
+                .join(claimed.index.to_string()),
+            room_id: room_id.to_owned(),
+        }
+    }
+
     /// What teardown left behind, or `None` when the room is fully reaped.
     fn remaining(&self) -> Option<String> {
         let mut left = Vec::new();
@@ -667,6 +700,115 @@ fn resolve_lifecycle(path: Option<&Path>, room_id: &str) -> Result<Lifecycle, Ro
     Lifecycle::create(path, room_id).map_err(|e| {
         RoomsError::Internal(format!("create --lifecycle stream {}: {e}", path.display()))
     })
+}
+
+/// Emit the "started" transitions once the VMM is up: `vmm_started`, plus
+/// `witness_started` when `witness_tap` is `Some` (i.e. `--witness`). Capture
+/// actually began inside `boot`, before the VMM, so the event only announces it.
+fn emit_started(lifecycle: &Lifecycle, pid: Option<u32>, witness_tap: Option<String>) {
+    lifecycle.emit(&Event::VmmStarted { pid });
+    if let Some(tap) = witness_tap {
+        lifecycle.emit(&Event::WitnessStarted { tap });
+    }
+}
+
+/// Finalize a run's artifacts before teardown: stop + summarize the egress
+/// witness (if any), collect `/workspace/out` into `--out`, then drop the
+/// witness artifacts beside it. Reuses the [`PostBootEnv`] the run already
+/// threaded (network + key + lifecycle) plus the slot + `--out` dir.
+///
+/// Ordering is load-bearing. The witness is summarized *before* collection so
+/// the `witness_done` event fires even without `--out`; the artifacts are
+/// persisted *after* collection because collection clears the `--out` dir first.
+/// All of this must precede teardown, which deletes the tap and the room dir
+/// where `witness.pcap` is staged.
+async fn collect_run_artifacts(
+    env: &PostBootEnv<'_>,
+    action: &Action,
+    slot: &room::Slot,
+    out_dir: Option<&Path>,
+    vm: &mut firecracker::BootedVm,
+) {
+    let witnessed = match vm.take_witness() {
+        Some(capture) => Some(summarize_witness(capture, slot, env.lifecycle).await),
+        None => None,
+    };
+    let Some(out_dir) = out_dir else {
+        return;
+    };
+    collect_and_record(
+        &env.network.guest_ip,
+        env.key,
+        action,
+        out_dir,
+        env.lifecycle,
+    )
+    .await;
+    if let Some(w) = &witnessed {
+        persist_witness(w, out_dir).await;
+    }
+}
+
+/// A finalized egress witness: the summary plus the raw pcap staged in the room
+/// work dir, held between summarizing (pre-collection) and persisting into
+/// `--out` (post-collection, since collection clears the dir).
+struct Witnessed {
+    summary: artifacts::Witness,
+    pcap_path: PathBuf,
+}
+
+/// Stop the capture, summarize the staged pcap, and record the outcome on the
+/// lifecycle stream. Never fatal: a mid-run capture death or an unreadable pcap
+/// yields an empty, `capture_complete: false` witness rather than failing the
+/// run (only the initial `--witness` start fails closed, back in `boot`).
+async fn summarize_witness(
+    capture: witness::Capture,
+    slot: &room::Slot,
+    lifecycle: &Lifecycle,
+) -> Witnessed {
+    let tap = capture.tap().to_owned();
+    let pcap_path = capture.pcap_path().to_owned();
+    let outcome = capture.stop().await;
+    let raw = tokio::fs::read(&pcap_path).await.unwrap_or_default();
+    let local = artifacts::GatewayLocal {
+        gateway: slot.gateway,
+        guest: slot.guest,
+    };
+    let summary = artifacts::summarize_pcap(&raw, &tap, local, outcome.complete);
+    lifecycle.emit(&Event::WitnessDone {
+        destinations: summary.destinations.len(),
+        complete: summary.capture_complete,
+    });
+    Witnessed { summary, pcap_path }
+}
+
+/// Persist the witness artifacts into `--out`: `witness.json` (atomic) plus a
+/// copy of the raw `witness.pcap`, so the evidence survives the room. Runs after
+/// collection, which clears the dir. Best-effort — a write failure is logged,
+/// never fatal (the run's own outcome and the lifecycle summary already stand).
+async fn persist_witness(w: &Witnessed, out_dir: &Path) {
+    match serde_json::to_vec_pretty(&w.summary) {
+        Ok(bytes) => {
+            if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes).await {
+                warn!(error = %e, "failed to write witness.json");
+            }
+        }
+        Err(e) => warn!(error = %e, "failed to serialize witness.json"),
+    }
+    let dst = out_dir.join(artifacts::WITNESS_PCAP);
+    if let Err(e) = tokio::fs::copy(&w.pcap_path, &dst).await {
+        warn!(error = %e, src = %w.pcap_path.display(), "failed to copy witness.pcap into --out");
+    }
+}
+
+/// Atomic artifact write into `--out`: temp file in the same dir, then rename,
+/// so a crash mid-write never leaves a half-written file for a reader to choke
+/// on. Mirrors the runner's host-artifact discipline for `changeset.json`.
+async fn write_out_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let final_path = dir.join(name);
+    let tmp_path = dir.join(format!("{name}.tmp"));
+    tokio::fs::write(&tmp_path, bytes).await?;
+    tokio::fs::rename(&tmp_path, &final_path).await
 }
 
 /// Best-effort collect `/workspace/out` to the host after an exec (no-op for
@@ -1945,6 +2087,7 @@ mod tests {
             max_pool: None,
             json: false,
             lifecycle: None,
+            witness: false,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
