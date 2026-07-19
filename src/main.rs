@@ -109,7 +109,9 @@ enum Command {
         /// `--out`. The witness is observed outside the guest's trust boundary,
         /// so a compromised guest can neither forge nor hide it. Requires
         /// `tcpdump` on the host (a missing one is a hard error). Off by default.
-        #[arg(long)]
+        /// Excludes `--keep`: the witness persists into `--out` (which `--keep`
+        /// forbids), and a kept room outlives the capture.
+        #[arg(long, conflicts_with = "keep")]
         witness: bool,
     },
     /// Validate runner artifacts in a local `out/` directory.
@@ -702,14 +704,14 @@ fn resolve_lifecycle(path: Option<&Path>, room_id: &str) -> Result<Lifecycle, Ro
     })
 }
 
-/// Emit the "started" transitions once the VMM is up: `vmm_started`, plus
-/// `witness_started` when `witness_tap` is `Some` (i.e. `--witness`). Capture
-/// actually began inside `boot`, before the VMM, so the event only announces it.
+/// Emit the "started" transitions once the VMM is up. `witness_started` (when
+/// `--witness`) precedes `vmm_started` to match causal order: capture began
+/// inside `boot`, before the VMM, so no guest packet predates it.
 fn emit_started(lifecycle: &Lifecycle, pid: Option<u32>, witness_tap: Option<String>) {
-    lifecycle.emit(&Event::VmmStarted { pid });
     if let Some(tap) = witness_tap {
         lifecycle.emit(&Event::WitnessStarted { tap });
     }
+    lifecycle.emit(&Event::VmmStarted { pid });
 }
 
 /// Finalize a run's artifacts before teardown: stop + summarize the egress
@@ -749,27 +751,35 @@ async fn collect_run_artifacts(
     }
 }
 
-/// A finalized egress witness: the summary plus the raw pcap staged in the room
-/// work dir, held between summarizing (pre-collection) and persisting into
-/// `--out` (post-collection, since collection clears the dir).
+/// A finalized egress witness: the summary plus the concatenated raw pcap bytes,
+/// held between summarizing (pre-collection, while the staged files still exist)
+/// and persisting into `--out` (post-collection, since collection clears the dir
+/// and teardown removes the room dir where the files were staged).
 struct Witnessed {
     summary: artifacts::Witness,
-    pcap_path: PathBuf,
+    raw: Vec<u8>,
 }
 
-/// Stop the capture, summarize the staged pcap, and record the outcome on the
+/// Stop the capture, summarize every pcap part, and record the outcome on the
 /// lifecycle stream. Never fatal: a mid-run capture death or an unreadable pcap
 /// yields an empty, `capture_complete: false` witness rather than failing the
 /// run (only the initial `--witness` start fails closed, back in `boot`).
+///
+/// Reads all rotation parts, not just the base file, so a guest can't hide
+/// egress by flooding past the size cap; `stop` already flips completeness to
+/// false when a rotation happened, so the summary shows the truncation too.
 async fn summarize_witness(
     capture: witness::Capture,
     slot: &room::Slot,
     lifecycle: &Lifecycle,
 ) -> Witnessed {
     let tap = capture.tap().to_owned();
-    let pcap_path = capture.pcap_path().to_owned();
+    let files = capture.capture_files();
     let outcome = capture.stop().await;
-    let raw = tokio::fs::read(&pcap_path).await.unwrap_or_default();
+    let mut raw = Vec::new();
+    for file in &files {
+        raw.extend(tokio::fs::read(file).await.unwrap_or_default());
+    }
     let local = artifacts::GatewayLocal {
         gateway: slot.gateway,
         guest: slot.guest,
@@ -779,13 +789,13 @@ async fn summarize_witness(
         destinations: summary.destinations.len(),
         complete: summary.capture_complete,
     });
-    Witnessed { summary, pcap_path }
+    Witnessed { summary, raw }
 }
 
-/// Persist the witness artifacts into `--out`: `witness.json` (atomic) plus a
-/// copy of the raw `witness.pcap`, so the evidence survives the room. Runs after
-/// collection, which clears the dir. Best-effort — a write failure is logged,
-/// never fatal (the run's own outcome and the lifecycle summary already stand).
+/// Persist the witness artifacts into `--out`: `witness.json` and `witness.pcap`,
+/// both written atomically (temp + rename), so the evidence survives the room.
+/// Runs after collection, which clears the dir. Best-effort — a write failure is
+/// logged, never fatal (the run's own outcome and lifecycle summary stand).
 async fn persist_witness(w: &Witnessed, out_dir: &Path) {
     match serde_json::to_vec_pretty(&w.summary) {
         Ok(bytes) => {
@@ -795,9 +805,8 @@ async fn persist_witness(w: &Witnessed, out_dir: &Path) {
         }
         Err(e) => warn!(error = %e, "failed to serialize witness.json"),
     }
-    let dst = out_dir.join(artifacts::WITNESS_PCAP);
-    if let Err(e) = tokio::fs::copy(&w.pcap_path, &dst).await {
-        warn!(error = %e, src = %w.pcap_path.display(), "failed to copy witness.pcap into --out");
+    if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw).await {
+        warn!(error = %e, "failed to write witness.pcap into --out");
     }
 }
 

@@ -118,19 +118,35 @@ impl Capture {
         &self.tap
     }
 
-    /// The staged raw-capture path in the room work dir.
+    /// The staged raw-capture path (the first file) in the room work dir.
     #[must_use]
     pub fn pcap_path(&self) -> &Path {
         &self.pcap_path
+    }
+
+    /// Every capture file that exists, oldest first: the base `witness.pcap`
+    /// plus any rotation parts (`witness.pcap1`, `witness.pcap2`, …) tcpdump
+    /// wrote once the size cap was hit. The summary must read all of them so a
+    /// guest can't hide egress by flooding the base file past the cap.
+    #[must_use]
+    pub fn capture_files(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if self.pcap_path.is_file() {
+            files.push(self.pcap_path.clone());
+        }
+        for part in rotation_parts(&self.pcap_path) {
+            files.push(part);
+        }
+        files
     }
 
     /// Stop the capture, flushing buffered packets, and report completeness.
     ///
     /// Sends `SIGTERM` (which makes tcpdump flush and exit 0) and waits for the
     /// child. Completeness is false if the capture never started clean, if the
-    /// child already died on its own (a mid-run failure), or if it exited
-    /// non-zero. A best-effort `SIGKILL` fallback bounds a stuck child so
-    /// teardown never hangs; that path is reported incomplete.
+    /// child already died on its own (a mid-run failure), if it exited non-zero,
+    /// or if it rotated past the size cap (visible truncation). A best-effort
+    /// `SIGKILL` fallback bounds a stuck child so teardown never hangs.
     pub async fn stop(mut self) -> CaptureOutcome {
         // Already dead before we asked? A mid-run failure — the run went on, per
         // the failure posture, but the pcap is partial.
@@ -156,10 +172,30 @@ impl Capture {
                 false
             }
         };
-        let complete = self.started_clean && clean_exit;
-        debug!(tap = %self.tap, complete, "witness capture stopped");
+        // Rotation means the size cap was hit — truncation the summary must show.
+        let rotated = !rotation_parts(&self.pcap_path).is_empty();
+        let complete = self.started_clean && clean_exit && !rotated;
+        debug!(tap = %self.tap, complete, rotated, "witness capture stopped");
         CaptureOutcome { complete }
     }
+}
+
+/// The rotation files tcpdump wrote past the size cap, in order: `<pcap>1`,
+/// `<pcap>2`, … tcpdump appends the index directly to the `-w` name (no
+/// separator). Stops at the first gap, so the returned list is contiguous.
+fn rotation_parts(pcap_path: &Path) -> Vec<PathBuf> {
+    let base = pcap_path.as_os_str();
+    let mut parts = Vec::new();
+    for n in 1u32.. {
+        let mut name = base.to_owned();
+        name.push(n.to_string());
+        let part = PathBuf::from(name);
+        if !part.is_file() {
+            break;
+        }
+        parts.push(part);
+    }
+    parts
 }
 
 /// Spawn the `tcpdump` capture process on `tap`, writing to `pcap_path`.
@@ -168,8 +204,9 @@ impl Capture {
 /// packet-buffers so a SIGTERM flush loses nothing; `-s 0` captures full frames
 /// (DNS names live past the snaplen a default would impose); `-n` skips name
 /// resolution (no host DNS lookups from the capture itself); `-C <cap>` bounds
-/// the file. `tcpdump` rotates to `witness.pcap1` at the cap, so reaching it is
-/// itself the truncation signal.
+/// each file. At the cap tcpdump rotates to `witness.pcap1`, `witness.pcap2`, …;
+/// [`Capture::stop`] treats a rotation as visible truncation (`complete: false`)
+/// and [`Capture::capture_files`] enumerates every part so no egress is hidden.
 fn spawn_tcpdump(tap: &str, pcap_path: &Path) -> Result<Child, String> {
     Command::new(TCPDUMP)
         .arg("-i")
@@ -211,7 +248,40 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::{ensure_tcpdump_available, which_tcpdump};
+    use super::{ensure_tcpdump_available, rotation_parts, which_tcpdump, PCAP_FILE};
+
+    #[test]
+    fn rotation_parts_are_contiguous_and_ordered() {
+        // tcpdump appends the index directly to the -w name: witness.pcap1, …
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join(PCAP_FILE);
+        std::fs::write(&base, b"").expect("base");
+        std::fs::write(dir.path().join("witness.pcap1"), b"").expect("part 1");
+        std::fs::write(dir.path().join("witness.pcap2"), b"").expect("part 2");
+        // A gap at 3: part 4 exists but must not be picked up past the gap.
+        std::fs::write(dir.path().join("witness.pcap4"), b"").expect("part 4");
+
+        let parts = rotation_parts(&base);
+        assert_eq!(
+            parts,
+            vec![
+                dir.path().join("witness.pcap1"),
+                dir.path().join("witness.pcap2"),
+            ],
+            "contiguous from 1, stopping at the first gap"
+        );
+    }
+
+    #[test]
+    fn no_rotation_yields_no_parts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join(PCAP_FILE);
+        std::fs::write(&base, b"").expect("base");
+        assert!(
+            rotation_parts(&base).is_empty(),
+            "a capture that never hit the cap has no rotation parts"
+        );
+    }
 
     #[test]
     fn missing_tcpdump_is_a_clear_error() {

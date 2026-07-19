@@ -313,14 +313,19 @@ impl Drop for RoomGuard {
 }
 
 /// A booted Firecracker microVM.
+///
+/// Field order is drop order: `witness` is declared first so that on an
+/// unexpected drop (a panic between boot and the normal stop) tcpdump's
+/// kill-on-drop reaps the capture *before* the `guard` deletes the tap — the
+/// same stop-then-delete order the normal teardown path takes explicitly.
 #[derive(Debug)]
 pub struct BootedVm {
-    guard: RoomGuard,
-    child: Child,
     /// The host-side egress capture, present only under `--witness`. Started
     /// before the VMM so it captures the guest's whole lifetime; the caller
     /// takes it before teardown to stop + summarize while the tap still exists.
     witness: Option<Capture>,
+    guard: RoomGuard,
+    child: Child,
 }
 
 impl BootedVm {
@@ -453,10 +458,17 @@ pub async fn boot(
     // Start the egress capture the moment the tap exists and before the VMM —
     // so no guest packet predates it — but after the guard owns the tap, so an
     // unwind still deletes the interface. A start failure here is fatal: the
-    // caller asked to be witnessed, and running unwitnessed would be worse.
+    // caller asked to be witnessed, and running unwitnessed would be worse. A
+    // witness on a slotless (legacy shared-tap) boot fails closed for the same
+    // reason — the shared tap carries other rooms' traffic, so it isn't a valid
+    // per-room witness surface.
     let witness = match (req.witness, req.slot) {
+        (false, _) => None,
         (true, Some(slot)) => Some(start_witness(&slot.tap, &per_room_dir).await?),
-        _ => None,
+        (true, None) => return Err(FirecrackerError::Internal(
+            "witness: requires a pool slot (the per-room tap); refusing to witness the shared tap"
+                .to_owned(),
+        )),
     };
 
     let launch = build_jailer_launch_plan(&JailerLaunchInput {
@@ -502,9 +514,9 @@ pub async fn boot(
 
     info!("microVM booted");
     Ok(BootedVm {
+        witness,
         guard,
         child,
-        witness,
     })
 }
 
