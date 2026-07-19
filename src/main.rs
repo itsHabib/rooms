@@ -714,14 +714,16 @@ fn emit_started(lifecycle: &Lifecycle, pid: Option<u32>, witness_tap: Option<Str
     lifecycle.emit(&Event::VmmStarted { pid });
 }
 
-/// Finalize a run's artifacts before teardown: stop + summarize the egress
-/// witness (if any), collect `/workspace/out` into `--out`, then drop the
-/// witness artifacts beside it. Reuses the [`PostBootEnv`] the run already
-/// threaded (network + key + lifecycle) plus the slot + `--out` dir.
+/// Finalize a run's artifacts before teardown: collect `/workspace/out` into
+/// `--out`, then stop + summarize the egress witness (if any) and drop its
+/// artifacts beside it. Reuses the [`PostBootEnv`] the run already threaded
+/// (network + key + lifecycle) plus the slot + `--out` dir.
 ///
-/// Ordering is load-bearing. The witness is summarized *before* collection so
-/// the `witness_done` event fires even without `--out`; the artifacts are
-/// persisted *after* collection because collection clears the `--out` dir first.
+/// Ordering is load-bearing. The witness is stopped *after* collection so the
+/// capture covers the whole live room — a guest that egresses during the
+/// collection window (the VM is still up) is still witnessed. The witness is
+/// summarized regardless of `--out` (so `witness_done` always fires) and
+/// persisted after collection because collection clears the `--out` dir first.
 /// All of this must precede teardown, which deletes the tap and the room dir
 /// where `witness.pcap` is staged.
 async fn collect_run_artifacts(
@@ -731,60 +733,63 @@ async fn collect_run_artifacts(
     out_dir: Option<&Path>,
     vm: &mut firecracker::BootedVm,
 ) {
+    if let Some(out_dir) = out_dir {
+        collect_and_record(
+            &env.network.guest_ip,
+            env.key,
+            action,
+            out_dir,
+            env.lifecycle,
+        )
+        .await;
+    }
     let witnessed = match vm.take_witness() {
         Some(capture) => Some(summarize_witness(capture, slot, env.lifecycle).await),
         None => None,
     };
-    let Some(out_dir) = out_dir else {
+    let (Some(w), Some(out_dir)) = (&witnessed, out_dir) else {
         return;
     };
-    collect_and_record(
-        &env.network.guest_ip,
-        env.key,
-        action,
-        out_dir,
-        env.lifecycle,
-    )
-    .await;
-    if let Some(w) = &witnessed {
-        persist_witness(w, out_dir).await;
-    }
+    persist_witness(w, out_dir).await;
 }
 
-/// A finalized egress witness: the summary plus the concatenated raw pcap bytes,
-/// held between summarizing (pre-collection, while the staged files still exist)
-/// and persisting into `--out` (post-collection, since collection clears the dir
-/// and teardown removes the room dir where the files were staged).
+/// A finalized egress witness: the summary plus the raw pcap bytes, held
+/// between summarizing (while the staged file still exists) and persisting
+/// into `--out` (teardown removes the room dir where the file was staged).
 struct Witnessed {
     summary: artifacts::Witness,
     raw: Vec<u8>,
 }
 
-/// Stop the capture, summarize every pcap part, and record the outcome on the
+/// Stop the capture, summarize the pcap, and record the outcome on the
 /// lifecycle stream. Never fatal: a mid-run capture death or an unreadable pcap
 /// yields an empty, `capture_complete: false` witness rather than failing the
 /// run (only the initial `--witness` start fails closed, back in `boot`).
 ///
-/// Reads all rotation parts, not just the base file, so a guest can't hide
-/// egress by flooding past the size cap; `stop` already flips completeness to
-/// false when a rotation happened, so the summary shows the truncation too.
+/// The pcap is read *after* the capture stops — reading first would race the
+/// final flush — and a read failure forces `capture_complete: false`: evidence
+/// that can't be read must never present as an exhaustive record.
 async fn summarize_witness(
     capture: witness::Capture,
     slot: &room::Slot,
     lifecycle: &Lifecycle,
 ) -> Witnessed {
     let tap = capture.tap().to_owned();
-    let files = capture.capture_files();
+    let pcap_path = capture.pcap_path().to_owned();
     let outcome = capture.stop().await;
-    let mut raw = Vec::new();
-    for file in &files {
-        raw.extend(tokio::fs::read(file).await.unwrap_or_default());
-    }
+    let (raw, readable) = match tokio::fs::read(&pcap_path).await {
+        Ok(bytes) => (bytes, true),
+        Err(e) => {
+            warn!(pcap = %pcap_path.display(), error = %e, "failed to read witness.pcap; summary marked incomplete");
+            (Vec::new(), false)
+        }
+    };
     let local = artifacts::GatewayLocal {
         gateway: slot.gateway,
         guest: slot.guest,
     };
-    let summary = artifacts::summarize_pcap(&raw, &tap, local, outcome.complete);
+    let complete = outcome.complete && readable;
+    let summary = artifacts::summarize_pcap(&raw, &tap, local, complete);
     lifecycle.emit(&Event::WitnessDone {
         destinations: summary.destinations.len(),
         complete: summary.capture_complete,
@@ -794,9 +799,14 @@ async fn summarize_witness(
 
 /// Persist the witness artifacts into `--out`: `witness.json` and `witness.pcap`,
 /// both written atomically (temp + rename), so the evidence survives the room.
-/// Runs after collection, which clears the dir. Best-effort — a write failure is
-/// logged, never fatal (the run's own outcome and lifecycle summary stand).
+/// Creates the dir first — a run that collected nothing (an idle room) still
+/// gets its witness. Best-effort — a write failure is logged, never fatal (the
+/// run's own outcome and lifecycle summary stand).
 async fn persist_witness(w: &Witnessed, out_dir: &Path) {
+    if let Err(e) = tokio::fs::create_dir_all(out_dir).await {
+        warn!(out = %out_dir.display(), error = %e, "failed to create --out for the witness");
+        return;
+    }
     match serde_json::to_vec_pretty(&w.summary) {
         Ok(bytes) => {
             if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes).await {

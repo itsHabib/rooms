@@ -12,12 +12,22 @@
 //! unwitnessed), but once capture is running a mid-run death does not kill the
 //! workload: the run continues and the summary records `capture_complete:
 //! false`. Truncation is always visible, never silent.
+//!
+//! The capture is bounded by a hard total cap: a host-side watcher stops
+//! `tcpdump` once `witness.pcap` reaches [`CAPTURE_CAP_BYTES`], so a runaway or
+//! malicious guest cannot fill the host disk, and everything captured up to the
+//! cap (the earliest contacts — the highest-value evidence) is preserved. A
+//! capped capture is reported `capture_complete: false` like any other
+//! truncation.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 /// The `tcpdump` binary, resolved on `PATH`.
@@ -26,49 +36,75 @@ const TCPDUMP: &str = "tcpdump";
 /// Raw-capture file name inside the room work dir (staged, then copied to `out/`).
 pub const PCAP_FILE: &str = "witness.pcap";
 
-/// Size cap for the raw capture, in megabytes. A capture that reaches the cap is
-/// reported truncated (`capture_complete: false`) rather than growing without
-/// bound — a runaway egress can't fill the host disk, and the truncation is
-/// visible in the summary.
-const CAPTURE_CAP_MB: u64 = 64;
+/// Hard total cap for the raw capture, in bytes. The watcher stops the capture
+/// at the cap rather than letting it grow (or rotate) without bound — a runaway
+/// egress can't fill the host disk, and the truncation is visible in the
+/// summary (`capture_complete: false`).
+const CAPTURE_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How often the watcher checks the capture file against the cap. The cap can
+/// overshoot by at most one interval's worth of traffic.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long to watch a freshly-spawned `tcpdump` for an immediate death before
 /// trusting it came up. tcpdump exits fast on a bad interface or a permission
 /// error; a survivor past this window is treated as live.
 const START_SETTLE: Duration = Duration::from_millis(300);
 
-/// Fail-closed preflight for `--witness`: error unless `tcpdump` is on `PATH`.
+/// Fail-closed preflight for `--witness`: error unless an executable `tcpdump`
+/// is on `PATH`.
 ///
 /// Called before the VMM starts so a host without `tcpdump` never boots a room
 /// that would run unwitnessed — the whole point of an opt-in witness is that
 /// asking for it and silently not getting it is worse than not asking.
 pub fn ensure_tcpdump_available() -> Result<(), String> {
     which_tcpdump().map(|_| ()).ok_or_else(|| {
-        format!("--witness requested but `{TCPDUMP}` was not found on PATH; install it or drop --witness")
+        format!("--witness requested but no executable `{TCPDUMP}` was found on PATH; install it or drop --witness")
     })
 }
 
-/// Resolve `tcpdump` on `PATH`, returning its absolute path.
+/// Resolve `tcpdump` on `PATH`, returning its absolute path. Only an executable
+/// candidate counts — a stray non-executable file named `tcpdump` on `PATH`
+/// must not pass the fail-closed preflight and then die at spawn time.
 fn which_tcpdump() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     std::env::split_paths(&path_var)
         .map(|dir| dir.join(TCPDUMP))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// True when `path` is a regular file the current user can execute. On
+/// non-unix hosts (tests on Windows CI) existence is the best available check.
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    // Not const: `Path::is_file` does real I/O; the cfg twin can't be const
+    // either, so the signatures stay aligned.
+    path.is_file()
 }
 
 /// A running egress capture bound to one room's tap.
 ///
-/// Owns the `tcpdump` child and the tap/pcap it writes. Dropping it without
-/// [`Self::stop`] kills the child (kill-on-drop) so a panicking run never leaks
-/// a capture process; the normal path calls [`Self::stop`] to flush cleanly.
+/// Owns the `tcpdump` child, the tap/pcap it writes, and the cap watcher that
+/// stops it at [`CAPTURE_CAP_BYTES`]. Dropping it without [`Self::stop`] kills
+/// the child (kill-on-drop) so a panicking run never leaks a capture process;
+/// the normal path calls [`Self::stop`] to flush cleanly.
 #[derive(Debug)]
 pub struct Capture {
     tap: String,
     pcap_path: PathBuf,
     child: Child,
-    /// Set once a start-time failure is known, so the eventual summary can be
-    /// marked incomplete even if `stop` later sees a clean-looking exit.
-    started_clean: bool,
+    /// Set by the watcher when it stopped the capture at the size cap, so
+    /// [`Self::stop`] reports the truncation rather than a mystery death.
+    capped: Arc<AtomicBool>,
+    watcher: JoinHandle<()>,
 }
 
 /// The outcome of stopping a capture — the completeness bit the summary needs.
@@ -82,12 +118,12 @@ pub struct CaptureOutcome {
 impl Capture {
     /// Start capturing on `tap`, writing the raw pcap under `room_dir`.
     ///
-    /// Spawns `tcpdump -i <tap> -w <pcap>` with an unbuffered writer and the
-    /// size cap, then watches [`START_SETTLE`] for an immediate exit (bad
-    /// interface, missing privilege). A capture that dies in that window is a
-    /// start failure — the caller decides whether that is fatal (it is, on the
-    /// initial `--witness` start; see the module docs). A survivor is returned
-    /// live.
+    /// Spawns `tcpdump -i <tap> -w <pcap>` with an unbuffered writer, then
+    /// watches [`START_SETTLE`] for an immediate exit (bad interface, missing
+    /// privilege). A capture that dies in that window is a start failure — the
+    /// caller decides whether that is fatal (it is, on the initial `--witness`
+    /// start; see the module docs). A survivor is returned live, with the cap
+    /// watcher running beside it.
     pub async fn start(tap: &str, room_dir: &Path) -> Result<Self, String> {
         let pcap_path = room_dir.join(PCAP_FILE);
         let mut child = spawn_tcpdump(tap, &pcap_path)?;
@@ -103,12 +139,15 @@ impl Capture {
                 "tcpdump exited immediately ({status}) capturing {tap}; capture did not start"
             ));
         }
+        let capped = Arc::new(AtomicBool::new(false));
+        let watcher = spawn_cap_watcher(pcap_path.clone(), child.id(), Arc::clone(&capped));
         info!(tap, pcap = %pcap_path.display(), "witness capture started");
         Ok(Self {
             tap: tap.to_owned(),
             pcap_path,
             child,
-            started_clean: true,
+            capped,
+            watcher,
         })
     }
 
@@ -118,40 +157,31 @@ impl Capture {
         &self.tap
     }
 
-    /// The staged raw-capture path (the first file) in the room work dir.
+    /// The staged raw-capture path in the room work dir.
     #[must_use]
     pub fn pcap_path(&self) -> &Path {
         &self.pcap_path
     }
 
-    /// Every capture file that exists, oldest first: the base `witness.pcap`
-    /// plus any rotation parts (`witness.pcap1`, `witness.pcap2`, …) tcpdump
-    /// wrote once the size cap was hit. The summary must read all of them so a
-    /// guest can't hide egress by flooding the base file past the cap.
-    #[must_use]
-    pub fn capture_files(&self) -> Vec<PathBuf> {
-        let mut files = Vec::new();
-        if self.pcap_path.is_file() {
-            files.push(self.pcap_path.clone());
-        }
-        for part in rotation_parts(&self.pcap_path) {
-            files.push(part);
-        }
-        files
-    }
-
     /// Stop the capture, flushing buffered packets, and report completeness.
     ///
     /// Sends `SIGTERM` (which makes tcpdump flush and exit 0) and waits for the
-    /// child. Completeness is false if the capture never started clean, if the
-    /// child already died on its own (a mid-run failure), if it exited non-zero,
-    /// or if it rotated past the size cap (visible truncation). A best-effort
-    /// `SIGKILL` fallback bounds a stuck child so teardown never hangs.
+    /// child. Completeness is false if the watcher stopped the capture at the
+    /// size cap, if the child already died on its own (a mid-run failure), or
+    /// if it exited non-zero. A best-effort `SIGKILL` fallback bounds a stuck
+    /// child so teardown never hangs.
     pub async fn stop(mut self) -> CaptureOutcome {
-        // Already dead before we asked? A mid-run failure — the run went on, per
-        // the failure posture, but the pcap is partial.
+        self.watcher.abort();
+        let capped = self.capped.load(Ordering::Relaxed);
+        // Already dead before we asked? Either the watcher capped it (visible
+        // truncation) or it died mid-run — the run went on, per the failure
+        // posture, but the pcap is partial either way.
         if matches!(self.child.try_wait(), Ok(Some(_)) | Err(_)) {
-            warn!(tap = %self.tap, "witness capture died before teardown; summary will be incomplete");
+            if capped {
+                warn!(tap = %self.tap, "witness capture stopped at the size cap; summary will be incomplete");
+            } else {
+                warn!(tap = %self.tap, "witness capture died before teardown; summary will be incomplete");
+            }
             return CaptureOutcome { complete: false };
         }
         let Some(pid) = self.child.id() else {
@@ -172,30 +202,38 @@ impl Capture {
                 false
             }
         };
-        // Rotation means the size cap was hit — truncation the summary must show.
-        let rotated = !rotation_parts(&self.pcap_path).is_empty();
-        let complete = self.started_clean && clean_exit && !rotated;
-        debug!(tap = %self.tap, complete, rotated, "witness capture stopped");
+        let complete = clean_exit && !capped;
+        debug!(tap = %self.tap, complete, capped, "witness capture stopped");
         CaptureOutcome { complete }
     }
 }
 
-/// The rotation files tcpdump wrote past the size cap, in order: `<pcap>1`,
-/// `<pcap>2`, … tcpdump appends the index directly to the `-w` name (no
-/// separator). Stops at the first gap, so the returned list is contiguous.
-fn rotation_parts(pcap_path: &Path) -> Vec<PathBuf> {
-    let base = pcap_path.as_os_str();
-    let mut parts = Vec::new();
-    for n in 1u32.. {
-        let mut name = base.to_owned();
-        name.push(n.to_string());
-        let part = PathBuf::from(name);
-        if !part.is_file() {
-            break;
+/// Spawn the watcher that enforces the total capture cap: poll the pcap size
+/// every [`WATCH_INTERVAL`] and stop `tcpdump` once it reaches
+/// [`CAPTURE_CAP_BYTES`]. The flag records that the stop was a deliberate cap,
+/// not a mystery death, so [`Capture::stop`] reports it honestly. A missing
+/// file (capture not yet flushed) just means "keep waiting".
+fn spawn_cap_watcher(
+    pcap_path: PathBuf,
+    pid: Option<u32>,
+    capped: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(pid) = pid else {
+            return;
+        };
+        loop {
+            tokio::time::sleep(WATCH_INTERVAL).await;
+            let size = tokio::fs::metadata(&pcap_path).await.map_or(0, |m| m.len());
+            if size < CAPTURE_CAP_BYTES {
+                continue;
+            }
+            capped.store(true, Ordering::Relaxed);
+            warn!(pcap = %pcap_path.display(), size, cap = CAPTURE_CAP_BYTES, "witness capture hit the size cap; stopping tcpdump");
+            send_sigterm(pid);
+            return;
         }
-        parts.push(part);
-    }
-    parts
+    })
 }
 
 /// Spawn the `tcpdump` capture process on `tap`, writing to `pcap_path`.
@@ -203,10 +241,10 @@ fn rotation_parts(pcap_path: &Path) -> Vec<PathBuf> {
 /// `-i <tap>` binds to the room's own interface; `-w` writes raw pcap; `-U`
 /// packet-buffers so a SIGTERM flush loses nothing; `-s 0` captures full frames
 /// (DNS names live past the snaplen a default would impose); `-n` skips name
-/// resolution (no host DNS lookups from the capture itself); `-C <cap>` bounds
-/// each file. At the cap tcpdump rotates to `witness.pcap1`, `witness.pcap2`, …;
-/// [`Capture::stop`] treats a rotation as visible truncation (`complete: false`)
-/// and [`Capture::capture_files`] enumerates every part so no egress is hidden.
+/// resolution (no host DNS lookups from the capture itself). The total size
+/// bound lives in [`spawn_cap_watcher`], not in tcpdump flags: `-C` alone
+/// rotates without limit and `-C` + `-W` overwrites the earliest evidence, so
+/// the single-file capture with a host-side stop is both bounded and honest.
 fn spawn_tcpdump(tap: &str, pcap_path: &Path) -> Result<Child, String> {
     Command::new(TCPDUMP)
         .arg("-i")
@@ -217,8 +255,6 @@ fn spawn_tcpdump(tap: &str, pcap_path: &Path) -> Result<Child, String> {
         .arg("-s")
         .arg("0")
         .arg("-n")
-        .arg("-C")
-        .arg(CAPTURE_CAP_MB.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -237,6 +273,8 @@ fn send_sigterm(pid: u32) {
 }
 
 #[cfg(not(unix))]
+// clippy wants the no-op stub const; the unix twin can't be, keep them aligned.
+#[allow(clippy::missing_const_for_fn, reason = "cfg twin of a non-const fn")]
 fn send_sigterm(_pid: u32) {}
 
 #[cfg(test)]
@@ -248,40 +286,13 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::{ensure_tcpdump_available, rotation_parts, which_tcpdump, PCAP_FILE};
+    use std::sync::Mutex;
 
-    #[test]
-    fn rotation_parts_are_contiguous_and_ordered() {
-        // tcpdump appends the index directly to the -w name: witness.pcap1, …
-        let dir = tempfile::tempdir().expect("tempdir");
-        let base = dir.path().join(PCAP_FILE);
-        std::fs::write(&base, b"").expect("base");
-        std::fs::write(dir.path().join("witness.pcap1"), b"").expect("part 1");
-        std::fs::write(dir.path().join("witness.pcap2"), b"").expect("part 2");
-        // A gap at 3: part 4 exists but must not be picked up past the gap.
-        std::fs::write(dir.path().join("witness.pcap4"), b"").expect("part 4");
+    use super::{ensure_tcpdump_available, which_tcpdump};
 
-        let parts = rotation_parts(&base);
-        assert_eq!(
-            parts,
-            vec![
-                dir.path().join("witness.pcap1"),
-                dir.path().join("witness.pcap2"),
-            ],
-            "contiguous from 1, stopping at the first gap"
-        );
-    }
-
-    #[test]
-    fn no_rotation_yields_no_parts() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let base = dir.path().join(PCAP_FILE);
-        std::fs::write(&base, b"").expect("base");
-        assert!(
-            rotation_parts(&base).is_empty(),
-            "a capture that never hit the cap has no rotation parts"
-        );
-    }
+    /// Serializes the PATH-mutating tests: `set_var` is process-global and Rust
+    /// runs tests in parallel, so every test that touches PATH must hold this.
+    static PATH_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn missing_tcpdump_is_a_clear_error() {
@@ -296,11 +307,13 @@ mod tests {
     }
 
     #[test]
-    fn resolves_a_tcpdump_on_path() {
+    fn resolves_an_executable_tcpdump_on_path() {
         // A dir holding an executable-named file resolves as the binary; this
         // exercises the PATH walk without depending on a real tcpdump install.
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("tcpdump"), b"#!/bin/sh\n").expect("stub binary");
+        let stub = dir.path().join("tcpdump");
+        std::fs::write(&stub, b"#!/bin/sh\n").expect("stub binary");
+        make_executable(&stub);
         temp_env_path(dir.path(), || {
             let found = which_tcpdump().expect("stub tcpdump resolves");
             assert_eq!(found, dir.path().join("tcpdump"));
@@ -308,10 +321,44 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_tcpdump_fails_the_preflight() {
+        // A file named tcpdump without the executable bit must not pass the
+        // fail-closed check — it would only die later, at spawn time.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("tcpdump"), b"not a binary").expect("stub file");
+        temp_env_path(dir.path(), || {
+            assert!(
+                ensure_tcpdump_available().is_err(),
+                "a non-executable tcpdump must fail the preflight"
+            );
+        });
+    }
+
+    /// Mark `path` executable on unix; a no-op elsewhere (Windows executes by
+    /// extension, and the non-unix resolver only checks existence).
+    fn make_executable(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).expect("stat stub").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod stub");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+    }
+
     /// Run `f` with `PATH` set to `dir` alone, restoring the prior value after.
-    /// `set_var` is process-global, so these tests must not run concurrently
-    /// with other PATH-sensitive code; they're the only PATH mutators here.
+    /// Holds [`PATH_LOCK`] for the duration so parallel tests never observe the
+    /// mutated PATH.
     fn temp_env_path(dir: &std::path::Path, f: impl FnOnce()) {
+        let _guard = PATH_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var_os("PATH");
         std::env::set_var("PATH", dir);
         f();
