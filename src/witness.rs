@@ -165,13 +165,20 @@ impl Capture {
     /// Stop the capture, flushing buffered packets, and report completeness.
     ///
     /// Sends `SIGTERM` (which makes tcpdump flush and exit 0) and waits for the
-    /// child. Completeness is false if the watcher stopped the capture at the
-    /// size cap, if the child already died on its own (a mid-run failure), or
-    /// if it exited non-zero. A best-effort `SIGKILL` fallback bounds a stuck
-    /// child so teardown never hangs.
+    /// child. Completeness is false if the capture reached the size cap (by the
+    /// watcher or the synchronous final check), if the child already died on its
+    /// own (a mid-run failure), or if it exited non-zero. A best-effort `SIGKILL`
+    /// fallback bounds a stuck child so teardown never hangs.
     pub async fn stop(mut self) -> CaptureOutcome {
         self.watcher.abort();
-        let capped = self.capped.load(Ordering::Relaxed);
+        // The watcher ticks on an interval, so a burst that exceeds the cap and
+        // exits before the next tick would never trip the flag. Re-check the
+        // final size synchronously here so the cap is enforced at stop time too,
+        // not only on a watcher tick.
+        let over_cap = tokio::fs::metadata(&self.pcap_path)
+            .await
+            .is_ok_and(|m| m.len() >= CAPTURE_CAP_BYTES);
+        let capped = self.capped.load(Ordering::Relaxed) || over_cap;
         // Already dead before we asked? Either the watcher capped it (visible
         // truncation) or it died mid-run — the run went on, per the failure
         // posture, but the pcap is partial either way.
