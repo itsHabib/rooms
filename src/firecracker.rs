@@ -487,7 +487,7 @@ pub async fn boot(
     };
 
     let secrets_delivery =
-        bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid).await?;
+        bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
 
     let launch = build_jailer_launch_plan(&JailerLaunchInput {
         jailer_binary: &jailer_binary,
@@ -543,7 +543,7 @@ pub async fn boot(
 /// race a listener that outbinds it. The socket lives inside the jail, so the
 /// chrooted, de-privileged Firecracker can reach it and jail teardown reaps
 /// it with everything else. A bind failure fails the boot closed.
-async fn bind_secrets_listener(
+fn bind_secrets_listener(
     secrets: Option<&crate::vsock::SecretsPayload>,
     chroot_base: &Path,
     room_id: &str,
@@ -556,7 +556,6 @@ async fn bind_secrets_listener(
     let listen = crate::vsock::listener_path(&jail_root_dir(chroot_base, room_id));
     let delivery =
         crate::vsock::serve_one_shot(&listen, payload.clone_bytes(), Some((fc_uid, fc_gid)))
-            .await
             .map_err(|e| {
                 FirecrackerError::Internal(format!(
                     "secrets: bind vsock listener {}: {e}",

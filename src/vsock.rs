@@ -32,10 +32,11 @@ pub fn listener_path(jail_root: &Path) -> PathBuf {
 
 /// The encoded secrets blob: `NAME=value\n` per secret, nothing else.
 ///
-/// Opaque to this module's callers below the policy layer; the bytes are
-/// best-effort zeroized on drop (NFR2 — the overwrite is ordinary memory
-/// writes, not a hardening guarantee against swap or copies the allocator
-/// already made).
+/// Opaque to this module's callers below the policy layer. Drop attempts to
+/// overwrite the bytes (NFR2) — an ordinary write the compiler may elide,
+/// not a zeroization guarantee against swap, allocator copies, or
+/// optimization; a dedicated zeroize crate is the upgrade path if the
+/// threat model ever hardens.
 pub struct SecretsPayload(Vec<u8>);
 
 impl SecretsPayload {
@@ -54,7 +55,8 @@ impl SecretsPayload {
         Self(bytes)
     }
 
-    /// A copy of the blob for the serving task. Both copies zeroize on drop.
+    /// A copy of the blob for the serving task. Both copies attempt the
+    /// same overwrite-on-drop.
     #[must_use]
     pub fn clone_bytes(&self) -> Self {
         Self(self.0.clone())
@@ -105,15 +107,16 @@ impl Drop for Delivery {
     }
 }
 
-/// Bind `listen_path` and serve `payload` to the first connection, one
-/// connection ever: the listener is closed and unlinked the moment that
-/// connection is accepted, so a second connect finds nothing to talk to.
+/// Bind `listen_path` and serve `payload` to the first connection ever made.
 ///
-/// `owner` chowns the socket file so the (jailed, de-privileged) Firecracker
-/// process may connect to it. Must be called before `InstanceStart` — the
-/// guest can never race a listener that outbinds it.
+/// The listener is closed and unlinked the moment that connection is
+/// accepted, so a second connect finds nothing to talk to. `owner` chowns
+/// the socket file so the (jailed, de-privileged) Firecracker process may
+/// connect to it. Must be called before `InstanceStart` — the guest can
+/// never race a listener that outbinds it. Requires a running tokio runtime
+/// (the serving task is spawned onto it).
 #[cfg(unix)]
-pub async fn serve_one_shot(
+pub fn serve_one_shot(
     listen_path: &Path,
     payload: SecretsPayload,
     owner: Option<(u32, u32)>,
@@ -135,11 +138,7 @@ pub async fn serve_one_shot(
 }
 
 #[cfg(not(unix))]
-#[allow(
-    clippy::unused_async,
-    reason = "signature parity with the unix implementation; callers await either"
-)]
-pub async fn serve_one_shot(
+pub fn serve_one_shot(
     _listen_path: &Path,
     _payload: SecretsPayload,
     _owner: Option<(u32, u32)>,
@@ -203,7 +202,10 @@ async fn serve_stream(
         .read_to_end(&mut ack)
         .await
         .map_err(|e| format!("read ack: {e}"))?;
-    if ack.starts_with(b"OK") {
+    // Exactly `OK` (bare or newline-terminated) — the gate's invariant rides
+    // on this signal, so a prefix match that admits `OKxx` would mask
+    // protocol bugs and partial acks.
+    if ack == b"OK" || ack == b"OK\n" {
         return Ok(());
     }
     Err(format!(
@@ -253,7 +255,7 @@ mod tests {
     async fn delivers_to_first_connection_and_acks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.sock_5000");
-        let delivery = serve_one_shot(&path, payload(), None).await.unwrap();
+        let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
         let mut blob = String::new();
@@ -273,7 +275,7 @@ mod tests {
     async fn endpoint_is_gone_after_the_first_accept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.sock_5000");
-        let delivery = serve_one_shot(&path, payload(), None).await.unwrap();
+        let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut first = tokio::net::UnixStream::connect(&path).await.unwrap();
         let mut blob = String::new();
@@ -293,7 +295,7 @@ mod tests {
     async fn no_ack_times_out_as_a_delivery_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.sock_5000");
-        let delivery = serve_one_shot(&path, payload(), None).await.unwrap();
+        let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         // A guest that connects, reads, and vanishes without acking.
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
@@ -313,7 +315,7 @@ mod tests {
     async fn malformed_ack_is_a_delivery_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.sock_5000");
-        let delivery = serve_one_shot(&path, payload(), None).await.unwrap();
+        let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
         let mut blob = String::new();

@@ -1057,9 +1057,6 @@ async fn post_boot(
 ) -> Result<u8, RoomsError> {
     match action {
         Action::Keep => {
-            // `secrets` stays alive here on purpose: a kept room's guest may
-            // still be fetching while the operator inspects; the handle (and
-            // its listener) drops when post_boot returns.
             info!(
                 guest_ip = %env.network.guest_ip,
                 "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
@@ -1068,6 +1065,10 @@ async fn post_boot(
             tokio::signal::ctrl_c()
                 .await
                 .map_err(|e| RoomsError::Internal(e.to_string()))?;
+            // Explicitly after the await: a kept room's guest may still be
+            // fetching while the operator inspects, so the handle (and its
+            // listener) must survive the whole Ctrl-C wait.
+            drop(secrets);
             Ok(0)
         }
         Action::Exec(run) => exec_workload(env, run, secrets).await,
