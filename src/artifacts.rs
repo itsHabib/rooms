@@ -504,6 +504,16 @@ fn parse_ipv4(ip: &[u8]) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, u8, 
     if ihl < 20 {
         return None;
     }
+    // Non-initial fragments (fragment offset != 0, the low 13 bits of bytes
+    // 6-7) carry no L4 header — they are raw payload continuation. Parsing one
+    // as if it began with ports would let an adversarial guest invent bogus
+    // destinations by fragmenting egress, so skip it. The first fragment
+    // (offset 0) always holds the L4 ports, so the real destination is still
+    // recorded; full reassembly is out of scope (the raw pcap holds it all).
+    let frag_off = u16::from_be_bytes(ip.get(6..8)?.try_into().ok()?) & 0x1fff;
+    if frag_off != 0 {
+        return None;
+    }
     let proto = *ip.get(9)?;
     let src = octets(ip.get(12..16)?)?;
     let dst = octets(ip.get(16..20)?)?;
@@ -517,8 +527,14 @@ fn parse_l4(proto: u8, l4: &[u8]) -> Option<(u16, &[u8], &'static str)> {
     match proto {
         IP_PROTO_TCP => {
             let dst_port = u16::from_be_bytes(l4.get(2..4)?.try_into().ok()?);
-            let data_offset = usize::from(l4.get(12)? >> 4).checked_mul(4)?;
-            let payload = l4.get(data_offset..).unwrap_or(&[]);
+            // The payload is best-effort: a first fragment truncated before the
+            // data-offset byte still yields the port (bytes 2-4) — don't drop
+            // the destination just because there's no body to mine for DNS.
+            let payload = l4
+                .get(12)
+                .map(|b| usize::from(b >> 4).saturating_mul(4))
+                .and_then(|off| l4.get(off..))
+                .unwrap_or(&[]);
             Some((dst_port, payload, "tcp"))
         }
         IP_PROTO_UDP => {
@@ -1055,7 +1071,9 @@ mod tests {
 
         use std::net::Ipv4Addr;
 
-        use super::super::{summarize_pcap, GatewayLocal, Witness, WITNESS_SCHEMA_VERSION};
+        use super::super::{
+            summarize_pcap, GatewayLocal, Witness, ETHERNET_HEADER_LEN, WITNESS_SCHEMA_VERSION,
+        };
 
         /// The slot-1 /30: gateway `.5`, guest `.6` — the addresses a witness
         /// treats as gateway-local and excludes from the egress summary.
@@ -1277,6 +1295,31 @@ mod tests {
             assert!(!w.capture_complete, "truncation must be visible");
             assert_eq!(w.destinations.len(), 1);
             assert_eq!(w.destinations[0].port, 80);
+        }
+
+        #[test]
+        fn non_initial_fragments_do_not_invent_destinations() {
+            // A non-initial IPv4 fragment is raw payload continuation with no
+            // L4 header. An adversarial guest could fragment egress so a
+            // mid-payload byte pair reads as a bogus destination port; the
+            // summary must skip such fragments. The first fragment still
+            // carries the real port, and the raw pcap holds the full traffic.
+            let dst = Ipv4Addr::new(198, 51, 100, 7);
+            let mut f = frame(local().guest, dst, 6, 80, b"payloadbytes");
+            // Set a non-zero fragment offset in the IP header (bytes 6-7, and
+            // the IP header starts at the Ethernet header length).
+            let frag = 100u16.to_be_bytes();
+            f[ETHERNET_HEADER_LEN + 6] = frag[0];
+            f[ETHERNET_HEADER_LEN + 7] = frag[1];
+            let mut pcap = pcap_header();
+            pcap.extend(record(&f));
+
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert!(
+                w.destinations.is_empty(),
+                "a non-initial fragment must not be summarized as a destination: {:?}",
+                w.destinations
+            );
         }
 
         #[test]

@@ -18,6 +18,30 @@ One surface crosses the VM boundary through an object the guest cannot reach:
 `tap-fc<k>` on the host. Evidence recorded there cannot be forged or hidden
 from within the room.
 
+## Two artifacts, two guarantees
+
+The unforgeable guarantee lives in the **raw capture**, not the summary:
+
+- **`witness.pcap` — authoritative.** Every frame that crossed the tap, written
+  by `tcpdump` on the host. A root-compromised guest cannot forge or suppress
+  what it puts on the wire; the pcap is the ground-truth record and the object
+  a verifier should treat as evidence.
+- **`witness.json` — a defensively-parsed, best-effort summary** *derived from*
+  the pcap for convenience (the destination/DNS set at a glance). It is hardened
+  against the obvious adversarial-summary evasions — a forged source address
+  cannot suppress a destination (egress is keyed on the destination), and
+  non-initial IP fragments cannot invent one — and it is total (malformed bytes
+  are skipped, never panicked on, and truncation is always visible via
+  `capture_complete`). It does **not** claim to be a byte-perfect adversarial
+  reconstruction of the pcap: full IP/TCP reassembly and every exotic
+  encapsulation are out of scope for v0. When the summary and the raw capture
+  could disagree under a determined adversary, **the pcap wins** — and it is
+  always present alongside the JSON.
+
+This split is the honest boundary: the substrate guarantees an unforgeable raw
+record; the summary is a best-effort reader over it, not a second source of
+truth.
+
 ## Goal
 
 Each room optionally records its own egress on the host side and emits a
@@ -109,3 +133,9 @@ boundary.
   later optimization, not a requirement.
 - **In-guest syscall telemetry** — forgeable by design; permanently out of
   scope for the *witness* (that's what makes it a witness).
+- **Full IP/TCP reassembly in the summary.** `witness.json` parses first
+  fragments and skips continuations rather than reassembling fragmented flows;
+  exotic encapsulations (IP-in-IP, IPv6, VLAN tags) are not decoded. The raw
+  `witness.pcap` retains all of it, and it is the authoritative artifact (see
+  "Two artifacts, two guarantees"). A verifier needing byte-perfect adversarial
+  analysis reads the pcap, not the JSON.
