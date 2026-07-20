@@ -52,12 +52,37 @@ echo "[install-cursor] writing cursor-runner.js"
 # via exit code (0 succeeded, 1 agent-level failure, 2 runner/SDK error). The
 # substrate owns result.json. Error taxonomy mirrors ship's LocalCursorRunner.
 cat > "$DEST/cursor-runner.js" <<'CURSOR_RUNNER_JS'
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 const IN = "/workspace/in";
 const OUT = "/workspace/out";
 const EVENTS = `${OUT}/events.ndjson`;
 const SUMMARY = `${OUT}/summary.md`;
+const SECRETS_ENV = "/run/rooms/secrets.env";
+
+// First-read-then-delete: consume the vsock-staged secrets file into memory
+// and remove it before anything else runs, so no secret material exists on
+// the (tmpfs) filesystem while the agent executes. Values are never assigned
+// into process.env — children of the agent inherit nothing.
+function loadSecrets() {
+  let raw;
+  try {
+    raw = readFileSync(SECRETS_ENV, "utf8");
+  } catch {
+    return {}; // no vsock delivery for this run (SendEnv migration path)
+  }
+  try {
+    unlinkSync(SECRETS_ENV);
+  } catch {
+    /* deletion is best-effort; the room is disposable either way */
+  }
+  const map = {};
+  for (const line of raw.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) map[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return map;
+}
 
 // Append one JSON object per line. Never let event logging break the run — a
 // circular or otherwise unserializable payload degrades to a marker line.
@@ -114,9 +139,12 @@ async function main() {
   writeFileSync(EVENTS, "");
   writeFileSync(SUMMARY, "");
 
-  const apiKey = process.env.CURSOR_API_KEY;
+  // vsock-delivered key first; process.env is the SendEnv migration fallback
+  // (removed once vsock-only delivery has dogfood mileage — spec P4).
+  const secrets = loadSecrets();
+  const apiKey = secrets.CURSOR_API_KEY || process.env.CURSOR_API_KEY;
   if (!apiKey) {
-    return fail("api_key", "CURSOR_API_KEY environment variable is not set", undefined, 2);
+    return fail("api_key", "CURSOR_API_KEY not delivered via vsock secrets nor set in the environment", undefined, 2);
   }
 
   let meta;

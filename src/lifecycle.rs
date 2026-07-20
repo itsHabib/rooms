@@ -51,6 +51,13 @@ pub enum Event {
     SshReady,
     /// The guest never became usable within the reachability timeout.
     GuestUnreachable { error: String },
+    /// Every requested secret was staged in the guest and acked over vsock.
+    /// Emitted only when `--secret` was requested, after readiness and before
+    /// [`Event::WorkloadStarted`] — the workload gate this event records.
+    SecretsDelivered,
+    /// The vsock secrets hand-off failed or timed out. Terminal for the run:
+    /// no secret ⇒ the workload never starts (fail closed).
+    SecretsFailed { error: String },
     /// The workload command was handed to the guest.
     WorkloadStarted { command: Vec<String> },
     /// The workload finished — or was aborted — with this exit code. May
