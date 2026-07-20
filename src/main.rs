@@ -109,9 +109,11 @@ enum Command {
         /// `--out`. The witness is observed outside the guest's trust boundary,
         /// so a compromised guest can neither forge nor hide it. Requires
         /// `tcpdump` on the host (a missing one is a hard error). Off by default.
+        /// Requires `--out`: the witness has nowhere to persist without it, so
+        /// it's a parse error rather than a run that silently emits nothing.
         /// Excludes `--keep`: the witness persists into `--out` (which `--keep`
         /// forbids), and a kept room outlives the capture.
-        #[arg(long, conflicts_with = "keep")]
+        #[arg(long, conflicts_with = "keep", requires = "out_dir")]
         witness: bool,
     },
     /// Validate runner artifacts in a local `out/` directory.
