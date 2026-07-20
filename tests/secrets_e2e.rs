@@ -93,8 +93,13 @@ fn preflight() -> bool {
     true
 }
 
+/// Events on the stream, or empty when the file was never created — an
+/// admission failure precedes stream creation (both are pre-claim inputs),
+/// so "no file" is the strongest possible "no slot was claimed".
 fn lifecycle_events(path: &Path) -> Vec<String> {
-    let raw = std::fs::read_to_string(path).expect("lifecycle stream readable");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
     raw.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter_map(|v| v.get("event").and_then(|e| e.as_str()).map(str::to_owned))
