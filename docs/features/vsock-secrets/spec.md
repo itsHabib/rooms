@@ -152,10 +152,11 @@ stream to whatever is listening on the host at `<uds_path>_<P>`.
 ```
 guest                                   host (one-shot listener)
   │  connect AF_VSOCK cid=2 port=5000     │  accept (first connection only)
-  │ ◀──────────────────────────────────── │  write blob; shutdown(WR)
-  │  read to EOF                          │
+  │ ◀──────────────────────────────────── │  write "<len>\n" + blob
+  │  read len line, then exactly len      │  (connection stays fully open)
   │  write /run/rooms/secrets.env         │
-  │  (tmpfs, 0600, runner-owned)          │
+  │  (tmpfs, 0600, runner-owned,          │
+  │   temp + rename)                      │
   │ ────────────────────────────────────▶ │  read "OK\n"  → delivered
   │  close                                │  close; unlink socket; drop blob
 ```
@@ -165,9 +166,13 @@ guest                                   host (one-shot listener)
   the format stays trivially parseable by a shell-free reader. Readers split
   each line on the **first** `=` only (dotenv convention), so values may
   themselves contain `=`.
-- **The host half-close is a required protocol step**, not diagram decoration:
-  after writing the blob the host calls `shutdown(SHUT_WR)`, and the resulting
-  EOF is how the guest knows the blob is complete before it stages and acks.
+- **Length-prefixed framing, no half-close.** The host frames the blob as
+  `<decimal len>\n<blob>` and keeps the connection fully open until the ack.
+  EOF framing (host `shutdown(SHUT_WR)`) does not work here — Firecracker's
+  hybrid vsock does not deliver a host half-close as a guest-side EOF with a
+  live reverse path, so the ack never comes back (observed on a real boot:
+  the guest staged the file perfectly, the host read an empty ack). The
+  explicit length tells the guest where the blob ends instead.
 - **The ack is the delivery signal.** A successful socket write proves nothing
   (buffers); the guest acks only after `secrets.env` is durably staged with
   its final mode/owner. The host marks the run "delivered" only on reading the
