@@ -58,7 +58,7 @@ In scope — after this feature, for a run with vsock-delivered secrets:
 | # | Property | Enforced where |
 | --- | --- | --- |
 | T1 | The secret never appears on the kernel cmdline or in host `ps` argv | already true today; preserved (vsock adds no argv) |
-| T2 | The secret never persists in the guest: no disk write (rootfs is a RO overlay), the tmpfs staging file is deleted before the workload's agent starts | guest fetch hook + runner |
+| T2 | The secret never persists in the guest: no disk write (rootfs is a RO overlay), and the tmpfs staging file is deleted before the workload's agent starts on the cursor path (FR6). A non-cursor `--command` that never reads the file leaves it on tmpfs until VM teardown — still memory-only in a disposable VM | guest fetch hook + runner |
 | T3 | The secret is absent from the workload's environment (`/proc/<pid>/environ` of the agent process tree) | runner reads the staging file into process memory, never exports |
 | T4 | The secret cannot land in collected artifacts or `result.patch` by default flow | staging file lives under `/run` (tmpfs, outside `/workspace`), deleted pre-agent; patch is `git diff` of `/workspace/repo` |
 | T5 | Delivery is per-room and one-shot: the channel is torn down after the first successful read; a later guest process cannot re-fetch | host listener unbinds after first delivery |
@@ -136,12 +136,14 @@ stream to whatever is listening on the host at `<uds_path>_<P>`.
 
 - `PUT /vsock` is called during boot config (alongside `/boot-source`,
   `/drives`, …, strictly before `InstanceStart`), body
-  `{ "guest_cid": 3, "vsock_id": "vsock0", "uds_path": "./v.sock" }`. The path
-  is chroot-relative under the jailer, so the socket materializes inside the
-  room's jail root — per-room by construction, reaped with the jail.
+  `{ "guest_cid": 3, "uds_path": "/v.sock" }`. The path is what the *chrooted*
+  Firecracker resolves — it materializes at `<jail_root>/v.sock` on the host —
+  so the socket is per-room by construction and reaped with the jail.
 - The delivery port is fixed: **`ROOMS_SECRETS_PORT = 5000`**. The host binds
-  `<jail_root>/v.sock_5000` *before* `InstanceStart`, so the guest can never
-  race the listener.
+  the **absolute host path** `<jail_root>/v.sock_5000` *before*
+  `InstanceStart`, so the guest can never race the listener. (The two views
+  matter: Firecracker sees chroot paths, the listener binds outside the
+  chroot — confusing them lands in §6's "listener bind fails" row.)
 - `guest_cid` is constant (3): with the hybrid UDS model there is no host-wide
   CID namespace to collide in; isolation comes from the per-jail socket path.
 
@@ -160,11 +162,20 @@ guest                                   host (one-shot listener)
 
 - **Blob format:** `NAME=value\n` per secret, UTF-8, nothing else. Values are
   host-env strings; a value containing `\n` is rejected at admission (FR1) —
-  the format stays trivially parseable by a shell-free reader.
+  the format stays trivially parseable by a shell-free reader. Readers split
+  each line on the **first** `=` only (dotenv convention), so values may
+  themselves contain `=`.
+- **The host half-close is a required protocol step**, not diagram decoration:
+  after writing the blob the host calls `shutdown(SHUT_WR)`, and the resulting
+  EOF is how the guest knows the blob is complete before it stages and acks.
 - **The ack is the delivery signal.** A successful socket write proves nothing
   (buffers); the guest acks only after `secrets.env` is durably staged with
   its final mode/owner. The host marks the run "delivered" only on reading the
   ack.
+- **A listener-task error is an immediate `secrets_failed`.** If the host's
+  serving task errors after a successful bind (accept failure, write error,
+  malformed ack), the failure propagates to the workload gate the moment it
+  happens — never deferred to the ack timeout.
 - **First-read-then-delete, both sides:** the host unlinks the listener socket
   and drops the blob after the first delivery — a second connect finds nothing
   to talk to. The guest runner deletes `secrets.env` after parsing it (FR6),
@@ -182,6 +193,12 @@ form). Client binary: `socat` (`VSOCK-CONNECT:2:5000`), added to the image
 bake — small, packaged in Alpine, no custom compiled fetcher to maintain.
 The hook runs before sshd so that by `ssh_ready` the ack has normally already
 landed; the host's wait (§5.4) is a bounded formality, not a race.
+
+**Staging is atomic**, per the repo's artifact-write convention: the hook
+writes to a temp path in `/run/rooms/` and renames onto `secrets.env` before
+sending the ack. A hook that dies mid-write leaves no `secrets.env` and never
+acks — the host times out and fails closed — rather than acking a truncated
+file the runner would parse as garbage.
 
 ### 5.4 Host sequencing (where the gate sits)
 
@@ -215,6 +232,7 @@ assigned into `process.env`, so children of the agent inherit nothing (T3).
 | `--secret NAME` with unset/empty host env | admission | usage error; no slot claimed, no boot |
 | value contains newline | admission | usage error (blob format integrity) |
 | listener bind fails (jail dir missing, perms) | pre-boot | boot aborted; `boot_failed` |
+| listener task exits with error post-bind (accept/write failure, malformed ack) | post-boot | `secrets_failed` immediately — never deferred to the ack timeout |
 | guest kernel lacks vsock | boot | fetch hook never runs → no ack → `secrets_failed`; prevented earlier by the doctor check (NFR4) |
 | old image without the fetch hook | post-`ssh_ready` | no ack within timeout → `secrets_failed`; error text names the likely cause ("image predates vsock secrets?") |
 | guest fetch/stage fails mid-write | post-boot | no ack (guest acks only after staging) → `secrets_failed` |
@@ -255,14 +273,16 @@ from above; the run flow composes them.
 
 | Phase | Delivers | Gate |
 | --- | --- | --- |
-| **P1 — mechanism** | vsock device in boot config behind `--secret`; jail-scoped UDS; one-shot listener in `transport` with ack; `secrets_delivered`/`secrets_failed` events; doctor vsock-kernel check; unit tests (listener one-shot-ness, blob format, admission validation) | `make check` green; no image change needed — `secrets_failed` path e2e-testable against the current image (old-image row of §6) |
-| **P2 — guest hook** | fetch hook + `socat` in the alpine bake (base builder, so every image variant gets it); rebuilt cursor image on the rooms-host | manual e2e: `--secret` run reaches `secrets_delivered`; staging file present pre-workload with right mode/owner |
-| **P3 — consumption + gate** | `cursor-runner.js` file-read + delete + env fallback; workload gate wired; `SendEnv` suppression for delivered names (FR7) | full e2e (§10) passes on the rooms-host |
+| **P1 — mechanism + gate** | vsock device in boot config behind `--secret`; jail-scoped UDS; one-shot listener in `transport` with ack; `secrets_delivered`/`secrets_failed` events; **the workload gate, wired from the first phase** — the moment `--secret` exists, no ack means no `workload_started`; admission validation + env removal (FR7); doctor vsock-kernel check; unit tests | `make check` green; no image change needed — the fail-closed path is e2e-testable against the current image (old-image row of §6, which under P1-alone is *every* image) |
+| **P2 — guest hook** | fetch hook + `socat` in the alpine bake (base builder, so every image variant gets it); rebuilt images on the rooms-host | manual e2e: `--secret` run reaches `secrets_delivered`; staging file present pre-workload with right mode/owner |
+| **P3 — consumption** | `cursor-runner.js` file-read + delete + env fallback | full e2e (§10) passes on the rooms-host |
 | **P4 — retire the old path** | remove the `process.env` fallback, the `AcceptEnv CURSOR_API_KEY` bake line, and `SendEnv` of migrated names from `runner.rs` | one dogfood run (pool, cursor) on vsock-only delivery |
 
-P1+P2+P3 can land as one implementation PR if it fits the size band (the
-listener and hook are small); P4 is deliberately separate — it deletes the
-fallback only after a real run proves the new path.
+The gate ships in P1, never later: a phase split that exposed `--secret`
+before wiring the gate would let a pre-hook image run its workload
+secretless, violating FR5/T6. P1+P2+P3 can land as one implementation PR if
+it fits the size band (the listener and hook are small); P4 is deliberately
+separate — it deletes the fallback only after a real run proves the new path.
 
 ## 10. Validation gate (e2e, rooms-host only)
 
@@ -274,7 +294,9 @@ One cursor room completes a real task with `--secret CURSOR_API_KEY`, and:
 - collected artifacts (`result.json`, `events.ndjson`, `summary.md`,
   `result.patch`) do not contain the value (T4);
 - host `ps auxww` does not contain the value (T1);
-- a second connect to the vsock port from inside the guest is refused (T5);
+- a second connect attempt to the vsock port from inside the guest returns a
+  connection error — any non-success; the exact errno depends on
+  Firecracker's routing of a connect to an unlinked UDS (T5);
 - the same invocation against a pre-P2 image fails closed:
   `secrets_failed` emitted, `workload_started` absent, `cleanup_done` present,
   zero leaks (T6);
@@ -283,9 +305,13 @@ One cursor room completes a real task with `--secret CURSOR_API_KEY`, and:
 
 ## 11. Open questions
 
-1. **Doctor check depth (NFR4):** parse guest kernel config from the image
-   (`ikconfig`), or boot-probe once and cache? Leaning config-parse at
-   `doctor` time — static, no boot cost.
+1. **Doctor check depth (NFR4) — resolved:** neither `ikconfig` (Alpine's
+   `linux-virt` kernels don't reliably enable `CONFIG_IKCONFIG_PROC`) nor a
+   boot-probe (a full VM boot inside `doctor` is the wrong cost). The check
+   scans the kernel image for the driver's `virtio_vsock` symbol strings —
+   static, crude, and sufficient: `doctor` reports it warn-level, and the
+   `--secret` admission path re-runs the same scan as a hard fail-closed
+   check with remediation.
 2. **`--secret` on `--command` runs:** deliverable now (mechanism is
    runner-agnostic), but is a bare `secrets.env` the right contract for
    arbitrary commands, or should `--command` wait for a consumer?
