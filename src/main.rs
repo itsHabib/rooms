@@ -13,7 +13,7 @@ use rooms::{
     config::RoomsConfig,
     doctor,
     error::{RoomsError, SlotError},
-    firecracker, registry, room, rootfs, runner, slot, witness,
+    firecracker, registry, room, rootfs, runner, slot, vsock, witness,
 };
 use tracing::{info, warn};
 
@@ -115,6 +115,16 @@ enum Command {
         /// forbids), and a kept room outlives the capture.
         #[arg(long, conflicts_with = "keep", requires = "out_dir")]
         witness: bool,
+        /// Deliver the named host env var into the guest over a per-room
+        /// vsock instead of SSH env forwarding (repeatable). The value is
+        /// read from this process's environment at admission — unset or
+        /// empty fails before any slot is claimed — and then removed from
+        /// the process env, so SSH `SendEnv` can no longer forward it. The
+        /// guest stages secrets at `/run/rooms/secrets.env` (tmpfs, 0600)
+        /// and the workload starts only after delivery is acked; no ack
+        /// fails the room closed (`secrets_failed`, no workload).
+        #[arg(long = "secret", value_parser = valid_secret_name)]
+        secret: Vec<String>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -203,6 +213,7 @@ struct RunArgs {
     json: bool,
     lifecycle: Option<PathBuf>,
     witness: bool,
+    secrets: Vec<String>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -218,6 +229,95 @@ fn non_empty_command(s: &str) -> Result<String, String> {
     } else {
         Ok(s.to_owned())
     }
+}
+
+/// Validate a `--secret` name: env-var shaped, so a name can never smuggle
+/// `=` or framing characters into the delivery blob.
+fn valid_secret_name(s: &str) -> Result<String, String> {
+    let mut chars = s.chars();
+    let head_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase() || c == '_');
+    let tail_ok = chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if head_ok && tail_ok {
+        return Ok(s.to_owned());
+    }
+    Err(format!(
+        "invalid --secret name '{s}': want an env-var name matching [A-Z_][A-Z0-9_]*"
+    ))
+}
+
+/// Harvest `--secret` values from this process's environment into the vsock
+/// blob, then REMOVE each variable from the environment: SSH `SendEnv` can
+/// only forward what exists, so the removal *is* the suppression — a
+/// vsock-delivered name can no longer also reach the guest ambiently over
+/// any SSH session of this run.
+///
+/// Fails closed at admission: an unset or empty variable, or a value that
+/// would break the line-oriented blob framing, rejects the run before any
+/// slot is claimed.
+fn harvest_secrets(names: &[String]) -> Result<Option<vsock::SecretsPayload>, RoomsError> {
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pairs = Vec::new();
+    for name in names {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        let value = std::env::var(name).map_err(|_| {
+            RoomsError::Internal(format!("--secret {name}: not set in the host environment"))
+        })?;
+        if value.is_empty() {
+            return Err(RoomsError::Internal(format!(
+                "--secret {name}: value is empty"
+            )));
+        }
+        if value.contains('\n') {
+            return Err(RoomsError::Internal(format!(
+                "--secret {name}: value contains a newline, which the line-oriented blob cannot carry"
+            )));
+        }
+        std::env::remove_var(name);
+        pairs.push((name.clone(), value));
+    }
+    Ok(Some(vsock::SecretsPayload::encode(&pairs)))
+}
+
+/// `--secret` admission: harvest (and remove from this process env) every
+/// requested value, and prove the guest kernel can even open a vsock — both
+/// fail closed here, before any slot is claimed or VM booted.
+fn admit_secrets(
+    names: &[String],
+    kernel: &Path,
+) -> Result<Option<vsock::SecretsPayload>, RoomsError> {
+    let payload = harvest_secrets(names)?;
+    if payload.is_some() {
+        ensure_kernel_has_vsock(kernel)?;
+    }
+    Ok(payload)
+}
+
+/// Admission check for `--secret`: the guest kernel must carry virtio-vsock,
+/// or the fetch hook could never run and the room would fail closed only
+/// after a full boot. Scans the kernel image for the driver's symbol strings
+/// — crude but static; a miss fails here with remediation rather than
+/// mid-run as an opaque `secrets_failed`.
+fn ensure_kernel_has_vsock(kernel: &Path) -> Result<(), RoomsError> {
+    let bytes = std::fs::read(kernel)
+        .map_err(|e| RoomsError::Internal(format!("read kernel {}: {e}", kernel.display())))?;
+    if contains_bytes(&bytes, b"virtio_vsock") {
+        return Ok(());
+    }
+    Err(RoomsError::Internal(format!(
+        "--secret: guest kernel {} has no virtio_vsock support; use a kernel built with CONFIG_VIRTIO_VSOCKETS=y",
+        kernel.display()
+    )))
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Parse a wall-clock cap: an integer with an optional `s`/`m`/`h` suffix
@@ -388,6 +488,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             json,
             lifecycle,
             witness,
+            secret,
         } => {
             run_room(
                 RunArgs {
@@ -407,6 +508,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     json,
                     lifecycle,
                     witness,
+                    secrets: secret,
                 },
                 &config,
             )
@@ -494,6 +596,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             ))
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
+    let secrets_payload = admit_secrets(&args.secrets, &kernel)?;
 
     // Degraded-mode precheck: the host firewall chain must be installed before
     // we claim a slot, so a mis-provisioned host fails fast with the exact
@@ -565,6 +668,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         readonly_rootfs,
         descriptor: &descriptor,
         witness: args.witness,
+        secrets: secrets_payload.as_ref(),
     };
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,
@@ -595,7 +699,8 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         max_wall: args.max_wall,
         lifecycle: &lifecycle,
     };
-    let outcome = post_boot(&env, &action, &mut vm).await;
+    let secrets_delivery = vm.take_secrets_delivery();
+    let outcome = post_boot(&env, &action, &mut vm, secrets_delivery).await;
     collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
@@ -948,9 +1053,13 @@ async fn post_boot(
     env: &PostBootEnv<'_>,
     action: &Action,
     vm: &mut firecracker::BootedVm,
+    secrets: Option<vsock::Delivery>,
 ) -> Result<u8, RoomsError> {
     match action {
         Action::Keep => {
+            // `secrets` stays alive here on purpose: a kept room's guest may
+            // still be fetching while the operator inspects; the handle (and
+            // its listener) drops when post_boot returns.
             info!(
                 guest_ip = %env.network.guest_ip,
                 "microVM is up; Ctrl-C to shut down (try `ping {}` from another shell)",
@@ -961,7 +1070,7 @@ async fn post_boot(
                 .map_err(|e| RoomsError::Internal(e.to_string()))?;
             Ok(0)
         }
-        Action::Exec(run) => exec_workload(env, run).await,
+        Action::Exec(run) => exec_workload(env, run, secrets).await,
         Action::Idle => idle_linger(env, vm).await,
     }
 }
@@ -1054,14 +1163,18 @@ where
 /// Drive the exec path — wait for the workload channel, run the workload —
 /// racing the whole sequence against Ctrl-C and the wall-clock cap, and
 /// recording each transition on the lifecycle stream.
-async fn exec_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8, RoomsError> {
+async fn exec_workload(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    secrets: Option<vsock::Delivery>,
+) -> Result<u8, RoomsError> {
     let guest_ip = env.network.guest_ip.clone();
     let lifecycle = env.lifecycle;
     // Wrap the entire setup-and-exec sequence (probe sshd, then exec). Dropping
     // `work` cascades through each child future — kill_on_drop fires on every
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
-    let work = run_workload(env, run);
+    let work = run_workload(env, run, secrets);
     // started_at captures when rooms began attempting exec (SSH probe,
     // then runner). Exec writes its own started_at into result.json on
     // the success path; this outer one only surfaces in the abort
@@ -1110,13 +1223,24 @@ async fn exec_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8
     }
 }
 
-/// Wait for the workload channel, then run the workload, recording the
-/// workload's own transitions on the lifecycle stream. Returns the resolved
-/// exit code; a post-run push failure fails the run without erasing the
-/// workload's real exit (which the stream + result.json already carry).
-async fn run_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8, RoomsError> {
+/// Wait for the workload channel, pass the secrets gate when one is armed,
+/// then run the workload, recording each transition on the lifecycle stream.
+/// Returns the resolved exit code; a post-run push failure fails the run
+/// without erasing the workload's real exit (which the stream + result.json
+/// already carry).
+async fn run_workload(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    secrets: Option<vsock::Delivery>,
+) -> Result<u8, RoomsError> {
     let lifecycle = env.lifecycle;
-    wait_for_channel(env, run).await?;
+    wait_for_channel(env).await?;
+    if let Some(delivery) = secrets {
+        gate_on_secrets(env, run, delivery).await?;
+    }
+    lifecycle.emit(&Event::WorkloadStarted {
+        command: run.command_argv(),
+    });
     let outcome = match runner::exec(&env.network.guest_ip, env.key, run).await {
         Ok(outcome) => outcome,
         Err(e) => {
@@ -1139,11 +1263,12 @@ async fn run_workload(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<u8,
     Ok(u8::try_from(outcome.exit_code).unwrap_or(2))
 }
 
-/// Wait for the guest's workload channel, reporting guest/SSH readiness on the
-/// lifecycle stream, then record the workload handoff. The ping probe runs
-/// only when a stream consumes it, so runs without `--lifecycle` keep the
-/// exact probe behavior they had.
-async fn wait_for_channel(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result<(), RoomsError> {
+/// Wait for the guest's workload channel, reporting guest/SSH readiness on
+/// the lifecycle stream. Readiness only: the workload handoff is recorded by
+/// the caller, after the secrets gate — `workload_started` must never precede
+/// a confirmed delivery. The ping probe runs only when a stream consumes it,
+/// so runs without `--lifecycle` keep the exact probe behavior they had.
+async fn wait_for_channel(env: &PostBootEnv<'_>) -> Result<(), RoomsError> {
     let lifecycle = env.lifecycle;
     let waited = runner::wait_for_ssh_observed(
         &env.network.guest_ip,
@@ -1160,10 +1285,47 @@ async fn wait_for_channel(env: &PostBootEnv<'_>, run: &runner::Runner) -> Result
         emit_readiness_failure(lifecycle, &e);
         return Err(RoomsError::Firecracker(e));
     }
-    lifecycle.emit(&Event::WorkloadStarted {
-        command: run.command_argv(),
-    });
     Ok(())
+}
+
+/// How long after SSH readiness the guest may take to ack the vsock secrets
+/// delivery. The fetch hook runs before sshd in the guest's boot order, so
+/// the ack normally exists well before this gate is even reached; the bound
+/// exists for the pathological cases (an image without the hook, a wedged
+/// fetch).
+const SECRETS_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `--secret` workload gate: the guest must have staged and acked every
+/// requested secret before the workload is handed over. A timeout or failed
+/// delivery is terminal — the aborted run is recorded and `workload_started`
+/// is never emitted (fail closed).
+async fn gate_on_secrets(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    delivery: vsock::Delivery,
+) -> Result<(), RoomsError> {
+    match delivery.await_delivered(SECRETS_ACK_TIMEOUT).await {
+        Ok(()) => {
+            env.lifecycle.emit(&Event::SecretsDelivered);
+            Ok(())
+        }
+        Err(e) => {
+            let error = format!("secrets: {e}");
+            env.lifecycle.emit(&Event::SecretsFailed {
+                error: error.clone(),
+            });
+            record_aborted_run(
+                &env.network.guest_ip,
+                env.key,
+                1,
+                RunStatus::Failed,
+                Utc::now(),
+                run.command_argv(),
+            )
+            .await;
+            Err(RoomsError::Internal(error))
+        }
+    }
 }
 
 /// Classify a readiness failure for the stream: a probe timeout means the
@@ -1579,9 +1741,10 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        changeset_exit_code, diff_changeset, exit_code_for_error, humanize_secs, parse_max_pool,
-        parse_max_wall, race_workload, resolve_action, run_error_record, truncate_label, Cli,
-        Command, ExecRace, RoomsError, RunArgs, RunnerKind, SlotError, BARE_BOOT_LINGER,
+        changeset_exit_code, diff_changeset, exit_code_for_error, harvest_secrets, humanize_secs,
+        parse_max_pool, parse_max_wall, race_workload, resolve_action, run_error_record,
+        truncate_label, valid_secret_name, Cli, Command, ExecRace, RoomsError, RunArgs, RunnerKind,
+        SlotError, BARE_BOOT_LINGER,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
@@ -1590,6 +1753,55 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn secret_name_parser_accepts_env_shapes_and_rejects_others() {
+        for good in ["CURSOR_API_KEY", "GH_TOKEN", "_X", "A1_B2"] {
+            assert!(valid_secret_name(good).is_ok(), "{good} should parse");
+        }
+        for bad in ["", "lower_case", "1LEADING", "WITH-DASH", "WITH=EQ", "A B"] {
+            assert!(
+                valid_secret_name(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn harvest_secrets_removes_the_var_so_sendenv_cannot_forward_it() {
+        std::env::set_var("ROOMS_TEST_HARVEST_OK", "v-1");
+        let payload = harvest_secrets(&["ROOMS_TEST_HARVEST_OK".to_owned()])
+            .expect("set var harvests")
+            .expect("non-empty names yield a payload");
+        drop(payload);
+        assert!(
+            std::env::var("ROOMS_TEST_HARVEST_OK").is_err(),
+            "harvest must remove the env var — the removal IS the SendEnv suppression"
+        );
+    }
+
+    #[test]
+    fn harvest_secrets_fails_closed_on_unset_empty_and_multiline_values() {
+        assert!(
+            harvest_secrets(&["ROOMS_TEST_HARVEST_UNSET".to_owned()]).is_err(),
+            "unset var must fail admission"
+        );
+        std::env::set_var("ROOMS_TEST_HARVEST_EMPTY", "");
+        assert!(
+            harvest_secrets(&["ROOMS_TEST_HARVEST_EMPTY".to_owned()]).is_err(),
+            "empty value must fail admission"
+        );
+        std::env::set_var("ROOMS_TEST_HARVEST_NL", "a\nb");
+        assert!(
+            harvest_secrets(&["ROOMS_TEST_HARVEST_NL".to_owned()]).is_err(),
+            "a newline in the value must fail admission (blob framing)"
+        );
+    }
+
+    #[test]
+    fn harvest_secrets_without_names_is_a_no_op() {
+        assert!(harvest_secrets(&[]).expect("empty is fine").is_none());
     }
 
     /// The regression for the silent-reap bug: a `--command` run whose guest
@@ -2109,6 +2321,7 @@ mod tests {
             json: false,
             lifecycle: None,
             witness: false,
+            secrets: Vec::new(),
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(

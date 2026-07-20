@@ -324,6 +324,10 @@ pub struct BootedVm {
     /// before the VMM so it captures the guest's whole lifetime; the caller
     /// takes it before teardown to stop + summarize while the tap still exists.
     witness: Option<Capture>,
+    /// The pending vsock secrets delivery, present only under `--secret`.
+    /// The caller takes it to gate the workload on the guest's ack; dropping
+    /// it (a run that never gates) aborts the listener.
+    secrets_delivery: Option<crate::vsock::Delivery>,
     guard: RoomGuard,
     child: Child,
 }
@@ -334,6 +338,12 @@ impl BootedVm {
     /// later teardown never races a still-running capture against tap deletion.
     pub fn take_witness(&mut self) -> Option<Capture> {
         self.witness.take()
+    }
+
+    /// Take the pending secrets delivery, if any, so the run flow can await
+    /// the guest's ack before handing over the workload.
+    pub fn take_secrets_delivery(&mut self) -> Option<crate::vsock::Delivery> {
+        self.secrets_delivery.take()
     }
 
     /// Terminate the firecracker process and remove room state.
@@ -399,6 +409,11 @@ pub struct BootRequest<'a> {
     /// Capture starts right after the tap is created and before the VMM starts,
     /// so it sees the guest's whole lifetime. Off by default.
     pub witness: bool,
+    /// Secrets blob to serve over the room's vsock (`rooms run --secret`).
+    /// `Some` wires a per-room vsock device and binds the one-shot listener
+    /// before `InstanceStart`; the caller takes the [`crate::vsock::Delivery`]
+    /// from the booted VM to gate the workload on the guest's ack.
+    pub secrets: Option<&'a crate::vsock::SecretsPayload>,
 }
 
 /// Boot a Firecracker microVM with the given kernel + rootfs.
@@ -471,6 +486,9 @@ pub async fn boot(
         )),
     };
 
+    let secrets_delivery =
+        bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid).await?;
+
     let launch = build_jailer_launch_plan(&JailerLaunchInput {
         jailer_binary: &jailer_binary,
         firecracker_binary: &firecracker_binary,
@@ -502,22 +520,50 @@ pub async fn boot(
 
     let boot_args = build_boot_args(req.network, req.readonly_rootfs);
     let rootfs_drive = rootfs_drive_payload(&launch.rootfs_path_in_jail, req.readonly_rootfs);
-    configure_vm(
-        &socket,
-        &launch.kernel_path_in_jail,
-        &rootfs_drive,
-        req.network,
-        &boot_args,
-        config,
-    )
-    .await?;
+    let spec = VmSpec {
+        kernel: &launch.kernel_path_in_jail,
+        rootfs_drive: &rootfs_drive,
+        network: req.network,
+        boot_args: &boot_args,
+        vsock: req.secrets.is_some(),
+    };
+    configure_vm(&socket, &spec, config).await?;
 
     info!("microVM booted");
     Ok(BootedVm {
         witness,
+        secrets_delivery,
         guard,
         child,
     })
+}
+
+/// Bind the one-shot secrets listener in the room's jail root, before the
+/// jailer (and thus the guest) exists — the guest's boot-time fetch can never
+/// race a listener that outbinds it. The socket lives inside the jail, so the
+/// chrooted, de-privileged Firecracker can reach it and jail teardown reaps
+/// it with everything else. A bind failure fails the boot closed.
+async fn bind_secrets_listener(
+    secrets: Option<&crate::vsock::SecretsPayload>,
+    chroot_base: &Path,
+    room_id: &str,
+    fc_uid: u32,
+    fc_gid: u32,
+) -> Result<Option<crate::vsock::Delivery>, FirecrackerError> {
+    let Some(payload) = secrets else {
+        return Ok(None);
+    };
+    let listen = crate::vsock::listener_path(&jail_root_dir(chroot_base, room_id));
+    let delivery =
+        crate::vsock::serve_one_shot(&listen, payload.clone_bytes(), Some((fc_uid, fc_gid)))
+            .await
+            .map_err(|e| {
+                FirecrackerError::Internal(format!(
+                    "secrets: bind vsock listener {}: {e}",
+                    listen.display()
+                ))
+            })?;
+    Ok(Some(delivery))
 }
 
 /// Start the host-side egress capture on `tap`, mapping a start failure into the
@@ -1146,26 +1192,34 @@ fn rootfs_drive_payload(rootfs: &Path, readonly_rootfs: bool) -> serde_json::Val
     })
 }
 
+/// Pre-boot VM configuration inputs, one API resource per field: the payload
+/// `configure_vm` walks through the Firecracker REST calls before
+/// `InstanceStart`.
+struct VmSpec<'a> {
+    kernel: &'a Path,
+    rootfs_drive: &'a serde_json::Value,
+    network: Option<&'a NetworkConfig>,
+    boot_args: &'a str,
+    vsock: bool,
+}
+
 async fn configure_vm(
     socket: &Path,
-    kernel: &Path,
-    rootfs_drive: &serde_json::Value,
-    network: Option<&NetworkConfig>,
-    boot_args: &str,
+    spec: &VmSpec<'_>,
     config: &RoomsConfig,
 ) -> Result<(), FirecrackerError> {
     transport::api_put(
         socket,
         "/boot-source",
         &serde_json::json!({
-            "kernel_image_path": kernel,
-            "boot_args": boot_args,
+            "kernel_image_path": spec.kernel,
+            "boot_args": spec.boot_args,
         }),
         config,
     )
     .await?;
 
-    transport::api_put(socket, "/drives/rootfs", rootfs_drive, config).await?;
+    transport::api_put(socket, "/drives/rootfs", spec.rootfs_drive, config).await?;
 
     transport::api_put(
         socket,
@@ -1178,7 +1232,7 @@ async fn configure_vm(
     )
     .await?;
 
-    if let Some(net) = network {
+    if let Some(net) = spec.network {
         transport::api_put(
             socket,
             "/network-interfaces/eth0",
@@ -1190,6 +1244,23 @@ async fn configure_vm(
         )
         .await?;
         info!(tap = %net.tap_name, guest_ip = %net.guest_ip, "network attached");
+    }
+
+    // The vsock device must exist before InstanceStart. `uds_path` is as the
+    // chrooted Firecracker sees it: `/v.sock` under the jail root. Guest
+    // connections to (cid=2, port) land on the host at `/v.sock_<port>` —
+    // the listener `boot` bound before spawning the jailer.
+    if spec.vsock {
+        transport::api_put(
+            socket,
+            "/vsock",
+            &serde_json::json!({
+                "guest_cid": crate::vsock::GUEST_CID,
+                "uds_path": format!("/{}", crate::vsock::UDS_NAME),
+            }),
+            config,
+        )
+        .await?;
     }
 
     transport::api_put(socket, "/entropy", &serde_json::json!({}), config).await?;
@@ -2084,6 +2155,7 @@ mod e2e_tests {
             readonly_rootfs: false,
             descriptor: &descriptor,
             witness: false,
+            secrets: None,
         };
         let mut vm = boot(&req, &config).await.expect("boot should succeed");
 

@@ -179,6 +179,7 @@ pub fn run_doctor(config: &RoomsConfig, image: Option<&Path>) -> DoctorReport {
         check_slots_dir(config),
         check_orphaned_taps(config),
         check_kernel(image, config),
+        check_kernel_vsock(image),
         check_rootfs(image, config),
         check_anthropic_api_key(),
         check_nested_virt(),
@@ -560,6 +561,49 @@ fn check_kernel(image: Option<&Path>, _config: &RoomsConfig) -> CheckResult {
             ok: false,
             message: e.to_string(),
         },
+    }
+}
+
+/// Whether the guest kernel can open a vsock — the transport `rooms run
+/// --secret` delivers over. Detection scans the kernel image for the
+/// virtio-vsock driver's symbol strings: crude but static, no boot required.
+/// Absence is a [`WARN_PREFIX`] warning, not a failure — only `--secret`
+/// runs need vsock, and their admission check fails closed with the same
+/// remediation.
+fn check_kernel_vsock(image: Option<&Path>) -> CheckResult {
+    let name = "kernel_vsock".to_owned();
+    let Some(path) = resolve_kernel_path(image) else {
+        return CheckResult {
+            name,
+            ok: true,
+            message: format!("{WARN_PREFIX} no kernel path configured; cannot probe virtio-vsock"),
+        };
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return CheckResult {
+            name,
+            ok: true,
+            message: format!(
+                "{WARN_PREFIX} could not read kernel {} to probe virtio-vsock",
+                path.display()
+            ),
+        };
+    };
+    let needle: &[u8] = b"virtio_vsock";
+    if bytes.windows(needle.len()).any(|w| w == needle) {
+        return CheckResult {
+            name,
+            ok: true,
+            message: format!("guest kernel carries virtio_vsock ({})", path.display()),
+        };
+    }
+    CheckResult {
+        name,
+        ok: true,
+        message: format!(
+            "{WARN_PREFIX} guest kernel {} has no virtio_vsock strings — `rooms run --secret` will refuse at admission (CONFIG_VIRTIO_VSOCKETS=y required)",
+            path.display()
+        ),
     }
 }
 

@@ -94,6 +94,7 @@ async fn firecracker_exits_early_is_caught() {
         readonly_rootfs: false,
         descriptor: &descriptor,
         witness: false,
+        secrets: None,
     };
     let err = firecracker::boot(&req, &config)
         .await
@@ -145,6 +146,7 @@ async fn api_socket_never_appears() {
         readonly_rootfs: false,
         descriptor: &descriptor,
         witness: false,
+        secrets: None,
     };
     let err = firecracker::boot(&req, &config)
         .await
@@ -186,6 +188,7 @@ async fn guest_unreachable() {
         readonly_rootfs: false,
         descriptor: &descriptor,
         witness: false,
+        secrets: None,
     };
     let vm = firecracker::boot(&req, &config)
         .await

@@ -157,7 +157,7 @@ apk update
 apk add --no-cache \
     alpine-base openrc openssh-server sudo \
     git ca-certificates bash curl \
-    libgcc libstdc++ ripgrep
+    libgcc libstdc++ ripgrep socat
 wget -q -O /etc/apk/keys/claude-code.rsa.pub "$KEY_URL"
 GOT="$(sha256sum /etc/apk/keys/claude-code.rsa.pub | cut -d' ' -f1)"
 [ "$GOT" = "$KEY_SHA" ] || { echo "claude-code apk key sha256 mismatch: got $GOT" >&2; exit 1; }
@@ -169,6 +169,24 @@ CHROOT_INSTALL
 log "installing overlay-init (read-only rootfs + tmpfs overlay at boot)"
 install -d -m 0755 "$MNT/mnt" "$MNT/oldroot"
 install -m 0755 "${SCRIPT_DIR}/lib/overlay-init.sh" "$MNT/sbin/overlay-init"
+
+log "installing rooms-secrets-fetch (vsock secrets hand-off, before sshd)"
+install -m 0755 "${SCRIPT_DIR}/lib/rooms-secrets-fetch.sh" "$MNT/sbin/rooms-secrets-fetch"
+cat >"$MNT/etc/init.d/rooms-secrets" <<'EOF'
+#!/sbin/openrc-run
+description="fetch vsock-delivered secrets before the workload channel opens"
+
+depend() {
+    before sshd
+}
+
+start() {
+    ebegin "Fetching rooms secrets over vsock"
+    /sbin/rooms-secrets-fetch
+    eend $?
+}
+EOF
+chmod 0755 "$MNT/etc/init.d/rooms-secrets"
 
 log "writing guest config (init, dns, hostname, settings)"
 # ttyS0-only inittab — Firecracker never offers a VT, so the six default gettys
@@ -250,6 +268,9 @@ rc-update add procfs boot
 rc-update add sysfs boot
 rc-update add bootmisc boot
 rc-update add hostname boot
+# boot: the vsock secrets fetch — ordered before sshd so by the time the
+# workload channel opens, delivery has already been acked (or never will be).
+rc-update add rooms-secrets boot
 # default: the service rooms actually connects to.
 rc-update add sshd default
 # Never run ifupdown/DHCP — the kernel ip= arg already configured eth0.
