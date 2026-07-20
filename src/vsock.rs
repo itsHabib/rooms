@@ -203,16 +203,27 @@ async fn serve_stream(
         .write_all(&payload.0)
         .await
         .map_err(|e| format!("write blob: {e}"))?;
+    // Read the ack a byte at a time up to the terminating newline — the guest
+    // keeps the connection open (no half-close survives the hybrid vsock), so
+    // a fixed-size `read_to_end` would block for a fourth byte that never
+    // comes. Cap the scan so a chatty/garbage peer can't stream forever.
     let mut ack = Vec::with_capacity(4);
-    stream
-        .take(4)
-        .read_to_end(&mut ack)
-        .await
-        .map_err(|e| format!("read ack: {e}"))?;
-    // Exactly `OK` (bare or newline-terminated) — the gate's invariant rides
-    // on this signal, so a prefix match that admits `OKxx` would mask
-    // protocol bugs and partial acks.
-    if ack == b"OK" || ack == b"OK\n" {
+    loop {
+        let b = stream
+            .read_u8()
+            .await
+            .map_err(|e| format!("read ack: {e}"))?;
+        if b == b'\n' {
+            break;
+        }
+        ack.push(b);
+        if ack.len() > 8 {
+            break;
+        }
+    }
+    // Exactly `OK` — the gate's invariant rides on this signal, so a prefix
+    // match that admits `OKxx` would mask protocol bugs and partial acks.
+    if ack == b"OK" {
         return Ok(());
     }
     Err(format!(
