@@ -564,6 +564,15 @@ fn check_kernel(image: Option<&Path>, _config: &RoomsConfig) -> CheckResult {
     }
 }
 
+/// Whether a kernel image's bytes carry the virtio-vsock driver, by symbol
+/// strings — crude but static, no boot required. Shared by the doctor check
+/// below and the `--secret` admission gate in the binary.
+#[must_use]
+pub fn kernel_carries_vsock(kernel_bytes: &[u8]) -> bool {
+    let needle: &[u8] = b"virtio_vsock";
+    kernel_bytes.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Whether the guest kernel can open a vsock — the transport `rooms run
 /// --secret` delivers over. Detection scans the kernel image for the
 /// virtio-vsock driver's symbol strings: crude but static, no boot required.
@@ -589,8 +598,7 @@ fn check_kernel_vsock(image: Option<&Path>) -> CheckResult {
             ),
         };
     };
-    let needle: &[u8] = b"virtio_vsock";
-    if bytes.windows(needle.len()).any(|w| w == needle) {
+    if kernel_carries_vsock(&bytes) {
         return CheckResult {
             name,
             ok: true,

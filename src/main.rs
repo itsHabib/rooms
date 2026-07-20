@@ -213,7 +213,9 @@ struct RunArgs {
     json: bool,
     lifecycle: Option<PathBuf>,
     witness: bool,
-    secrets: Vec<String>,
+    /// Harvested `--secret` payload — built pre-runtime in `main`, where the
+    /// env mutation it entails is still sound.
+    secrets: Option<vsock::SecretsPayload>,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -285,20 +287,6 @@ fn harvest_secrets(names: &[String]) -> Result<Option<vsock::SecretsPayload>, Ro
     Ok(Some(vsock::SecretsPayload::encode(&pairs)))
 }
 
-/// `--secret` admission: harvest (and remove from this process env) every
-/// requested value, and prove the guest kernel can even open a vsock — both
-/// fail closed here, before any slot is claimed or VM booted.
-fn admit_secrets(
-    names: &[String],
-    kernel: &Path,
-) -> Result<Option<vsock::SecretsPayload>, RoomsError> {
-    let payload = harvest_secrets(names)?;
-    if payload.is_some() {
-        ensure_kernel_has_vsock(kernel)?;
-    }
-    Ok(payload)
-}
-
 /// Admission check for `--secret`: the guest kernel must carry virtio-vsock,
 /// or the fetch hook could never run and the room would fail closed only
 /// after a full boot. Scans the kernel image for the driver's symbol strings
@@ -307,17 +295,13 @@ fn admit_secrets(
 fn ensure_kernel_has_vsock(kernel: &Path) -> Result<(), RoomsError> {
     let bytes = std::fs::read(kernel)
         .map_err(|e| RoomsError::Internal(format!("read kernel {}: {e}", kernel.display())))?;
-    if contains_bytes(&bytes, b"virtio_vsock") {
+    if doctor::kernel_carries_vsock(&bytes) {
         return Ok(());
     }
     Err(RoomsError::Internal(format!(
         "--secret: guest kernel {} has no virtio_vsock support; use a kernel built with CONFIG_VIRTIO_VSOCKETS=y",
         kernel.display()
     )))
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Parse a wall-clock cap: an integer with an optional `s`/`m`/`h` suffix
@@ -376,8 +360,7 @@ fn parse_max_pool(s: &str) -> Result<u8, String> {
     Ok(n)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
@@ -386,7 +369,41 @@ async fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    match dispatch(cli).await {
+    // Harvest `--secret` values (which mutates the process environment —
+    // each harvested var is removed so SSH `SendEnv` can no longer forward
+    // it) while the process is still single-threaded: `std::env` mutation
+    // is unsound once the tokio worker threads may be reading the
+    // environment concurrently.
+    let secrets = match harvest_cli_secrets(&cli) {
+        Ok(secrets) => secrets,
+        Err(err) => {
+            if run_wants_json(&cli) {
+                emit_run_error_json(&err);
+            }
+            warn!(error = %err, "command failed");
+            return ExitCode::from(exit_code_for_error(&err));
+        }
+    };
+    async_main(cli, secrets)
+}
+
+/// Extract and harvest the `--secret` names of a `run` invocation; every
+/// other command carries none.
+fn harvest_cli_secrets(cli: &Cli) -> Result<Option<vsock::SecretsPayload>, RoomsError> {
+    let Command::Run { secret, .. } = &cli.command else {
+        return Ok(None);
+    };
+    harvest_secrets(secret)
+}
+
+/// Whether the invocation asked for the machine-readable error record.
+const fn run_wants_json(cli: &Cli) -> bool {
+    matches!(cli.command, Command::Run { json: true, .. })
+}
+
+#[tokio::main]
+async fn async_main(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> ExitCode {
+    match dispatch(cli, secrets).await {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
             warn!(error = %err, "command failed");
@@ -468,7 +485,7 @@ fn emit_run_error_json(err: &RoomsError) {
     }
 }
 
-async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
+async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8, RoomsError> {
     let config = RoomsConfig::default();
     match cli.command {
         Command::Run {
@@ -488,7 +505,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
             json,
             lifecycle,
             witness,
-            secret,
+            secret: _,
         } => {
             run_room(
                 RunArgs {
@@ -508,7 +525,7 @@ async fn dispatch(cli: Cli) -> Result<u8, RoomsError> {
                     json,
                     lifecycle,
                     witness,
-                    secrets: secret,
+                    secrets,
                 },
                 &config,
             )
@@ -596,7 +613,12 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             ))
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
-    let secrets_payload = admit_secrets(&args.secrets, &kernel)?;
+    // `--secret` admission, part two (values were harvested pre-runtime in
+    // `main`): prove the guest kernel can even open a vsock, before any slot
+    // is claimed or VM booted.
+    if args.secrets.is_some() {
+        ensure_kernel_has_vsock(&kernel)?;
+    }
 
     // Degraded-mode precheck: the host firewall chain must be installed before
     // we claim a slot, so a mis-provisioned host fails fast with the exact
@@ -668,7 +690,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         readonly_rootfs,
         descriptor: &descriptor,
         witness: args.witness,
-        secrets: secrets_payload.as_ref(),
+        secrets: args.secrets.as_ref(),
     };
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,
@@ -1171,17 +1193,17 @@ async fn exec_workload(
 ) -> Result<u8, RoomsError> {
     let guest_ip = env.network.guest_ip.clone();
     let lifecycle = env.lifecycle;
+    // started_at captures when rooms began attempting exec (SSH probe,
+    // then runner). Exec writes its own started_at into result.json on
+    // the success path; this outer one surfaces only in the abort records
+    // (cancel / timeout below, and the secrets gate inside the workload),
+    // where the guest command may never have begun.
+    let started_at = Utc::now();
     // Wrap the entire setup-and-exec sequence (probe sshd, then exec). Dropping
     // `work` cascades through each child future — kill_on_drop fires on every
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
-    let work = run_workload(env, run, secrets);
-    // started_at captures when rooms began attempting exec (SSH probe,
-    // then runner). Exec writes its own started_at into result.json on
-    // the success path; this outer one only surfaces in the abort
-    // (cancel / timeout) branches below, where the guest command may
-    // never have begun.
-    let started_at = Utc::now();
+    let work = run_workload(env, run, secrets, started_at);
     match race_workload(work, env.max_wall).await {
         ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
@@ -1233,11 +1255,12 @@ async fn run_workload(
     env: &PostBootEnv<'_>,
     run: &runner::Runner,
     secrets: Option<vsock::Delivery>,
+    started_at: DateTime<Utc>,
 ) -> Result<u8, RoomsError> {
     let lifecycle = env.lifecycle;
     wait_for_channel(env).await?;
     if let Some(delivery) = secrets {
-        gate_on_secrets(env, run, delivery).await?;
+        gate_on_secrets(env, run, delivery, started_at).await?;
     }
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
@@ -1304,6 +1327,7 @@ async fn gate_on_secrets(
     env: &PostBootEnv<'_>,
     run: &runner::Runner,
     delivery: vsock::Delivery,
+    started_at: DateTime<Utc>,
 ) -> Result<(), RoomsError> {
     match delivery.await_delivered(SECRETS_ACK_TIMEOUT).await {
         Ok(()) => {
@@ -1320,7 +1344,7 @@ async fn gate_on_secrets(
                 env.key,
                 1,
                 RunStatus::Failed,
-                Utc::now(),
+                started_at,
                 run.command_argv(),
             )
             .await;
@@ -2322,7 +2346,7 @@ mod tests {
             json: false,
             lifecycle: None,
             witness: false,
-            secrets: Vec::new(),
+            secrets: None,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
