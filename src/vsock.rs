@@ -149,7 +149,7 @@ pub fn serve_one_shot(
 }
 
 /// The serving task: accept once, immediately retire the endpoint, then
-/// write the blob, half-close, and wait for the guest's `OK` ack.
+/// write the length-prefixed blob and wait for the guest's `OK` ack.
 #[cfg(unix)]
 async fn serve(
     listener: tokio::net::UnixListener,
@@ -178,9 +178,15 @@ async fn serve(
     let _ = tx.send(outcome);
 }
 
-/// Write the blob, half-close, and require the `OK` ack the guest sends only
-/// after the file is durably staged. The write alone proves nothing — it can
-/// sit in a socket buffer of a guest that never staged anything.
+/// Write the length-prefixed blob and require the `OK` ack the guest sends
+/// only after the file is durably staged. The write alone proves nothing —
+/// it can sit in a socket buffer of a guest that never staged anything.
+///
+/// Framing is `<decimal len>\n<blob>`, no half-close: Firecracker's hybrid
+/// vsock does not propagate a host `shutdown(WR)` as a guest-side EOF with
+/// the reverse path intact — the ack never comes back (observed on a real
+/// boot). The explicit length lets the guest know where the blob ends while
+/// the connection stays fully open for the ack.
 #[cfg(unix)]
 async fn serve_stream(
     mut stream: tokio::net::UnixStream,
@@ -188,14 +194,15 @@ async fn serve_stream(
 ) -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let header = format!("{}\n", payload.0.len());
+    stream
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|e| format!("write header: {e}"))?;
     stream
         .write_all(&payload.0)
         .await
         .map_err(|e| format!("write blob: {e}"))?;
-    stream
-        .shutdown()
-        .await
-        .map_err(|e| format!("half-close: {e}"))?;
     let mut ack = Vec::with_capacity(4);
     stream
         .take(4)
@@ -236,6 +243,24 @@ mod tests {
         ])
     }
 
+    /// Read the guest's side of the frame: `<decimal len>\n`, then exactly
+    /// `len` blob bytes. Mirrors what the in-guest stage script does — no
+    /// EOF is involved, the connection stays fully open.
+    async fn read_framed_blob(guest: &mut tokio::net::UnixStream) -> String {
+        let mut header = Vec::new();
+        loop {
+            let b = guest.read_u8().await.unwrap();
+            if b == b'\n' {
+                break;
+            }
+            header.push(b);
+        }
+        let len: usize = String::from_utf8(header).unwrap().parse().unwrap();
+        let mut blob = vec![0u8; len];
+        guest.read_exact(&mut blob).await.unwrap();
+        String::from_utf8(blob).unwrap()
+    }
+
     #[test]
     fn encode_frames_name_value_lines() {
         let blob = payload();
@@ -258,8 +283,7 @@ mod tests {
         let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let mut blob = String::new();
-        guest.read_to_string(&mut blob).await.unwrap();
+        let blob = read_framed_blob(&mut guest).await;
         assert!(blob.contains("CURSOR_API_KEY=k-123"));
         guest.write_all(b"OK\n").await.unwrap();
         drop(guest);
@@ -278,8 +302,7 @@ mod tests {
         let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut first = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let mut blob = String::new();
-        first.read_to_string(&mut blob).await.unwrap();
+        let blob = read_framed_blob(&mut first).await;
         // The listener retired on accept: a second connect must fail even
         // before the first connection acks.
         let second = tokio::net::UnixStream::connect(&path).await;
@@ -299,8 +322,7 @@ mod tests {
 
         // A guest that connects, reads, and vanishes without acking.
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let mut blob = String::new();
-        guest.read_to_string(&mut blob).await.unwrap();
+        let blob = read_framed_blob(&mut guest).await;
         // Hold the connection open, silent: the gate must not read a socket
         // write as delivery.
         let err = delivery
@@ -318,8 +340,7 @@ mod tests {
         let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let mut blob = String::new();
-        guest.read_to_string(&mut blob).await.unwrap();
+        let blob = read_framed_blob(&mut guest).await;
         guest.write_all(b"NO\n").await.unwrap();
         drop(guest);
 
