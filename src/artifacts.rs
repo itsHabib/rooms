@@ -454,19 +454,26 @@ impl FlowAccumulator {
 }
 
 /// Extract the egress flow from an Ethernet frame, or `None` when it is not
-/// guest-originated egress. Filters, in order: non-IPv4 ethertype (ARP, IPv6),
-/// a source that isn't the guest, a gateway-local destination (the /30 peer or
-/// the guest itself), non-TCP/UDP, and DHCP client/server ports.
+/// egress. Filters, in order: non-IPv4 ethertype (ARP, IPv6), a gateway-local
+/// destination (the /30 peer or the guest itself), non-TCP/UDP, and DHCP
+/// client/server ports.
+///
+/// Egress is keyed on the *destination*, never on a trusted source. A
+/// root-compromised guest can forge the IPv4 source address, but the packet
+/// still physically leaves the tap toward the destination it wants to reach —
+/// so keying on `src_ip == guest` would let the guest suppress its own egress
+/// from the summary by spoofing the source. The destination it contacts is
+/// what leaves the room, and it's what the raw `witness.pcap` records; the
+/// summary keys on the same thing to keep the same suppression-resistance.
+/// Return traffic (destined to the guest) is excluded by the local-destination
+/// check below, which is why source is not needed to tell direction here.
 fn parse_guest_flow(frame: &[u8], local: GatewayLocal) -> Option<Flow> {
     let ethertype = u16::from_be_bytes(frame.get(12..14)?.try_into().ok()?);
     if ethertype != ETHERTYPE_IPV4 {
         return None;
     }
     let ip = frame.get(ETHERNET_HEADER_LEN..)?;
-    let (src_ip, dst_ip, proto, l4) = parse_ipv4(ip)?;
-    if src_ip != local.guest {
-        return None;
-    }
+    let (_src_ip, dst_ip, proto, l4) = parse_ipv4(ip)?;
     if dst_ip == local.gateway || dst_ip == local.guest {
         return None;
     }
@@ -1270,6 +1277,28 @@ mod tests {
             assert!(!w.capture_complete, "truncation must be visible");
             assert_eq!(w.destinations.len(), 1);
             assert_eq!(w.destinations[0].port, 80);
+        }
+
+        #[test]
+        fn spoofed_source_egress_is_still_counted() {
+            // The threat model is a root-compromised guest. It can forge the
+            // IPv4 source address, but the packet still leaves the tap toward
+            // its real destination and lands in witness.pcap. The summary keys
+            // on the destination, not a trusted source, so it can't be
+            // suppressed by spoofing — matching the raw capture's guarantee.
+            let dst = Ipv4Addr::new(203, 0, 113, 9);
+            let spoofed_src = Ipv4Addr::new(10, 0, 0, 99); // not local().guest
+            let mut pcap = pcap_header();
+            pcap.extend(record(&frame(spoofed_src, dst, 6, 443, b"")));
+
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert!(
+                w.destinations
+                    .iter()
+                    .any(|d| d.ip == "203.0.113.9" && d.port == 443),
+                "egress with a spoofed source must still be recorded: {:?}",
+                w.destinations
+            );
         }
 
         #[test]

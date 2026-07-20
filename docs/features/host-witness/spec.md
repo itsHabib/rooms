@@ -47,8 +47,15 @@ boundary.
    - `capture_complete`: bool — false if capture started late, died early, or
      hit the size cap (truncation must be *visible*, never silent).
    - `destinations`: deduplicated list of `{ip, port, proto, packets}` for
-     guest-originated flows (exclude gateway-local traffic: ARP, the host-side
-     /30 peer, DHCP noise).
+     egress flows, **keyed on the destination, never on a trusted source**.
+     A root-compromised guest can forge its IPv4 source address, but the packet
+     still leaves the tap toward its real destination; keying on `src == guest`
+     would let the guest suppress its own egress from the summary by spoofing.
+     Egress = an IPv4 TCP/UDP frame whose destination is not gateway-local (the
+     host-side /30 peer or the guest itself); ARP/IPv6 and DHCP client/server
+     ports are excluded as link-local noise. Return traffic (destined to the
+     guest) is excluded by the non-local-destination rule, so direction never
+     depends on the forgeable source.
    - `dns_queries`: best-effort list of queried names (from port-53 payloads),
      empty when none observed.
 6. **Lifecycle events.** Emit `witness_started {tap}` and
