@@ -243,6 +243,349 @@ pub fn parse_changeset_stream(raw: &[u8]) -> Changeset {
     changeset
 }
 
+/// Relative path of the host-witness summary under an `out/` directory.
+pub const WITNESS_JSON: &str = "witness.json";
+
+/// Relative path of the raw host-witness capture under an `out/` directory.
+pub const WITNESS_PCAP: &str = "witness.pcap";
+
+/// Schema version for `witness.json` (independent of `result.json`).
+pub const WITNESS_SCHEMA_VERSION: u32 = 1;
+
+/// One egress destination the guest contacted, keyed on `(ip, port, proto)`;
+/// `packets` counts guest-originated frames (volume, not success — a lone SYN
+/// still records the destination).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Destination {
+    pub ip: String,
+    pub port: u16,
+    pub proto: String,
+    pub packets: u64,
+}
+
+/// Host-side egress evidence for one room, derived from `witness.pcap`.
+///
+/// Observed outside the guest's trust boundary (packets physically transiting
+/// the tap — a compromised guest can neither forge nor suppress them).
+/// `capture_complete` is the honesty bit: false whenever the raw capture may be
+/// partial (started late, died early, or hit the size cap), so truncation is
+/// never read as exhaustive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Witness {
+    pub schema_version: u32,
+    pub tap: String,
+    pub capture_complete: bool,
+    pub destinations: Vec<Destination>,
+    pub dns_queries: Vec<String>,
+}
+
+impl Witness {
+    /// An empty witness for `tap` with the given completeness — the summary of
+    /// a capture that produced no guest-originated egress (or none parseable).
+    #[must_use]
+    pub const fn empty(tap: String, capture_complete: bool) -> Self {
+        Self {
+            schema_version: WITNESS_SCHEMA_VERSION,
+            tap,
+            capture_complete,
+            destinations: Vec::new(),
+            dns_queries: Vec::new(),
+        }
+    }
+}
+
+/// The room's own /30 endpoints, excluded from a summary as non-egress.
+///
+/// Traffic to the gateway (host-side tap peer) or the guest itself never leaves
+/// the room's link. `main` supplies these to [`summarize_pcap`], keeping the
+/// parser free of network knowledge.
+#[derive(Debug, Clone, Copy)]
+pub struct GatewayLocal {
+    pub gateway: std::net::Ipv4Addr,
+    pub guest: std::net::Ipv4Addr,
+}
+
+/// Summarize a raw libpcap capture into a [`Witness`].
+///
+/// Total by construction — it reads adversary-adjacent bytes, so every
+/// short/garbled record is skipped, never panicked on. Only guest-originated
+/// IPv4 TCP/UDP frames count; ARP, DHCP (UDP 67/68), and gateway-local /30
+/// peers are excluded as link-local noise. `complete` threads through the
+/// capture's completeness. The link layer is assumed Ethernet (DLT 1, what
+/// `tcpdump -i <tap>` produces); any other link type yields an empty set rather
+/// than misparsing raw bytes as frames.
+#[must_use]
+pub fn summarize_pcap(raw: &[u8], tap: &str, local: GatewayLocal, complete: bool) -> Witness {
+    let Some((byte_order, mut rest)) = parse_pcap_global_header(raw) else {
+        return Witness::empty(tap.to_owned(), complete);
+    };
+    let mut acc = FlowAccumulator::new(local);
+    while let Some((packet, tail)) = next_packet(rest, byte_order) {
+        rest = tail;
+        acc.observe(packet);
+    }
+    acc.into_witness(tap.to_owned(), complete)
+}
+
+/// Byte order of a pcap file, decided by its magic number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteOrder {
+    Little,
+    Big,
+}
+
+impl ByteOrder {
+    const fn u32(self, b: [u8; 4]) -> u32 {
+        match self {
+            Self::Little => u32::from_le_bytes(b),
+            Self::Big => u32::from_be_bytes(b),
+        }
+    }
+}
+
+/// Classic libpcap global header length.
+const PCAP_GLOBAL_HEADER_LEN: usize = 24;
+/// Per-packet record header length (`ts_sec`, `ts_usec`, `incl_len`, `orig_len`).
+const PCAP_RECORD_HEADER_LEN: usize = 16;
+/// `LINKTYPE_ETHERNET` — the only link layer `tcpdump -i <tap>` produces here.
+const DLT_ETHERNET: u32 = 1;
+/// Ethernet header length and the IPv4 ethertype.
+const ETHERNET_HEADER_LEN: usize = 14;
+const ETHERTYPE_IPV4: u16 = 0x0800;
+/// IP protocol numbers we summarize.
+const IP_PROTO_TCP: u8 = 6;
+const IP_PROTO_UDP: u8 = 17;
+/// DNS server port; DHCP client/server ports (link-local noise).
+const PORT_DNS: u16 = 53;
+const PORT_DHCP_SERVER: u16 = 67;
+const PORT_DHCP_CLIENT: u16 = 68;
+
+/// Parse and validate the global header, returning the byte order and the
+/// remaining bytes. `None` for a header that is short, has an unknown magic, or
+/// declares a non-Ethernet link layer.
+fn parse_pcap_global_header(raw: &[u8]) -> Option<(ByteOrder, &[u8])> {
+    let header = raw.get(..PCAP_GLOBAL_HEADER_LEN)?;
+    let magic: [u8; 4] = header.get(0..4)?.try_into().ok()?;
+    // 0xa1b2c3d4 microsecond / 0xa1b23c4d nanosecond captures, either endian.
+    let byte_order = match magic {
+        [0xa1, 0xb2, 0xc3, 0xd4] | [0xa1, 0xb2, 0x3c, 0x4d] => ByteOrder::Big,
+        [0xd4, 0xc3, 0xb2, 0xa1] | [0x4d, 0x3c, 0xb2, 0xa1] => ByteOrder::Little,
+        _ => return None,
+    };
+    let linktype = byte_order.u32(header.get(20..24)?.try_into().ok()?);
+    if linktype != DLT_ETHERNET {
+        return None;
+    }
+    Some((byte_order, raw.get(PCAP_GLOBAL_HEADER_LEN..)?))
+}
+
+/// Split the next captured frame off the record stream, returning its bytes and
+/// the tail. `None` at a truncated record header or a record that claims more
+/// bytes than remain — truncation ends the walk, it never panics.
+fn next_packet(rest: &[u8], order: ByteOrder) -> Option<(&[u8], &[u8])> {
+    let header = rest.get(..PCAP_RECORD_HEADER_LEN)?;
+    let incl_len = order.u32(header.get(8..12)?.try_into().ok()?) as usize;
+    let start = PCAP_RECORD_HEADER_LEN;
+    let end = start.checked_add(incl_len)?;
+    let packet = rest.get(start..end)?;
+    Some((packet, rest.get(end..)?))
+}
+
+/// A parsed guest-originated flow tuple plus any DNS name it carried.
+struct Flow {
+    dst_ip: std::net::Ipv4Addr,
+    dst_port: u16,
+    proto: &'static str,
+    dns_name: Option<String>,
+}
+
+/// Accumulate flow tuples into deduplicated, packet-counted destinations, plus
+/// the set of DNS names observed. Excludes non-egress before counting.
+struct FlowAccumulator {
+    local: GatewayLocal,
+    counts: std::collections::BTreeMap<(std::net::Ipv4Addr, u16, &'static str), u64>,
+    dns: std::collections::BTreeSet<String>,
+}
+
+impl FlowAccumulator {
+    const fn new(local: GatewayLocal) -> Self {
+        Self {
+            local,
+            counts: std::collections::BTreeMap::new(),
+            dns: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Fold one captured frame in, ignoring everything that isn't
+    /// guest-originated egress (short frames, non-IPv4, gateway-local peers,
+    /// DHCP noise).
+    fn observe(&mut self, frame: &[u8]) {
+        let Some(flow) = parse_guest_flow(frame, self.local) else {
+            return;
+        };
+        if let Some(name) = flow.dns_name {
+            self.dns.insert(name);
+        }
+        *self
+            .counts
+            .entry((flow.dst_ip, flow.dst_port, flow.proto))
+            .or_insert(0) += 1;
+    }
+
+    fn into_witness(self, tap: String, capture_complete: bool) -> Witness {
+        let destinations = self
+            .counts
+            .into_iter()
+            .map(|((ip, port, proto), packets)| Destination {
+                ip: ip.to_string(),
+                port,
+                proto: proto.to_owned(),
+                packets,
+            })
+            .collect();
+        Witness {
+            schema_version: WITNESS_SCHEMA_VERSION,
+            tap,
+            capture_complete,
+            destinations,
+            dns_queries: self.dns.into_iter().collect(),
+        }
+    }
+}
+
+/// Extract the egress flow from an Ethernet frame, or `None` when it is not
+/// egress. Filters, in order: non-IPv4 ethertype (ARP, IPv6), a gateway-local
+/// destination (the /30 peer or the guest itself), non-TCP/UDP, and DHCP
+/// client/server ports.
+///
+/// Egress is keyed on the *destination*, never on a trusted source. A
+/// root-compromised guest can forge the IPv4 source address, but the packet
+/// still physically leaves the tap toward the destination it wants to reach —
+/// so keying on `src_ip == guest` would let the guest suppress its own egress
+/// from the summary by spoofing the source. The destination it contacts is
+/// what leaves the room, and it's what the raw `witness.pcap` records; the
+/// summary keys on the same thing to keep the same suppression-resistance.
+/// Return traffic (destined to the guest) is excluded by the local-destination
+/// check below, which is why source is not needed to tell direction here.
+fn parse_guest_flow(frame: &[u8], local: GatewayLocal) -> Option<Flow> {
+    let ethertype = u16::from_be_bytes(frame.get(12..14)?.try_into().ok()?);
+    if ethertype != ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = frame.get(ETHERNET_HEADER_LEN..)?;
+    let (_src_ip, dst_ip, proto, l4) = parse_ipv4(ip)?;
+    if dst_ip == local.gateway || dst_ip == local.guest {
+        return None;
+    }
+    let (dst_port, payload, proto_str) = parse_l4(proto, l4)?;
+    if dst_port == PORT_DHCP_SERVER || dst_port == PORT_DHCP_CLIENT {
+        return None;
+    }
+    let dns_name = (dst_port == PORT_DNS)
+        .then(|| parse_dns_qname(payload))
+        .flatten();
+    Some(Flow {
+        dst_ip,
+        dst_port,
+        proto: proto_str,
+        dns_name,
+    })
+}
+
+/// Parse an IPv4 packet into `(src, dst, protocol, l4_payload)`. Honors IHL for
+/// the header length; `None` on a short header, a non-IPv4 version, or an IHL
+/// that runs past the buffer.
+fn parse_ipv4(ip: &[u8]) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr, u8, &[u8])> {
+    let version_ihl = ip.first()?;
+    if version_ihl >> 4 != 4 {
+        return None;
+    }
+    let ihl = usize::from(version_ihl & 0x0f).checked_mul(4)?;
+    if ihl < 20 {
+        return None;
+    }
+    // Non-initial fragments (fragment offset != 0, the low 13 bits of bytes
+    // 6-7) carry no L4 header — they are raw payload continuation. Parsing one
+    // as if it began with ports would let an adversarial guest invent bogus
+    // destinations by fragmenting egress, so skip it. The first fragment
+    // (offset 0) always holds the L4 ports, so the real destination is still
+    // recorded; full reassembly is out of scope (the raw pcap holds it all).
+    let frag_off = u16::from_be_bytes(ip.get(6..8)?.try_into().ok()?) & 0x1fff;
+    if frag_off != 0 {
+        return None;
+    }
+    let proto = *ip.get(9)?;
+    let src = octets(ip.get(12..16)?)?;
+    let dst = octets(ip.get(16..20)?)?;
+    let l4 = ip.get(ihl..)?;
+    Some((src, dst, proto, l4))
+}
+
+/// Parse a TCP/UDP header into `(dst_port, payload, proto_str)`. `None` for a
+/// protocol we don't summarize or a header shorter than its port fields.
+fn parse_l4(proto: u8, l4: &[u8]) -> Option<(u16, &[u8], &'static str)> {
+    match proto {
+        IP_PROTO_TCP => {
+            let dst_port = u16::from_be_bytes(l4.get(2..4)?.try_into().ok()?);
+            // The payload is best-effort: a first fragment truncated before the
+            // data-offset byte still yields the port (bytes 2-4) — don't drop
+            // the destination just because there's no body to mine for DNS.
+            let payload = l4
+                .get(12)
+                .map(|b| usize::from(b >> 4).saturating_mul(4))
+                .and_then(|off| l4.get(off..))
+                .unwrap_or(&[]);
+            Some((dst_port, payload, "tcp"))
+        }
+        IP_PROTO_UDP => {
+            let dst_port = u16::from_be_bytes(l4.get(2..4)?.try_into().ok()?);
+            let payload = l4.get(8..).unwrap_or(&[]);
+            Some((dst_port, payload, "udp"))
+        }
+        _ => None,
+    }
+}
+
+/// Build an `Ipv4Addr` from a 4-byte slice.
+fn octets(bytes: &[u8]) -> Option<std::net::Ipv4Addr> {
+    let o: [u8; 4] = bytes.try_into().ok()?;
+    Some(std::net::Ipv4Addr::from(o))
+}
+
+/// Extract the first question name from a DNS message payload (best-effort).
+///
+/// Reads the QNAME label sequence after the 12-byte header; returns the
+/// dotted name (e.g. `example.com`). `None` on a short payload, a zero-question
+/// message, or a compression pointer in the question (queries don't use them).
+/// Stays total: a malformed length byte ends the name rather than over-reading.
+fn parse_dns_qname(payload: &[u8]) -> Option<String> {
+    let qdcount = u16::from_be_bytes(payload.get(4..6)?.try_into().ok()?);
+    if qdcount == 0 {
+        return None;
+    }
+    let mut labels = Vec::new();
+    let mut pos = 12usize;
+    loop {
+        let len = usize::from(*payload.get(pos)?);
+        if len == 0 {
+            break;
+        }
+        // A compression pointer (top two bits set) can't be resolved from the
+        // question alone; treat the name as unparseable rather than guessing.
+        if len & 0xc0 != 0 {
+            return None;
+        }
+        pos = pos.checked_add(1)?;
+        let label = payload.get(pos..pos.checked_add(len)?)?;
+        labels.push(String::from_utf8_lossy(label).into_owned());
+        pos = pos.checked_add(len)?;
+    }
+    if labels.is_empty() {
+        return None;
+    }
+    Some(labels.join("."))
+}
+
 /// Validated artifact bundle loaded from an `out/` directory on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerArtifacts {
@@ -718,6 +1061,299 @@ mod tests {
             .await
             .expect_err("absolute path should be rejected");
         assert_eq!(err, ArtifactsError::UnsafeReference(abs));
+    }
+
+    mod witness_summary {
+        #![allow(
+            clippy::indexing_slicing,
+            reason = "test module: indexing a just-asserted-nonempty vec is clear"
+        )]
+
+        use std::net::Ipv4Addr;
+
+        use super::super::{
+            summarize_pcap, GatewayLocal, Witness, ETHERNET_HEADER_LEN, WITNESS_SCHEMA_VERSION,
+        };
+
+        /// The slot-1 /30: gateway `.5`, guest `.6` — the addresses a witness
+        /// treats as gateway-local and excludes from the egress summary.
+        fn local() -> GatewayLocal {
+            GatewayLocal {
+                gateway: Ipv4Addr::new(172, 16, 0, 5),
+                guest: Ipv4Addr::new(172, 16, 0, 6),
+            }
+        }
+
+        /// A classic little-endian libpcap global header declaring Ethernet.
+        fn pcap_header() -> Vec<u8> {
+            let mut h = Vec::new();
+            h.extend_from_slice(&[0xd4, 0xc3, 0xb2, 0xa1]); // magic (LE, microsecond)
+            h.extend_from_slice(&2u16.to_le_bytes()); // version major
+            h.extend_from_slice(&4u16.to_le_bytes()); // version minor
+            h.extend_from_slice(&0i32.to_le_bytes()); // thiszone
+            h.extend_from_slice(&0u32.to_le_bytes()); // sigfigs
+            h.extend_from_slice(&65535u32.to_le_bytes()); // snaplen
+            h.extend_from_slice(&1u32.to_le_bytes()); // linktype = DLT_ETHERNET
+            h
+        }
+
+        /// Wrap one Ethernet frame in a pcap record header (LE).
+        fn record(frame: &[u8]) -> Vec<u8> {
+            let mut r = Vec::new();
+            r.extend_from_slice(&0u32.to_le_bytes()); // ts_sec
+            r.extend_from_slice(&0u32.to_le_bytes()); // ts_usec
+            let len = u32::try_from(frame.len()).expect("frame len fits u32");
+            r.extend_from_slice(&len.to_le_bytes()); // incl_len
+            r.extend_from_slice(&len.to_le_bytes()); // orig_len
+            r.extend_from_slice(frame);
+            r
+        }
+
+        /// Build an Ethernet + IPv4 + (TCP|UDP) frame from `src` to `dst:port`,
+        /// carrying `payload` as the L4 body. `proto` is 6 (TCP) or 17 (UDP).
+        fn frame(
+            src: Ipv4Addr,
+            dst: Ipv4Addr,
+            proto: u8,
+            dst_port: u16,
+            payload: &[u8],
+        ) -> Vec<u8> {
+            let mut eth = Vec::new();
+            eth.extend_from_slice(&[0x02, 0, 0, 0, 0, 1]); // dst MAC
+            eth.extend_from_slice(&[0x02, 0, 0, 0, 0, 2]); // src MAC
+            eth.extend_from_slice(&0x0800u16.to_be_bytes()); // ethertype IPv4
+
+            let l4 = l4_header(proto, dst_port, payload);
+            let total = 20 + l4.len();
+            let mut ip = Vec::new();
+            ip.push(0x45); // version 4, IHL 5
+            ip.push(0); // DSCP/ECN
+            ip.extend_from_slice(&u16::try_from(total).unwrap_or(0).to_be_bytes());
+            ip.extend_from_slice(&0u16.to_be_bytes()); // id
+            ip.extend_from_slice(&0u16.to_be_bytes()); // flags/frag
+            ip.push(64); // ttl
+            ip.push(proto);
+            ip.extend_from_slice(&0u16.to_be_bytes()); // checksum (unchecked)
+            ip.extend_from_slice(&src.octets());
+            ip.extend_from_slice(&dst.octets());
+            ip.extend_from_slice(&l4);
+
+            eth.extend_from_slice(&ip);
+            eth
+        }
+
+        #[allow(
+            clippy::branches_sharing_code,
+            reason = "the trailing checksum happens to coincide, but the TCP/UDP header shapes differ; hoisting it obscures the layouts"
+        )]
+        fn l4_header(proto: u8, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+            let mut l4 = Vec::new();
+            l4.extend_from_slice(&40000u16.to_be_bytes()); // src port
+            l4.extend_from_slice(&dst_port.to_be_bytes()); // dst port
+            if proto == 6 {
+                l4.extend_from_slice(&0u32.to_be_bytes()); // seq
+                l4.extend_from_slice(&0u32.to_be_bytes()); // ack
+                l4.push(0x50); // data offset 5 words, no flags-nibble
+                l4.push(0); // flags
+                l4.extend_from_slice(&0u16.to_be_bytes()); // window
+                l4.extend_from_slice(&0u16.to_be_bytes()); // checksum
+                l4.extend_from_slice(&0u16.to_be_bytes()); // urgent
+            } else {
+                let ulen = u16::try_from(8 + payload.len()).unwrap_or(8);
+                l4.extend_from_slice(&ulen.to_be_bytes()); // length
+                l4.extend_from_slice(&0u16.to_be_bytes()); // checksum
+            }
+            l4.extend_from_slice(payload);
+            l4
+        }
+
+        /// A minimal DNS query payload asking for `example.com` (one question).
+        fn dns_query_example_com() -> Vec<u8> {
+            let mut p = Vec::new();
+            p.extend_from_slice(&0x1234u16.to_be_bytes()); // id
+            p.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: standard query
+            p.extend_from_slice(&1u16.to_be_bytes()); // qdcount = 1
+            p.extend_from_slice(&0u16.to_be_bytes()); // ancount
+            p.extend_from_slice(&0u16.to_be_bytes()); // nscount
+            p.extend_from_slice(&0u16.to_be_bytes()); // arcount
+            for label in ["example", "com"] {
+                p.push(u8::try_from(label.len()).expect("label len"));
+                p.extend_from_slice(label.as_bytes());
+            }
+            p.push(0); // root label
+            p.extend_from_slice(&1u16.to_be_bytes()); // qtype A
+            p.extend_from_slice(&1u16.to_be_bytes()); // qclass IN
+            p
+        }
+
+        #[test]
+        fn empty_capture_yields_empty_witness() {
+            // Header only, no records: a valid-but-silent capture.
+            let w = summarize_pcap(&pcap_header(), "tap-fc1", local(), true);
+            assert_eq!(w.schema_version, WITNESS_SCHEMA_VERSION);
+            assert_eq!(w.tap, "tap-fc1");
+            assert!(w.capture_complete);
+            assert!(w.destinations.is_empty());
+            assert!(w.dns_queries.is_empty());
+        }
+
+        #[test]
+        fn garbage_or_missing_header_is_empty_not_a_panic() {
+            // Too short for a header, and a bad magic: both total-parse to empty.
+            let short = summarize_pcap(b"\xd4\xc3", "tap-fc1", local(), false);
+            assert_eq!(short, Witness::empty("tap-fc1".to_owned(), false));
+            let bad_magic = summarize_pcap(&[0u8; 24], "tap-fc1", local(), true);
+            assert!(bad_magic.destinations.is_empty());
+        }
+
+        #[test]
+        fn counts_guest_egress_and_dedups_by_tuple() {
+            let dst = Ipv4Addr::new(93, 184, 216, 34);
+            let mut pcap = pcap_header();
+            // Two packets to the same tcp:80 tuple → one destination, count 2.
+            pcap.extend(record(&frame(local().guest, dst, 6, 80, b"")));
+            pcap.extend(record(&frame(local().guest, dst, 6, 80, b"")));
+            // One packet to a different port → a second destination.
+            pcap.extend(record(&frame(local().guest, dst, 6, 443, b"")));
+
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert_eq!(w.destinations.len(), 2, "deduped by (ip,port,proto)");
+            let http = w
+                .destinations
+                .iter()
+                .find(|d| d.port == 80)
+                .expect("port 80 destination present");
+            assert_eq!(http.ip, "93.184.216.34");
+            assert_eq!(http.proto, "tcp");
+            assert_eq!(http.packets, 2);
+        }
+
+        #[test]
+        fn extracts_dns_query_names() {
+            let resolver = Ipv4Addr::new(1, 1, 1, 1);
+            let mut pcap = pcap_header();
+            pcap.extend(record(&frame(
+                local().guest,
+                resolver,
+                17,
+                53,
+                &dns_query_example_com(),
+            )));
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert_eq!(w.dns_queries, vec!["example.com".to_owned()]);
+            // The DNS packet is still egress: the resolver is a destination.
+            assert!(w
+                .destinations
+                .iter()
+                .any(|d| d.ip == "1.1.1.1" && d.port == 53));
+        }
+
+        #[test]
+        fn excludes_gateway_local_and_dhcp_noise() {
+            let mut pcap = pcap_header();
+            // To the gateway (the /30 host peer): not egress.
+            pcap.extend(record(&frame(local().guest, local().gateway, 6, 22, b"")));
+            // DHCP discover to the broadcast server port: link-local noise.
+            pcap.extend(record(&frame(
+                local().guest,
+                Ipv4Addr::BROADCAST,
+                17,
+                67,
+                b"",
+            )));
+            // A reply *from* the gateway toward the guest: not guest-originated.
+            pcap.extend(record(&frame(
+                local().gateway,
+                local().guest,
+                6,
+                40000,
+                b"",
+            )));
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert!(
+                w.destinations.is_empty(),
+                "gateway-local, DHCP, and inbound frames are all excluded: {:?}",
+                w.destinations
+            );
+        }
+
+        #[test]
+        fn truncated_record_ends_the_walk_keeping_prior_flows() {
+            let dst = Ipv4Addr::new(93, 184, 216, 34);
+            let mut pcap = pcap_header();
+            pcap.extend(record(&frame(local().guest, dst, 6, 80, b"")));
+            // A record header claiming more bytes than remain (truncated capture).
+            pcap.extend_from_slice(&0u32.to_le_bytes()); // ts_sec
+            pcap.extend_from_slice(&0u32.to_le_bytes()); // ts_usec
+            pcap.extend_from_slice(&9999u32.to_le_bytes()); // incl_len (lies)
+            pcap.extend_from_slice(&9999u32.to_le_bytes()); // orig_len
+            pcap.extend_from_slice(b"\x01\x02\x03"); // only a few bytes follow
+
+            // capture_complete reflects the caller's outcome (truncation is
+            // visible), and the flow captured before the tear survives.
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), false);
+            assert!(!w.capture_complete, "truncation must be visible");
+            assert_eq!(w.destinations.len(), 1);
+            assert_eq!(w.destinations[0].port, 80);
+        }
+
+        #[test]
+        fn non_initial_fragments_do_not_invent_destinations() {
+            // A non-initial IPv4 fragment is raw payload continuation with no
+            // L4 header. An adversarial guest could fragment egress so a
+            // mid-payload byte pair reads as a bogus destination port; the
+            // summary must skip such fragments. The first fragment still
+            // carries the real port, and the raw pcap holds the full traffic.
+            let dst = Ipv4Addr::new(198, 51, 100, 7);
+            let mut f = frame(local().guest, dst, 6, 80, b"payloadbytes");
+            // Set a non-zero fragment offset in the IP header (bytes 6-7, and
+            // the IP header starts at the Ethernet header length).
+            let frag = 100u16.to_be_bytes();
+            f[ETHERNET_HEADER_LEN + 6] = frag[0];
+            f[ETHERNET_HEADER_LEN + 7] = frag[1];
+            let mut pcap = pcap_header();
+            pcap.extend(record(&f));
+
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert!(
+                w.destinations.is_empty(),
+                "a non-initial fragment must not be summarized as a destination: {:?}",
+                w.destinations
+            );
+        }
+
+        #[test]
+        fn spoofed_source_egress_is_still_counted() {
+            // The threat model is a root-compromised guest. It can forge the
+            // IPv4 source address, but the packet still leaves the tap toward
+            // its real destination and lands in witness.pcap. The summary keys
+            // on the destination, not a trusted source, so it can't be
+            // suppressed by spoofing — matching the raw capture's guarantee.
+            let dst = Ipv4Addr::new(203, 0, 113, 9);
+            let spoofed_src = Ipv4Addr::new(10, 0, 0, 99); // not local().guest
+            let mut pcap = pcap_header();
+            pcap.extend(record(&frame(spoofed_src, dst, 6, 443, b"")));
+
+            let w = summarize_pcap(&pcap, "tap-fc1", local(), true);
+            assert!(
+                w.destinations
+                    .iter()
+                    .any(|d| d.ip == "203.0.113.9" && d.port == 443),
+                "egress with a spoofed source must still be recorded: {:?}",
+                w.destinations
+            );
+        }
+
+        #[test]
+        fn non_ethernet_linktype_is_not_misparsed() {
+            // Flip the linktype to raw IP (101): the parser refuses rather than
+            // reading IP bytes as Ethernet frames.
+            let mut header = pcap_header();
+            header.truncate(20);
+            header.extend_from_slice(&101u32.to_le_bytes());
+            let w = summarize_pcap(&header, "tap-fc1", local(), true);
+            assert!(w.destinations.is_empty());
+        }
     }
 
     mod path_validation_properties {

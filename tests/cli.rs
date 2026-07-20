@@ -44,3 +44,50 @@ fn run_without_image_fails_fast() {
         .failure()
         .stderr(predicate::str::contains("--image"));
 }
+
+#[test]
+fn witness_without_tcpdump_fails_closed_before_boot() {
+    // The witness tcpdump check is the earliest guard in `run`, before kernel
+    // validation or any slot claim — so with PATH pointing at an empty dir (no
+    // tcpdump) the run must fail with a clear message and never reach boot. This
+    // is the acceptance criterion "`--witness` on a host without tcpdump fails
+    // before VMM start"; it needs no KVM, so it runs in `make check`.
+    let empty = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    Command::cargo_bin("rooms")
+        .unwrap()
+        .env("PATH", empty.path())
+        .args([
+            "run",
+            "--witness",
+            "--out",
+            out.path().to_str().unwrap(),
+            "--image",
+            "/tmp/nonexistent-rooms-image",
+            "--command",
+            "true",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--witness").and(predicate::str::contains("tcpdump")));
+}
+
+#[test]
+fn witness_requires_out() {
+    // `--witness` has nowhere to persist without `--out`, so it must be a parse
+    // error — never a run that captures and then silently discards the
+    // evidence. clap enforces the requirement before any run logic.
+    Command::cargo_bin("rooms")
+        .unwrap()
+        .args([
+            "run",
+            "--witness",
+            "--image",
+            "/tmp/nonexistent-rooms-image",
+            "--command",
+            "true",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--out"));
+}

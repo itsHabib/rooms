@@ -72,6 +72,14 @@ pub enum Event {
     CollectionDone,
     /// Artifact collection failed or timed out; the run's own outcome stands.
     CollectionFailed { error: String },
+    /// Host-side egress capture began on the room's own tap, before the guest
+    /// could transmit. Emitted only under `--witness`.
+    WitnessStarted { tap: String },
+    /// Host-side egress capture finished and the summary was derived: how many
+    /// distinct destinations the guest contacted, and whether the raw capture
+    /// was complete (false if it started late, died early, or hit the size cap).
+    /// Emitted only under `--witness`.
+    WitnessDone { destinations: usize, complete: bool },
     /// The room was torn down: firecracker reaped, workdir removed, slot freed.
     CleanupDone,
     /// Teardown reported an error; `rooms gc` owns the retry.

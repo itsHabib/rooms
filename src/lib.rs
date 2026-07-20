@@ -14,6 +14,7 @@ pub mod rootfs;
 pub mod runner;
 pub mod slot;
 pub mod transport;
+pub mod witness;
 
 pub use config::RoomsConfig;
 pub use error::RoomsError;
