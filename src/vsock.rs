@@ -302,7 +302,7 @@ mod tests {
         let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut first = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let blob = read_framed_blob(&mut first).await;
+        let _blob = read_framed_blob(&mut first).await;
         // The listener retired on accept: a second connect must fail even
         // before the first connection acks.
         let second = tokio::net::UnixStream::connect(&path).await;
@@ -322,7 +322,7 @@ mod tests {
 
         // A guest that connects, reads, and vanishes without acking.
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let blob = read_framed_blob(&mut guest).await;
+        let _blob = read_framed_blob(&mut guest).await;
         // Hold the connection open, silent: the gate must not read a socket
         // write as delivery.
         let err = delivery
@@ -340,7 +340,7 @@ mod tests {
         let delivery = serve_one_shot(&path, payload(), None).unwrap();
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        let blob = read_framed_blob(&mut guest).await;
+        let _blob = read_framed_blob(&mut guest).await;
         guest.write_all(b"NO\n").await.unwrap();
         drop(guest);
 
