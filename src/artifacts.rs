@@ -330,9 +330,12 @@ impl Witness {
 /// Fold a room's egress policy into a summarized witness.
 ///
 /// Records the policy and its permitted set, and derives the blocked attempts as
-/// `destinations ∖ permitted` (by exact destination IP). Under `observe` nothing
-/// is enforced, so nothing is blocked. Pure, so the derivation is unit-testable
-/// against a hand-built witness — keeping policy out of the pcap parser.
+/// `destinations ∖ permitted`. Membership is CIDR-aware: a destination is
+/// permitted if it exactly matches a permitted host IP **or** falls within a
+/// permitted CIDR (so a `-d 10.0.0.0/24` ACCEPT doesn't falsely report an
+/// in-range `10.0.0.1` as blocked). Under `observe` nothing is enforced, so
+/// nothing is blocked. Pure, so the derivation is unit-testable against a
+/// hand-built witness — keeping policy out of the pcap parser.
 ///
 /// A `none` run with no destinations yields the proof-of-absence shape: policy
 /// `none`, empty `permitted`, empty `blocked`.
@@ -342,12 +345,54 @@ pub fn record_egress(witness: &mut Witness, policy: EgressPolicy, permitted: Vec
         EgressPolicy::None | EgressPolicy::Allowlist => witness
             .destinations
             .iter()
-            .filter(|dest| !permitted.contains(&dest.ip))
+            .filter(|dest| !ip_permitted(&dest.ip, &permitted))
             .cloned()
             .collect(),
     };
     witness.egress_policy = policy;
     witness.permitted = permitted;
+}
+
+/// True when `ip` (a dotted-quad string) is permitted by `permitted` — an exact
+/// match against a plain-IP entry, or containment within a CIDR entry
+/// (`a.b.c.d/n`). IPv4 only, matching the pool's addressing; a non-parseable
+/// `ip` or entry simply never matches.
+fn ip_permitted(ip: &str, permitted: &[String]) -> bool {
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    permitted.iter().any(|entry| entry_matches(addr, entry))
+}
+
+/// True when `addr` matches one permitted entry: an exact IP, or a CIDR whose
+/// prefix contains it.
+fn entry_matches(addr: std::net::Ipv4Addr, entry: &str) -> bool {
+    if let Some((net, prefix)) = entry.split_once('/') {
+        return cidr_contains(net, prefix, addr);
+    }
+    entry.parse::<std::net::Ipv4Addr>() == Ok(addr)
+}
+
+/// True when `addr` falls within the IPv4 CIDR `net/prefix`. A malformed net or
+/// an out-of-range prefix never matches.
+fn cidr_contains(net: &str, prefix: &str, addr: std::net::Ipv4Addr) -> bool {
+    let Ok(base) = net.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let Ok(bits) = prefix.parse::<u8>() else {
+        return false;
+    };
+    if bits > 32 {
+        return false;
+    }
+    // A /0 permits everything; `u32::MAX << 32` would overflow, so the zero
+    // prefix takes an explicit all-zero mask.
+    let mask: u32 = if bits == 0 {
+        0
+    } else {
+        u32::MAX << (32 - bits)
+    };
+    (u32::from(base) & mask) == (u32::from(addr) & mask)
 }
 
 /// The room's own /30 endpoints, excluded from a summary as non-egress.
@@ -1174,6 +1219,40 @@ mod tests {
             assert_eq!(w.egress_policy, EgressPolicy::Allowlist);
             assert_eq!(w.permitted, vec!["1.2.3.4".to_owned()]);
             assert_eq!(w.blocked, vec![dest("9.9.9.9", 80)]);
+        }
+
+        #[test]
+        fn cidr_allowlist_does_not_falsely_block_in_range_ips() {
+            let mut w = Witness::empty("tap-fc1".to_owned(), true);
+            // 10.0.0.1 is inside the permitted /24; 10.0.1.1 is outside it.
+            w.destinations = vec![dest("10.0.0.1", 443), dest("10.0.1.1", 443)];
+            record_egress(
+                &mut w,
+                EgressPolicy::Allowlist,
+                vec!["10.0.0.0/24".to_owned()],
+            );
+            assert_eq!(
+                w.blocked,
+                vec![dest("10.0.1.1", 443)],
+                "an in-range IP permitted by the -d <cidr> ACCEPT must not read as blocked"
+            );
+        }
+
+        #[test]
+        fn cidr_membership_edges_hold() {
+            use super::super::ip_permitted;
+            let permitted = vec!["10.0.0.0/24".to_owned(), "1.2.3.4".to_owned()];
+            assert!(
+                ip_permitted("10.0.0.255", &permitted),
+                "/24 broadcast is in range"
+            );
+            assert!(!ip_permitted("10.0.1.0", &permitted), "just past the /24");
+            assert!(ip_permitted("1.2.3.4", &permitted), "exact host IP");
+            assert!(!ip_permitted("1.2.3.5", &permitted), "adjacent host IP");
+            // A /0 permits everything; a /32 is an exact single host.
+            assert!(ip_permitted("8.8.8.8", &["0.0.0.0/0".to_owned()]));
+            assert!(ip_permitted("1.2.3.4", &["1.2.3.4/32".to_owned()]));
+            assert!(!ip_permitted("1.2.3.5", &["1.2.3.4/32".to_owned()]));
         }
 
         #[test]

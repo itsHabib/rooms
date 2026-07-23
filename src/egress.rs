@@ -105,8 +105,9 @@ pub fn parse(value: &str) -> Result<Policy, String> {
     ))
 }
 
-/// Parse the comma-separated body of an `allowlist:` policy. An empty list or an
-/// empty entry rejects.
+/// Parse the comma-separated body of an `allowlist:` policy. An empty entry
+/// rejects — and since `split(',')` always yields at least one element, an empty
+/// body (`allowlist:`) is caught by that same empty-entry check.
 fn parse_allowlist(rest: &str) -> Result<Policy, String> {
     let mut dests = Vec::new();
     for entry in rest.split(',') {
@@ -115,9 +116,6 @@ fn parse_allowlist(rest: &str) -> Result<Policy, String> {
             return Err("invalid --egress allowlist: an empty destination in the list".to_owned());
         }
         dests.push(parse_dest(entry)?);
-    }
-    if dests.is_empty() {
-        return Err("invalid --egress allowlist: needs at least one destination".to_owned());
     }
     Ok(Policy::Allowlist(dests))
 }
@@ -419,15 +417,19 @@ pub fn install(tap: &str, plan: &Plan) -> Result<(), String> {
         return Ok(());
     }
     let chain = chain_for_tap(tap).ok_or_else(|| format!("not a pool tap: '{tap}'"))?;
+    // Clean up any stale chain/jump from a prior reuse of this slot index BEFORE
+    // reading the dump: `remove` deletes the stale jump, which shifts every rule
+    // below it up by one. Computing the insert position against the pre-cleanup
+    // dump would then place the fresh jump one rank too low — below the supernet
+    // egress ACCEPT with the normal layout — and `none`/non-allowlisted traffic
+    // would leak. The position must be computed against the post-cleanup chain.
+    remove(tap);
     let dump = dump_forward()?;
     let out_iface = out_iface(&dump).ok_or_else(|| {
         format!("{FWD_CHAIN} has no supernet egress ACCEPT; run setup-tap.sh --host")
     })?;
     let pos = insert_position(&dump)
         .ok_or_else(|| format!("{FWD_CHAIN}: cannot locate the egress ACCEPT to place the jump"))?;
-    // A reused slot index must not inherit a stale chain (append would stack
-    // onto old rules) or a duplicate jump — start from a clean slate.
-    remove(tap);
     run_iptables(&["-N".to_owned(), chain.clone()])?;
     for rule in subchain_rules(&chain, &out_iface, plan.permitted()) {
         run_iptables(&rule)?;
@@ -662,6 +664,32 @@ mod tests {
         // The egress ACCEPT is the 4th -A rule in ENFORCED_FORWARD.
         assert_eq!(insert_position(ENFORCED_FORWARD), Some(4));
         assert_eq!(out_iface(ENFORCED_FORWARD).as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn insert_position_shifts_once_a_stale_jump_is_removed() {
+        // The P1 hazard: a stale jump above the supernet ACCEPT inflates the
+        // ACCEPT's rank. Installing at that *pre-cleanup* rank after removing the
+        // stale jump would land the fresh jump one row too low — below the
+        // ACCEPT → leak. `install` must read the position from the post-cleanup
+        // dump; this pins the arithmetic that makes the ordering matter.
+        let with_stale = concat!(
+            "-N ROOMS_FWD\n",
+            "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP\n",
+            "-A ROOMS_FWD -i tap-fc1 -j ROOMS_EG_1\n",
+            "-A ROOMS_FWD -s 172.16.0.0/24 -o eth0 -j ACCEPT",
+        );
+        let post_cleanup = concat!(
+            "-N ROOMS_FWD\n",
+            "-A ROOMS_FWD -s 172.16.0.0/24 -d 172.16.0.0/24 -j DROP\n",
+            "-A ROOMS_FWD -s 172.16.0.0/24 -o eth0 -j ACCEPT",
+        );
+        assert_eq!(insert_position(with_stale), Some(3));
+        assert_eq!(
+            insert_position(post_cleanup),
+            Some(2),
+            "removing the stale jump shifts the ACCEPT up one — install must use this rank"
+        );
     }
 
     // --- enforcement predicate (isolation.rs style): the load-bearing refutations ---

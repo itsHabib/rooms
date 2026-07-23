@@ -608,6 +608,14 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     result
 }
 
+/// Enforcement works without `--witness`, but the proof-of-absence / blocked
+/// receipt only lands in `witness.json`. Flag the gap rather than requiring it.
+fn warn_egress_without_witness(plan: &egress::Plan, witness: bool) {
+    if plan.enforces() && !witness {
+        warn!("--egress enforcement is active but --witness is not set; no witness.json receipt (permitted/blocked/proof-of-absence) will be produced — add --witness to record it");
+    }
+}
+
 /// The guest network wiring for a claimed pool slot.
 fn network_config_for(slot: &room::Slot) -> firecracker::NetworkConfig {
     firecracker::NetworkConfig {
@@ -658,6 +666,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     // Resolve the egress policy (pinning allowlist hostnames to IPs) BEFORE the
     // claim, so an unresolvable host fails fast without leaking a slot.
     let egress_plan = egress::resolve(&args.egress).map_err(RoomsError::Internal)?;
+    warn_egress_without_witness(&egress_plan, args.witness);
 
     // Every room path derives from the state base; resolve it once up front.
     let state_base = config.resolved_state_base().ok_or_else(|| {
