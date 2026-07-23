@@ -440,21 +440,19 @@ pub fn install(_tap: &str, _plan: &Plan) -> Result<(), String> {
     Err("egress enforcement requires iptables (unix only)".to_owned())
 }
 
-/// Remove a room's egress chain and its `ROOMS_FWD` jump, idempotently and
-/// scoped to the tap's `<k>` — so a double teardown or a gc race never touches a
+/// Remove a room's egress chain and its `ROOMS_FWD` jump, idempotently.
+///
+/// Scoped to the tap's `<k>` — so a double teardown or a gc race never touches a
 /// live sibling's chain, and a tap that never enforced is a clean no-op.
 #[cfg(unix)]
 pub fn remove(tap: &str) {
     let Some(chain) = chain_for_tap(tap) else {
         return;
     };
-    let check = jump_check(tap, &chain);
     // Delete the jump while present — a stale install could have left more than
     // one; the bounded loop clears every copy.
-    while iptables_ok(&check) {
-        let mut del = check.clone();
-        del[0] = "-D".to_owned();
-        if run_iptables(&del).is_err() {
+    while iptables_ok(&jump_args("-C", tap, &chain)) {
+        if run_iptables(&jump_args("-D", tap, &chain)).is_err() {
             break;
         }
     }
@@ -465,11 +463,12 @@ pub fn remove(tap: &str) {
 #[cfg(not(unix))]
 pub const fn remove(_tap: &str) {}
 
-/// The `iptables -C` argument list that tests whether the tap-keyed jump exists.
+/// The `iptables <op>` argument list for the tap-keyed jump — `-C` to test its
+/// presence, `-D` to delete it.
 #[cfg(unix)]
-fn jump_check(tap: &str, chain: &str) -> Vec<String> {
+fn jump_args(op: &str, tap: &str, chain: &str) -> Vec<String> {
     vec![
-        "-C".to_owned(),
+        op.to_owned(),
         FWD_CHAIN.to_owned(),
         "-i".to_owned(),
         tap.to_owned(),
