@@ -41,14 +41,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A stable, well-known egress destination (example.com's canonical address).
-/// Contacting it by raw IP keeps the assertion independent of DNS — which
-/// matters doubly here, since `--egress none` also blocks DNS.
-const TARGET_IP: &str = "93.184.216.34";
+/// A stable, well-known egress destination reachable by raw IP (Cloudflare's
+/// `1.1.1.1`, which answers on :80). A raw IP keeps the assertion independent of
+/// DNS — which matters doubly here, since `--egress none` also blocks DNS.
+/// (example.com's old `93.184.216.34` was renumbered in 2025 and no longer
+/// routes; a live IP keeps the reachability assertion honest.)
+const TARGET_IP: &str = "1.1.1.1";
 
-/// A second reachable IP used as the *denied* destination in the allowlist test
-/// (Cloudflare's resolver — stable and unrelated to `TARGET_IP`).
-const DENIED_IP: &str = "1.1.1.1";
+/// A second, distinct reachable IP used as the *denied* destination in the
+/// allowlist test (Cloudflare's `1.0.0.1`, also live on :80). It must be
+/// reachable-when-allowed so "denied" proves the allowlist blocked it, not that
+/// the host simply couldn't route to a dead address.
+const DENIED_IP: &str = "1.0.0.1";
 
 fn image_path(name: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
