@@ -18,7 +18,7 @@ use ulid::Ulid;
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
 use crate::witness::Capture;
-use crate::{room, transport};
+use crate::{egress, room, transport};
 
 /// Dedicated unprivileged user Firecracker runs as inside the jailer.
 pub const FIRECRACKER_USER: &str = "firecracker";
@@ -414,6 +414,11 @@ pub struct BootRequest<'a> {
     /// before `InstanceStart`; the caller takes the [`crate::vsock::Delivery`]
     /// from the booted VM to gate the workload on the guest's ack.
     pub secrets: Option<&'a crate::vsock::SecretsPayload>,
+    /// The room's egress policy (`rooms run --egress`). An enforcing plan
+    /// installs the per-room `ROOMS_EG_<k>` chain right after the tap is up and
+    /// before the VMM can transmit; [`egress::Plan::Observe`] is the
+    /// non-breaking default (no chain, witness stays observe-only).
+    pub egress: &'a egress::Plan,
 }
 
 /// Boot a Firecracker microVM with the given kernel + rootfs.
@@ -485,6 +490,12 @@ pub async fn boot(
                 .to_owned(),
         )),
     };
+
+    // Install the per-room egress chain once the tap exists and before the VMM,
+    // so it is fail-closed before the guest can transmit — the same posture as
+    // the witness start, and the guard (already owning the tap) unwinds it via
+    // `release_tap` on any failure.
+    install_egress(req.egress, req.slot)?;
 
     let secrets_delivery =
         bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
@@ -573,6 +584,22 @@ async fn start_witness(tap: &str, room_dir: &Path) -> Result<Capture, Firecracke
     Capture::start(tap, room_dir)
         .await
         .map_err(|e| FirecrackerError::Internal(format!("witness: {e}")))
+}
+
+/// Install the room's egress policy on its per-room tap, fail-closed. A no-op for
+/// a non-enforcing plan. Enforcement requires a pool slot: the shared legacy tap
+/// carries other rooms' traffic, so it is not a valid per-room policy surface
+/// (mirrors the witness slot requirement).
+fn install_egress(plan: &egress::Plan, slot: Option<&room::Slot>) -> Result<(), FirecrackerError> {
+    match (plan.enforces(), slot) {
+        (false, _) => Ok(()),
+        (true, Some(slot)) => egress::install(&slot.tap, plan)
+            .map_err(|e| FirecrackerError::Internal(format!("egress: {e}"))),
+        (true, None) => Err(FirecrackerError::Internal(
+            "egress: enforcement requires a pool slot (the per-room tap); refusing on the shared tap"
+                .to_owned(),
+        )),
+    }
 }
 
 /// Create a pool slot's tap: `ip tuntap add`, `ip addr add <gw>/<prefix>`, link
@@ -1521,6 +1548,11 @@ fn send_signal(pid: u32, signal: &str) {
 fn release_tap(tap_name: Option<&str>) {
     let Some(tap) = tap_name else { return };
 
+    // Remove any per-room egress chain + its ROOMS_FWD jump before deleting the
+    // tap — idempotent and scoped to this tap's <k>, so a tap that never
+    // enforced is a clean no-op and a gc race never touches a live sibling.
+    egress::remove(tap);
+
     #[cfg(unix)]
     {
         use std::process::Command;
@@ -2145,6 +2177,7 @@ mod e2e_tests {
 
         let id = mint_room_id();
         let descriptor = crate::room::RoomDescriptor::default();
+        let egress_plan = crate::egress::Plan::Observe;
         let req = BootRequest {
             kernel: &kernel,
             rootfs: &rootfs,
@@ -2155,6 +2188,7 @@ mod e2e_tests {
             descriptor: &descriptor,
             witness: false,
             secrets: None,
+            egress: &egress_plan,
         };
         let mut vm = boot(&req, &config).await.expect("boot should succeed");
 
