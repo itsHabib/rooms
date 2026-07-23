@@ -35,9 +35,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A stable, well-known egress destination (example.com's canonical address).
-/// Contacting it by raw IP keeps the witness assertion independent of DNS.
-const TARGET_IP: &str = "93.184.216.34";
+/// A stable, well-known egress destination reachable by raw IP (Cloudflare's
+/// `1.1.1.1`). A raw IP keeps the witness assertion independent of DNS.
+/// (example.com's old `93.184.216.34` was renumbered in 2025 and no longer
+/// routes.)
+const TARGET_IP: &str = "1.1.1.1";
 
 fn image_path(name: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
