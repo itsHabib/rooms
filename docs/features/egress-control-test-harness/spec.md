@@ -44,13 +44,16 @@ A small typed registry of clearly-fake, marked sentinels — **never real creden
 
 ### 2. Fixture corpus (`tests/fixtures/egress-control/<vector>/<name>/`)
 
-Each fixture is a tiny repo + a `fixture.toml` manifest declaring: the **injected input** (where it sits + its content), the **sentinel target** it tries to exfil, and a paired **benign control** (same shape, no injection). Manifest skeleton (settle the schema here so the impl agent doesn't invent it):
-```toml
-sentinel_id  = "sentinel_aws_key"      # references a registry entry (§1)
-exfil_target = "192.0.2.1:80"          # RFC-5737 TEST-NET-1, or an *.invalid host
-injection    = { kind = "env", name = "SENTINEL_AWS_KEY" }  # or { kind = "file", path = "creds.txt" }
-probe        = "probe.sh"              # the exfil-probe command run in the room
-control      = "control/"              # benign variant dir (same shape, no injection)
+Each fixture is a tiny repo + a `fixture.json` manifest declaring: the **injected input** (where it sits + its content), the **sentinel target** it tries to exfil, and a paired **benign control** (same shape, no injection). The manifest is **JSON**, not TOML — the repo is JSON-native (`result.json` / `witness.json` / `changeset.json`) and `serde_json` is already a dependency, so JSON avoids adding a `toml` crate for the same schema (parsed by `egress_audit::FixtureManifest`). Manifest skeleton (settle the schema here so the impl agent doesn't invent it):
+```json
+{
+  "sentinel_id":  "sentinel_aws_key",                          // references a registry entry (§1)
+  "exfil_target": "192.0.2.1:80",                              // RFC-5737 TEST-NET-1, or an *.invalid host
+  "injection":    { "kind": "env", "name": "SENTINEL_AWS_KEY" }, // or { "kind": "file", "path": "creds.txt" }
+  "probe":        "probe.sh",                                  // the exfil-probe command run in the room
+  "control":      "control/",                                  // benign variant dir (same shape, no injection)
+  "vector":       "readme"                                     // the injection vector
+}
 ```
 ≥6 fixtures across ≥3 vectors. Vectors (each a distinct place an agent reads):
 - `readme` — an instruction embedded in `README.md`.
