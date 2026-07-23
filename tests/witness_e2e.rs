@@ -159,7 +159,15 @@ fn witness_records_egress_destination_on_the_host_tap() {
     );
 
     let witness = read_witness(&out_dir);
-    assert_eq!(witness["schema_version"], 1);
+    assert_eq!(witness["schema_version"], 2);
+    // No --egress ⇒ observe-only: the record shows the observe policy and an
+    // empty permitted set (the schema-2 fields), with nothing blocked.
+    assert_eq!(witness["egress_policy"], "observe");
+    assert_eq!(
+        witness["blocked"].as_array().expect("blocked array").len(),
+        0,
+        "observe enforces nothing, so nothing is blocked"
+    );
     assert_eq!(
         witness["capture_complete"], true,
         "a clean capture is complete; witness:\n{witness:#}"

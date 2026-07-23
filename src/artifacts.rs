@@ -250,7 +250,26 @@ pub const WITNESS_JSON: &str = "witness.json";
 pub const WITNESS_PCAP: &str = "witness.pcap";
 
 /// Schema version for `witness.json` (independent of `result.json`).
-pub const WITNESS_SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped to `2` when the witness gained the egress-policy record
+/// (`egress_policy` / `permitted` / `blocked`), so a consumer deserializing an
+/// older `witness.json` sees the schema change rather than silently reading the
+/// new fields as absent.
+pub const WITNESS_SCHEMA_VERSION: u32 = 2;
+
+/// The egress policy a room ran under, recorded in `witness.json`.
+///
+/// `Observe` is the non-breaking default (flag absent) — the witness observed
+/// but nothing was enforced. `None` drops all external egress; `Allowlist`
+/// permits only the pinned destinations. The proof-of-absence artifact is
+/// `None` with an empty permitted set and no destinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressPolicy {
+    Observe,
+    None,
+    Allowlist,
+}
 
 /// One egress destination the guest contacted, keyed on `(ip, port, proto)`;
 /// `packets` counts guest-originated frames (volume, not success — a lone SYN
@@ -275,23 +294,60 @@ pub struct Witness {
     pub schema_version: u32,
     pub tap: String,
     pub capture_complete: bool,
+    /// The egress policy the room ran under.
+    pub egress_policy: EgressPolicy,
+    /// The pinned destinations the policy permitted (empty under `observe` and
+    /// `none`).
+    pub permitted: Vec<String>,
     pub destinations: Vec<Destination>,
+    /// The destinations the guest attempted that the policy did not permit —
+    /// `destinations ∖ permitted`, host-derived (pcap + policy), never guest
+    /// self-report. Empty under `observe` (nothing was enforced).
+    pub blocked: Vec<Destination>,
     pub dns_queries: Vec<String>,
 }
 
 impl Witness {
     /// An empty witness for `tap` with the given completeness — the summary of
     /// a capture that produced no guest-originated egress (or none parseable).
+    /// Defaults to `observe` policy; [`record_egress`] overwrites it once the
+    /// run's policy is known.
     #[must_use]
     pub const fn empty(tap: String, capture_complete: bool) -> Self {
         Self {
             schema_version: WITNESS_SCHEMA_VERSION,
             tap,
             capture_complete,
+            egress_policy: EgressPolicy::Observe,
+            permitted: Vec::new(),
             destinations: Vec::new(),
+            blocked: Vec::new(),
             dns_queries: Vec::new(),
         }
     }
+}
+
+/// Fold a room's egress policy into a summarized witness.
+///
+/// Records the policy and its permitted set, and derives the blocked attempts as
+/// `destinations ∖ permitted` (by exact destination IP). Under `observe` nothing
+/// is enforced, so nothing is blocked. Pure, so the derivation is unit-testable
+/// against a hand-built witness — keeping policy out of the pcap parser.
+///
+/// A `none` run with no destinations yields the proof-of-absence shape: policy
+/// `none`, empty `permitted`, empty `blocked`.
+pub fn record_egress(witness: &mut Witness, policy: EgressPolicy, permitted: Vec<String>) {
+    witness.blocked = match policy {
+        EgressPolicy::Observe => Vec::new(),
+        EgressPolicy::None | EgressPolicy::Allowlist => witness
+            .destinations
+            .iter()
+            .filter(|dest| !permitted.contains(&dest.ip))
+            .cloned()
+            .collect(),
+    };
+    witness.egress_policy = policy;
+    witness.permitted = permitted;
 }
 
 /// The room's own /30 endpoints, excluded from a summary as non-egress.
@@ -447,7 +503,10 @@ impl FlowAccumulator {
             schema_version: WITNESS_SCHEMA_VERSION,
             tap,
             capture_complete,
+            egress_policy: EgressPolicy::Observe,
+            permitted: Vec::new(),
             destinations,
+            blocked: Vec::new(),
             dns_queries: self.dns.into_iter().collect(),
         }
     }
@@ -1072,8 +1131,61 @@ mod tests {
         use std::net::Ipv4Addr;
 
         use super::super::{
-            summarize_pcap, GatewayLocal, Witness, ETHERNET_HEADER_LEN, WITNESS_SCHEMA_VERSION,
+            record_egress, summarize_pcap, Destination, EgressPolicy, GatewayLocal, Witness,
+            ETHERNET_HEADER_LEN, WITNESS_SCHEMA_VERSION,
         };
+
+        fn dest(ip: &str, port: u16) -> Destination {
+            Destination {
+                ip: ip.to_owned(),
+                port,
+                proto: "tcp".to_owned(),
+                packets: 1,
+            }
+        }
+
+        #[test]
+        fn schema_version_bumped() {
+            // The egress-policy record extended witness.json — the version must
+            // move so consumers see the change rather than reading new fields as
+            // absent.
+            assert_eq!(WITNESS_SCHEMA_VERSION, 2);
+        }
+
+        #[test]
+        fn witness_records_none_policy_as_proof_of_absence() {
+            // A `none` run that emitted nothing: policy none, empty permitted,
+            // empty blocked, capture_complete — the proof-of-absence artifact.
+            let mut w = Witness::empty("tap-fc1".to_owned(), true);
+            record_egress(&mut w, EgressPolicy::None, Vec::new());
+            assert_eq!(w.egress_policy, EgressPolicy::None);
+            assert!(w.permitted.is_empty());
+            assert!(w.blocked.is_empty());
+            assert!(w.destinations.is_empty());
+            assert!(w.capture_complete);
+        }
+
+        #[test]
+        fn blocked_set_is_pcap_minus_permitted() {
+            let mut w = Witness::empty("tap-fc1".to_owned(), true);
+            w.destinations = vec![dest("1.2.3.4", 443), dest("9.9.9.9", 80)];
+            // Allowlist permits only 1.2.3.4 → 9.9.9.9 is the blocked attempt.
+            record_egress(&mut w, EgressPolicy::Allowlist, vec!["1.2.3.4".to_owned()]);
+            assert_eq!(w.egress_policy, EgressPolicy::Allowlist);
+            assert_eq!(w.permitted, vec!["1.2.3.4".to_owned()]);
+            assert_eq!(w.blocked, vec![dest("9.9.9.9", 80)]);
+        }
+
+        #[test]
+        fn observe_policy_blocks_nothing() {
+            // Observe enforces nothing, so every destination stays permitted-by-
+            // default: the blocked set is empty even with contacts recorded.
+            let mut w = Witness::empty("tap-fc1".to_owned(), true);
+            w.destinations = vec![dest("1.2.3.4", 443)];
+            record_egress(&mut w, EgressPolicy::Observe, Vec::new());
+            assert_eq!(w.egress_policy, EgressPolicy::Observe);
+            assert!(w.blocked.is_empty());
+        }
 
         /// The slot-1 /30: gateway `.5`, guest `.6` — the addresses a witness
         /// treats as gateway-local and excludes from the egress summary.

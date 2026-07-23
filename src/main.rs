@@ -11,7 +11,7 @@ use rooms::lifecycle::{Event, Lifecycle, WorkloadStatus};
 use rooms::{
     artifacts,
     config::RoomsConfig,
-    doctor,
+    doctor, egress,
     error::{RoomsError, SlotError},
     firecracker, registry, room, rootfs, runner, slot, vsock, witness,
 };
@@ -125,6 +125,17 @@ enum Command {
         /// fails the room closed (`secrets_failed`, no workload).
         #[arg(long = "secret", value_parser = valid_secret_name)]
         secret: Vec<String>,
+        /// Enforce a host-side egress policy on the room's own tap. `none`
+        /// drops all external egress; `allowlist:<host-or-cidr>[,...]` permits
+        /// only the listed destinations and drops the rest. Enforcement is keyed
+        /// on the unforgeable tap, so a root-compromised guest cannot spoof past
+        /// it. Absent ⇒ observe-only (today's behavior). Hostnames are resolved
+        /// and pinned once at launch (a rotating endpoint is the documented v1
+        /// limitation — use CIDR form); under `allowlist` with hostnames the
+        /// DNS resolver's IP must also be listed. The proof-of-absence receipt
+        /// lands in `witness.json` under `--witness`.
+        #[arg(long = "egress", value_parser = egress::parse)]
+        egress: Option<egress::Policy>,
     },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
@@ -216,6 +227,9 @@ struct RunArgs {
     /// Harvested `--secret` payload — built pre-runtime in `main`, where the
     /// env mutation it entails is still sound.
     secrets: Option<vsock::SecretsPayload>,
+    /// The room's egress policy; [`egress::Policy::Observe`] when the flag is
+    /// absent (non-breaking default). Resolved to an [`egress::Plan`] pre-claim.
+    egress: egress::Policy,
 }
 
 /// What to do after the microVM boots: hold it open, exec a runner, or idle.
@@ -506,6 +520,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             lifecycle,
             witness,
             secret: _,
+            egress,
         } => {
             run_room(
                 RunArgs {
@@ -526,6 +541,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                     lifecycle,
                     witness,
                     secrets,
+                    egress: egress.unwrap_or(egress::Policy::Observe),
                 },
                 &config,
             )
@@ -592,6 +608,16 @@ async fn run_room(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError>
     result
 }
 
+/// The guest network wiring for a claimed pool slot.
+fn network_config_for(slot: &room::Slot) -> firecracker::NetworkConfig {
+    firecracker::NetworkConfig {
+        tap_name: slot.tap.clone(),
+        guest_ip: slot.guest.to_string(),
+        gateway_ip: slot.gateway.to_string(),
+        prefix: slot.prefix,
+    }
+}
+
 async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
 
@@ -628,6 +654,10 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
         return Err(RoomsError::Internal(remediation));
     }
+
+    // Resolve the egress policy (pinning allowlist hostnames to IPs) BEFORE the
+    // claim, so an unresolvable host fails fast without leaking a slot.
+    let egress_plan = egress::resolve(&args.egress).map_err(RoomsError::Internal)?;
 
     // Every room path derives from the state base; resolve it once up front.
     let state_base = config.resolved_state_base().ok_or_else(|| {
@@ -671,12 +701,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         slot: claimed.index,
         tap: claimed.tap.clone(),
     });
-    let network = firecracker::NetworkConfig {
-        tap_name: claimed.tap.clone(),
-        guest_ip: claimed.guest.to_string(),
-        gateway_ip: claimed.gateway.to_string(),
-        prefix: claimed.prefix,
-    };
+    let network = network_config_for(&claimed);
     let descriptor = room::RoomDescriptor {
         command: Some(room_label(&action)),
         keep: args.keep,
@@ -691,6 +716,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         descriptor: &descriptor,
         witness: args.witness,
         secrets: args.secrets.as_ref(),
+        egress: &egress_plan,
     };
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,
@@ -698,9 +724,8 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             lifecycle.emit(&Event::BootFailed {
                 error: e.to_string(),
             });
-            // boot's guard frees the slot when it got far enough to take
-            // ownership; this covers an early failure before that. Compare-and-
-            // delete makes the double-free safe (AlreadyFree / AlreadyReassigned).
+            // boot's guard frees the slot once it owns it; this covers an early
+            // failure before that. Compare-and-delete makes the double-free safe.
             let _ = slot::free(&state_base, claimed.index, &room_id);
             return Err(e.into());
         }
@@ -720,6 +745,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         config,
         max_wall: args.max_wall,
         lifecycle: &lifecycle,
+        egress: &egress_plan,
     };
     let secrets_delivery = vm.take_secrets_delivery();
     let outcome = post_boot(&env, &action, &mut vm, secrets_delivery).await;
@@ -873,7 +899,7 @@ async fn collect_run_artifacts(
         .await;
     }
     let witnessed = match vm.take_witness() {
-        Some(capture) => Some(summarize_witness(capture, slot, env.lifecycle).await),
+        Some(capture) => Some(summarize_witness(capture, slot, env).await),
         None => None,
     };
     let (Some(w), Some(out_dir)) = (&witnessed, out_dir) else {
@@ -901,7 +927,7 @@ struct Witnessed {
 async fn summarize_witness(
     capture: witness::Capture,
     slot: &room::Slot,
-    lifecycle: &Lifecycle,
+    env: &PostBootEnv<'_>,
 ) -> Witnessed {
     let tap = capture.tap().to_owned();
     let pcap_path = capture.pcap_path().to_owned();
@@ -918,12 +944,29 @@ async fn summarize_witness(
         guest: slot.guest,
     };
     let complete = outcome.complete && readable;
-    let summary = artifacts::summarize_pcap(&raw, &tap, local, complete);
-    lifecycle.emit(&Event::WitnessDone {
+    let mut summary = artifacts::summarize_pcap(&raw, &tap, local, complete);
+    // Fold the room's egress policy into the summary: the recorded policy, its
+    // permitted set, and the blocked attempts (pcap ∖ permitted). A `none` run
+    // with no destinations is the proof-of-absence receipt.
+    let (policy, permitted) = egress_record(env.egress);
+    artifacts::record_egress(&mut summary, policy, permitted);
+    env.lifecycle.emit(&Event::WitnessDone {
         destinations: summary.destinations.len(),
         complete: summary.capture_complete,
     });
     Witnessed { summary, raw }
+}
+
+/// Map a resolved [`egress::Plan`] onto the witness record's policy tag and its
+/// permitted destination set.
+fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) {
+    match plan {
+        egress::Plan::Observe => (artifacts::EgressPolicy::Observe, Vec::new()),
+        egress::Plan::None => (artifacts::EgressPolicy::None, Vec::new()),
+        egress::Plan::Allowlist(permitted) => {
+            (artifacts::EgressPolicy::Allowlist, permitted.clone())
+        }
+    }
 }
 
 /// Persist the witness artifacts into `--out`: `witness.json` and `witness.pcap`,
@@ -1069,6 +1112,7 @@ struct PostBootEnv<'a> {
     config: &'a RoomsConfig,
     max_wall: Option<Duration>,
     lifecycle: &'a Lifecycle,
+    egress: &'a egress::Plan,
 }
 
 async fn post_boot(
@@ -2347,6 +2391,7 @@ mod tests {
             lifecycle: None,
             witness: false,
             secrets: None,
+            egress: crate::egress::Policy::Observe,
         };
         match resolve_action(&args).await {
             Err(RoomsError::Internal(m)) => assert!(
