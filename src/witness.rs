@@ -35,7 +35,7 @@ const TCPDUMP: &str = "tcpdump";
 
 /// Prefix for the staged raw-capture file under the system temp dir; the full
 /// name is `{STAGED_PCAP_PREFIX}{room-id}.pcap`. tcpdump writes here rather than
-/// into the room work dir because Ubuntu's AppArmor `usr.bin.tcpdump` profile
+/// into the room work dir because Ubuntu's `AppArmor` `usr.bin.tcpdump` profile
 /// denies writes under any dot-directory in `$HOME` (`audit deny @{HOME}/.*/**`)
 /// — exactly where the room dir lives (`~/.local/state/rooms/<id>/`) — so staging
 /// there fails `--witness` closed (`tcpdump exited immediately`) on a stock
@@ -397,7 +397,7 @@ mod tests {
 
     /// Mark `path` executable on unix; a no-op elsewhere (Windows executes by
     /// extension, and the non-unix resolver only checks existence).
-    fn make_executable(path: &std::path::Path) {
+    fn make_executable(path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -414,7 +414,7 @@ mod tests {
     /// Run `f` with `PATH` set to `dir` alone, restoring the prior value after.
     /// Holds [`PATH_LOCK`] for the duration so parallel tests never observe the
     /// mutated PATH.
-    fn temp_env_path(dir: &std::path::Path, f: impl FnOnce()) {
+    fn temp_env_path(dir: &Path, f: impl FnOnce()) {
         let _guard = PATH_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

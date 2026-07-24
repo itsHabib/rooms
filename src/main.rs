@@ -921,7 +921,7 @@ async fn collect_run_artifacts(
 /// between summarizing (while the staged temp file still exists) and persisting
 /// into `--out`. The raw bytes are carried here because the staged pcap is
 /// removed right after the read — it lives in the system temp dir (an
-/// AppArmor-permitted path), not the room dir that teardown reaps.
+/// `AppArmor`-permitted path), not the room dir that teardown reaps.
 struct Witnessed {
     summary: artifacts::Witness,
     raw: Vec<u8>,
