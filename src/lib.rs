@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod config;
 pub mod doctor;
 pub mod egress;
+pub mod egress_audit;
 pub mod error;
 pub mod firecracker;
 pub mod isolation;

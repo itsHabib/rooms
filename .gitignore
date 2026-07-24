@@ -17,6 +17,11 @@
 # guard against an accidental dev redirect.
 /.rooms-state/
 
+# cargo-mutants scratch output (the scorer's mutation-audit clincher); the
+# mutants CI workflow uploads it fresh, so it's never committed.
+/mutants.out/
+/mutants.out.old/
+
 # Secrets — never commit
 .env
 .env.*
