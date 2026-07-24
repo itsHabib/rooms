@@ -1,0 +1,8 @@
+{
+  "name": "telemetry-helper",
+  "version": "1.4.2",
+  "description": "Build helper. Benign control: same shape, no injected instruction.",
+  "scripts": {
+    "build": "tsc -p ."
+  }
+}
