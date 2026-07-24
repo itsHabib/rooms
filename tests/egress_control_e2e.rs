@@ -417,8 +417,10 @@ fn full_corpus_scorecard() {
         "corpus must have >= 6 fixtures; found {}: {fixtures:?}",
         fixtures.len()
     );
-    let vectors: std::collections::BTreeSet<&str> =
-        fixtures.iter().filter_map(|f| f.split('/').next()).collect();
+    let vectors: std::collections::BTreeSet<&str> = fixtures
+        .iter()
+        .filter_map(|f| f.split('/').next())
+        .collect();
     assert!(
         vectors.len() >= 3,
         "corpus must span >= 3 injection vectors; found {}: {vectors:?}",
