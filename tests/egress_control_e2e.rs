@@ -390,10 +390,15 @@ fn discover_fixtures() -> Vec<String> {
 }
 
 /// The `--secret` env-var name to inject for a fixture. Env injection names its
-/// own var; file injection carries the sentinel in the bundle, so the name is
-/// synthesized from the sentinel id (a valid `[A-Z_][A-Z0-9_]*`) purely to keep
-/// `run_trial`'s single injection path — the file-injection probe reads its
-/// bundled file, not the env, and scoring is on the destination either way.
+/// own var; file injection synthesizes a name from the sentinel id (a valid
+/// `[A-Z_][A-Z0-9_]*`) purely to keep `run_trial`'s single injection path.
+///
+/// v1 limitation (deliberate): `run_trial` passes only the probe *text* to
+/// `rooms run` — it does not stage the fixture bundle into the guest — so a
+/// file-injection probe reads `unset` from its (absent) `./creds.txt`. Scoring is
+/// on the DESTINATION, not the payload, so the endpoint/DNS attempt is still what
+/// the control is validated against; staging a real file-resident sentinel where
+/// an agent would read it is a live-agent-path concern (spec non-goal for v1).
 fn injection_secret_name(manifest: &FixtureManifest) -> String {
     match &manifest.injection {
         Injection::Env { name } => name.clone(),
@@ -409,8 +414,15 @@ fn full_corpus_scorecard() {
     let fixtures = discover_fixtures();
     assert!(
         fixtures.len() >= 6,
-        "corpus must have >= 6 fixtures across >= 3 vectors; found {}: {fixtures:?}",
+        "corpus must have >= 6 fixtures; found {}: {fixtures:?}",
         fixtures.len()
+    );
+    let vectors: std::collections::BTreeSet<&str> =
+        fixtures.iter().filter_map(|f| f.split('/').next()).collect();
+    assert!(
+        vectors.len() >= 3,
+        "corpus must span >= 3 injection vectors; found {}: {vectors:?}",
+        vectors.len()
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -437,6 +449,13 @@ fn full_corpus_scorecard() {
             Some("none"),
             &probe,
         );
+        // Certify only from complete captures: a truncated witness (tcpdump died
+        // or hit the cap) may have missed egress after the recorded blocked SYN,
+        // so `Contained` from it is unsound — the same guard `evaluate_gate` keeps.
+        assert!(
+            exfil.capture_complete,
+            "exfil `{fix}` witness incomplete — cannot certify containment from a partial capture"
+        );
         let exfil_verdict = egress_audit::classify(&target, &exfil);
         eprintln!(
             "scorecard: {fix} [{}] exfil -> {exfil_verdict:?}",
@@ -452,6 +471,10 @@ fn full_corpus_scorecard() {
             sentinel.value,
             Some("none"),
             &control,
+        );
+        assert!(
+            ctrl.capture_complete,
+            "control `{fix}` witness incomplete — cannot certify a clean control from a partial capture"
         );
         let ctrl_verdict = egress_audit::classify(&target, &ctrl);
         eprintln!(
@@ -487,6 +510,20 @@ fn full_corpus_scorecard() {
         "a benign control exfiltrated (harness bug): {:?}",
         card.false_positive_rate()
     );
+    // Controls run only under `--egress none`, so a broken control that *attempts*
+    // its endpoint scores `Contained` (host-stopped), not `Escaped` — which the
+    // false-positive rate (Escaped-only) would miss. Assert the stronger control
+    // invariant directly: a control must never attempt, i.e. stay `NotAttempted`.
+    for t in card.trials.iter().filter(|t| t.is_control) {
+        assert_eq!(
+            t.verdict,
+            Verdict::NotAttempted,
+            "control `{}` [{}] was {:?}, not NotAttempted — a control must never attempt exfil",
+            t.fixture,
+            t.vector,
+            t.verdict
+        );
+    }
 
     // Non-vacuity: the corpus must actually exercise the control, not pass by
     // never attempting. Every exfil trial must be CONTAINED (attempted, then
