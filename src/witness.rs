@@ -33,13 +33,14 @@ use tracing::{debug, info, warn};
 /// The `tcpdump` binary, resolved on `PATH`.
 const TCPDUMP: &str = "tcpdump";
 
-/// Prefix for the staged raw-capture file under the system temp dir; the full
-/// name is `{STAGED_PCAP_PREFIX}{room-id}.pcap`. tcpdump writes here rather than
-/// into the room work dir because Ubuntu's `AppArmor` `usr.bin.tcpdump` profile
-/// denies writes under any dot-directory in `$HOME` (`audit deny @{HOME}/.*/**`)
-/// — exactly where the room dir lives (`~/.local/state/rooms/<id>/`) — so staging
+/// Prefix for the staged raw-capture file under the AppArmor-safe staging dir
+/// (`/tmp` on unix — see [`staging_dir`]); the full name is
+/// `{STAGED_PCAP_PREFIX}{room-id}.pcap`. tcpdump writes here rather than into the
+/// room work dir because Ubuntu's `AppArmor` `usr.bin.tcpdump` profile denies
+/// writes under any dot-directory in `$HOME` (`audit deny @{HOME}/.*/**`) —
+/// exactly where the room dir lives (`~/.local/state/rooms/<id>/`) — so staging
 /// there fails `--witness` closed (`tcpdump exited immediately`) on a stock
-/// (profile-enforcing) host. The temp dir is permitted by the profile's
+/// (profile-enforcing) host. `/tmp` is permitted by the profile's
 /// `abstractions/user-tmp` include and its global `/**.pcap rw` rule, so the
 /// witness works with zero host provisioning. The bytes are read back and
 /// persisted into `--out`, then the staged file is removed.
@@ -262,7 +263,25 @@ fn staging_pcap_path(room_dir: &Path) -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("room");
-    std::env::temp_dir().join(format!("{STAGED_PCAP_PREFIX}{id}.pcap"))
+    staging_dir().join(format!("{STAGED_PCAP_PREFIX}{id}.pcap"))
+}
+
+/// The AppArmor-safe staging directory. Hardcoded `/tmp` on unix rather than
+/// `std::env::temp_dir()`: the latter honors `TMPDIR`, which (preserved through
+/// `sudo -E`, or set by a service unit) could point back under a `$HOME`
+/// dot-directory the tcpdump profile denies — silently reintroducing the very
+/// fail-closed this staging fixes. `/tmp` is always profile-permitted
+/// (`abstractions/user-tmp`) and never under `$HOME`.
+#[cfg(unix)]
+fn staging_dir() -> PathBuf {
+    PathBuf::from("/tmp")
+}
+
+/// Non-unix has no tcpdump/`AppArmor` to appease (the capture never really runs
+/// there); the system temp dir keeps the cross-platform compile honest.
+#[cfg(not(unix))]
+fn staging_dir() -> PathBuf {
+    std::env::temp_dir()
 }
 
 /// Spawn the `tcpdump` capture process on `tap`, writing to `pcap_path`.
@@ -325,20 +344,28 @@ mod tests {
     static PATH_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn staging_pcap_path_is_under_temp_and_keyed_on_room_id() {
+    fn staging_pcap_path_is_apparmor_safe_and_keyed_on_room_id() {
         // The AppArmor fix: tcpdump must write outside the room dir (a HOME
-        // dot-dir the tcpdump profile denies). The staged path lives under the
-        // temp dir and carries the room id so concurrent rooms don't collide.
+        // dot-dir the tcpdump profile denies). The staged path carries the room
+        // id so concurrent rooms don't collide, and never lands under $HOME.
         let staged = staging_pcap_path(Path::new("/home/mh/.local/state/rooms/01ABCDEF"));
-        assert!(
-            staged.starts_with(std::env::temp_dir()),
-            "staged under the temp dir, not the room dir: {}",
-            staged.display()
-        );
         assert_eq!(
             staged.file_name().and_then(|n| n.to_str()),
             Some("rooms-witness-01ABCDEF.pcap"),
             "keyed on the room id, with a .pcap suffix the profile permits"
+        );
+        assert!(
+            !staged.starts_with("/home/mh/.local"),
+            "must never stage under the denied HOME dot-dir path: {}",
+            staged.display()
+        );
+        // On unix the staging dir is the AppArmor-permitted `/tmp`, independent
+        // of `TMPDIR` (which could point back under a denied HOME dot-dir).
+        #[cfg(unix)]
+        assert!(
+            staged.starts_with("/tmp"),
+            "unix staging is the hardcoded, profile-permitted /tmp: {}",
+            staged.display()
         );
     }
 
