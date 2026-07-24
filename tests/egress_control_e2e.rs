@@ -23,7 +23,8 @@
 //! RFC-5737 TEST-NET, unroutable, so the "exfil" never reaches a real host.
 //!
 //! Gated behind `e2e` + unix. Requires the rooms-host: root, `/dev/kvm`,
-//! Firecracker + jailer on PATH, guest images under `~/rooms/images`,
+//! Firecracker + jailer on PATH, the agent guest image (`agent-alpine.ext4`,
+//! carrying the vsock secret fetch hook) + kernel under `~/rooms/images`,
 //! `~/.ssh/id_rooms`, `tcpdump`, a vsock-capable guest kernel (for `--secret`),
 //! and the `ROOMS_FWD` chain installed. Every unmet precondition is a skip.
 //!
@@ -48,6 +49,14 @@ use rooms::egress_audit::{self, FixtureManifest, Injection, Target, Verdict};
 /// The demonstrator fixture for the two-condition gate: an env-injected,
 /// credential-shaped sentinel with an IP endpoint — the clean, unambiguous case.
 const DEMONSTRATOR: &str = "readme/aws-key-in-readme";
+
+/// The guest image the harness boots. The demonstrator injects its sentinel via
+/// `--secret` (vsock, #79), which needs the guest fetch hook
+/// (`/sbin/rooms-secrets-fetch`, baked by `build-rootfs-alpine.sh`). The base
+/// `rootfs.ext4` carries no hook, so the hand-off fails closed and the fixture
+/// can never exfil — the agent image is the one image that supports the custody-
+/// plane composition (`--secret` + `--egress` + `--witness`) this test exercises.
+const AGENT_IMAGE: &str = "agent-alpine.ext4";
 
 fn image_path(name: &str) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME");
@@ -88,6 +97,25 @@ fn tcpdump_present() -> bool {
         .is_ok_and(|o| o.status.success() || o.status.code().is_some())
 }
 
+/// Whether the ext4 image carries the guest secret fetch hook, via debugfs.
+/// `None` when debugfs can't answer (missing tool) — callers skip rather than
+/// guess. The demonstrator's `--secret` env-injection needs the hook; without it
+/// the vsock hand-off fails closed and the fixture never exfils. Mirrors the
+/// same probe in `secrets_e2e`.
+fn image_has_fetch_hook(image: &Path) -> Option<bool> {
+    let out = Command::new("debugfs")
+        .args(["-R", "stat /sbin/rooms-secrets-fetch"])
+        .arg(image)
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(!text.contains("File not found"))
+}
+
 /// The rootfs to boot, or a skip reason on stderr. Mirrors the egress-e2e
 /// preflight — root, KVM, images, the chain, the guest key, tcpdump (the witness
 /// capture the scorer reads needs it).
@@ -101,10 +129,29 @@ fn preflight() -> Option<PathBuf> {
         return None;
     }
     let kernel = image_path("vmlinux.bin");
-    let rootfs = image_path("rootfs.ext4");
+    let rootfs = image_path(AGENT_IMAGE);
     if !kernel.exists() || !rootfs.exists() {
-        eprintln!("skipping: guest images not present under ~/rooms/images");
+        eprintln!(
+            "skipping: guest images not present under ~/rooms/images (need vmlinux.bin + {AGENT_IMAGE})"
+        );
         return None;
+    }
+    // The demonstrator injects its sentinel via `--secret` (vsock, #79), which
+    // needs the guest fetch hook. Without it the hand-off fails closed and the
+    // fixture never exfils — a spurious gate failure, not a real one. Skip
+    // cleanly (as `secrets_e2e` does) rather than fail on an unequipped image.
+    match image_has_fetch_hook(&rootfs) {
+        Some(true) => {}
+        Some(false) => {
+            eprintln!(
+                "skipping: {AGENT_IMAGE} predates the vsock secret fetch hook (rebuild with build-rootfs-alpine.sh)"
+            );
+            return None;
+        }
+        None => {
+            eprintln!("skipping: debugfs unavailable to probe the image for the secret fetch hook");
+            return None;
+        }
     }
     if !rooms_fwd_installed() {
         eprintln!(
