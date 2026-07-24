@@ -406,6 +406,64 @@ fn injection_secret_name(manifest: &FixtureManifest) -> String {
     }
 }
 
+/// Run every fixture's exfil probe + benign control under `--egress none`, scoring
+/// each into a [`Trial`]. Every trial's witness must be complete — containment
+/// cannot be certified from a partial capture (the guard `evaluate_gate` keeps) —
+/// and the per-fixture verdict is logged.
+fn score_corpus_under_none(rootfs: &Path, fixtures: &[String], tmp: &Path) -> Vec<Trial> {
+    let mut trials = Vec::new();
+    for (i, fix) in fixtures.iter().enumerate() {
+        let manifest = load_manifest(fix);
+        let sentinel = egress_audit::sentinel(&manifest.sentinel_id)
+            .unwrap_or_else(|| panic!("{fix}: unregistered sentinel {}", manifest.sentinel_id));
+        let target = manifest
+            .target()
+            .unwrap_or_else(|| panic!("{fix}: exfil_target does not parse"));
+        let secret_name = injection_secret_name(&manifest);
+
+        let probe = load_script(fix, &manifest.probe);
+        let exfil = run_trial(
+            rootfs,
+            &tmp.join(format!("{i}-exfil")),
+            &secret_name,
+            sentinel.value,
+            Some("none"),
+            &probe,
+        );
+        assert!(
+            exfil.capture_complete,
+            "exfil `{fix}` witness incomplete — cannot certify containment from a partial capture"
+        );
+        let exfil_verdict = egress_audit::classify(&target, &exfil);
+        eprintln!(
+            "scorecard: {fix} [{}] exfil -> {exfil_verdict:?}",
+            manifest.vector
+        );
+        trials.push(trial(&manifest, fix, false, exfil_verdict));
+
+        let control = load_script(fix, &format!("{}{}", manifest.control, manifest.probe));
+        let ctrl = run_trial(
+            rootfs,
+            &tmp.join(format!("{i}-control")),
+            &secret_name,
+            sentinel.value,
+            Some("none"),
+            &control,
+        );
+        assert!(
+            ctrl.capture_complete,
+            "control `{fix}` witness incomplete — cannot certify a clean control from a partial capture"
+        );
+        let ctrl_verdict = egress_audit::classify(&target, &ctrl);
+        eprintln!(
+            "scorecard: {fix} [{}] control -> {ctrl_verdict:?}",
+            manifest.vector
+        );
+        trials.push(trial(&manifest, fix, true, ctrl_verdict));
+    }
+    trials
+}
+
 #[test]
 fn full_corpus_scorecard() {
     let Some(rootfs) = preflight() else {
@@ -428,65 +486,9 @@ fn full_corpus_scorecard() {
     );
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut trials = Vec::new();
-
-    for (i, fix) in fixtures.iter().enumerate() {
-        let manifest = load_manifest(fix);
-        let sentinel = egress_audit::sentinel(&manifest.sentinel_id)
-            .unwrap_or_else(|| panic!("{fix}: unregistered sentinel {}", manifest.sentinel_id));
-        let target = manifest
-            .target()
-            .unwrap_or_else(|| panic!("{fix}: exfil_target does not parse"));
-        let secret_name = injection_secret_name(&manifest);
-
-        // Every trial runs under `--egress none` — the scorecard measures whether
-        // the control holds across the whole corpus. The exfil probe must be
-        // contained (never escaped); the control must never attempt.
-        let probe = load_script(fix, &manifest.probe);
-        let exfil = run_trial(
-            &rootfs,
-            &tmp.path().join(format!("{i}-exfil")),
-            &secret_name,
-            sentinel.value,
-            Some("none"),
-            &probe,
-        );
-        // Certify only from complete captures: a truncated witness (tcpdump died
-        // or hit the cap) may have missed egress after the recorded blocked SYN,
-        // so `Contained` from it is unsound — the same guard `evaluate_gate` keeps.
-        assert!(
-            exfil.capture_complete,
-            "exfil `{fix}` witness incomplete — cannot certify containment from a partial capture"
-        );
-        let exfil_verdict = egress_audit::classify(&target, &exfil);
-        eprintln!(
-            "scorecard: {fix} [{}] exfil -> {exfil_verdict:?}",
-            manifest.vector
-        );
-        trials.push(trial(&manifest, fix, false, exfil_verdict));
-
-        let control = load_script(fix, &format!("{}{}", manifest.control, manifest.probe));
-        let ctrl = run_trial(
-            &rootfs,
-            &tmp.path().join(format!("{i}-control")),
-            &secret_name,
-            sentinel.value,
-            Some("none"),
-            &control,
-        );
-        assert!(
-            ctrl.capture_complete,
-            "control `{fix}` witness incomplete — cannot certify a clean control from a partial capture"
-        );
-        let ctrl_verdict = egress_audit::classify(&target, &ctrl);
-        eprintln!(
-            "scorecard: {fix} [{}] control -> {ctrl_verdict:?}",
-            manifest.vector
-        );
-        trials.push(trial(&manifest, fix, true, ctrl_verdict));
-    }
-
-    let card = Scorecard { trials };
+    let card = Scorecard {
+        trials: score_corpus_under_none(&rootfs, &fixtures, tmp.path()),
+    };
 
     // Emit the scorecard artifact — the corpus-level exfil-resistance receipt.
     let json = serde_json::to_string_pretty(&card).expect("serialize scorecard");
