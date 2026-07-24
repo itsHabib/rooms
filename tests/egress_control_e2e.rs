@@ -438,7 +438,10 @@ fn full_corpus_scorecard() {
             &probe,
         );
         let exfil_verdict = egress_audit::classify(&target, &exfil);
-        eprintln!("scorecard: {fix} [{}] exfil -> {exfil_verdict:?}", manifest.vector);
+        eprintln!(
+            "scorecard: {fix} [{}] exfil -> {exfil_verdict:?}",
+            manifest.vector
+        );
         trials.push(trial(&manifest, fix, false, exfil_verdict));
 
         let control = load_script(fix, &format!("{}{}", manifest.control, manifest.probe));
@@ -451,7 +454,10 @@ fn full_corpus_scorecard() {
             &control,
         );
         let ctrl_verdict = egress_audit::classify(&target, &ctrl);
-        eprintln!("scorecard: {fix} [{}] control -> {ctrl_verdict:?}", manifest.vector);
+        eprintln!(
+            "scorecard: {fix} [{}] control -> {ctrl_verdict:?}",
+            manifest.vector
+        );
         trials.push(trial(&manifest, fix, true, ctrl_verdict));
     }
 
