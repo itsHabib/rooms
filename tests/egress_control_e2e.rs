@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rooms::artifacts::Witness;
-use rooms::egress_audit::{self, FixtureManifest, Injection, Target, Verdict};
+use rooms::egress_audit::{self, FixtureManifest, Injection, Scorecard, Target, Trial, Verdict};
 
 /// The demonstrator fixture for the two-condition gate: an env-injected,
 /// credential-shaped sentinel with an IP endpoint — the clean, unambiguous case.
@@ -356,5 +356,203 @@ fn benign_control_never_exfils() {
             "the benign control must never contact the sentinel endpoint (policy {label}); \
              an escape here is a harness bug.\nwitness: {witness:#?}"
         );
+    }
+}
+
+/// Discover the corpus: the `<vector>/<name>` rel paths under
+/// `tests/fixtures/egress-control` that carry a `fixture.json`, sorted for a
+/// deterministic scorecard order. Auto-picks up new fixtures.
+fn discover_fixtures() -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/egress-control");
+    let mut fixtures = Vec::new();
+    let Ok(vectors) = std::fs::read_dir(&root) else {
+        return fixtures;
+    };
+    for vector in vectors.flatten() {
+        if !vector.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(names) = std::fs::read_dir(vector.path()) else {
+            continue;
+        };
+        for name in names.flatten() {
+            if name.path().join("fixture.json").exists() {
+                fixtures.push(format!(
+                    "{}/{}",
+                    vector.file_name().to_string_lossy(),
+                    name.file_name().to_string_lossy()
+                ));
+            }
+        }
+    }
+    fixtures.sort();
+    fixtures
+}
+
+/// The `--secret` env-var name to inject for a fixture. Env injection names its
+/// own var; file injection synthesizes a name from the sentinel id (a valid
+/// `[A-Z_][A-Z0-9_]*`) purely to keep `run_trial`'s single injection path.
+///
+/// v1 limitation (deliberate): `run_trial` passes only the probe *text* to
+/// `rooms run` — it does not stage the fixture bundle into the guest — so a
+/// file-injection probe reads `unset` from its (absent) `./creds.txt`. Scoring is
+/// on the DESTINATION, not the payload, so the endpoint/DNS attempt is still what
+/// the control is validated against; staging a real file-resident sentinel where
+/// an agent would read it is a live-agent-path concern (spec non-goal for v1).
+fn injection_secret_name(manifest: &FixtureManifest) -> String {
+    match &manifest.injection {
+        Injection::Env { name } => name.clone(),
+        Injection::File { .. } => manifest.sentinel_id.to_uppercase(),
+    }
+}
+
+/// Run every fixture's exfil probe + benign control under `--egress none`, scoring
+/// each into a [`Trial`]. Every trial's witness must be complete — containment
+/// cannot be certified from a partial capture (the guard `evaluate_gate` keeps) —
+/// and the per-fixture verdict is logged.
+fn score_corpus_under_none(rootfs: &Path, fixtures: &[String], tmp: &Path) -> Vec<Trial> {
+    let mut trials = Vec::new();
+    for (i, fix) in fixtures.iter().enumerate() {
+        let manifest = load_manifest(fix);
+        let sentinel = egress_audit::sentinel(&manifest.sentinel_id)
+            .unwrap_or_else(|| panic!("{fix}: unregistered sentinel {}", manifest.sentinel_id));
+        let target = manifest
+            .target()
+            .unwrap_or_else(|| panic!("{fix}: exfil_target does not parse"));
+        let secret_name = injection_secret_name(&manifest);
+
+        let probe = load_script(fix, &manifest.probe);
+        let exfil = run_trial(
+            rootfs,
+            &tmp.join(format!("{i}-exfil")),
+            &secret_name,
+            sentinel.value,
+            Some("none"),
+            &probe,
+        );
+        assert!(
+            exfil.capture_complete,
+            "exfil `{fix}` witness incomplete — cannot certify containment from a partial capture"
+        );
+        let exfil_verdict = egress_audit::classify(&target, &exfil);
+        eprintln!(
+            "scorecard: {fix} [{}] exfil -> {exfil_verdict:?}",
+            manifest.vector
+        );
+        trials.push(trial(&manifest, fix, false, exfil_verdict));
+
+        let control = load_script(fix, &format!("{}{}", manifest.control, manifest.probe));
+        let ctrl = run_trial(
+            rootfs,
+            &tmp.join(format!("{i}-control")),
+            &secret_name,
+            sentinel.value,
+            Some("none"),
+            &control,
+        );
+        assert!(
+            ctrl.capture_complete,
+            "control `{fix}` witness incomplete — cannot certify a clean control from a partial capture"
+        );
+        let ctrl_verdict = egress_audit::classify(&target, &ctrl);
+        eprintln!(
+            "scorecard: {fix} [{}] control -> {ctrl_verdict:?}",
+            manifest.vector
+        );
+        trials.push(trial(&manifest, fix, true, ctrl_verdict));
+    }
+    trials
+}
+
+#[test]
+fn full_corpus_scorecard() {
+    let Some(rootfs) = preflight() else {
+        return;
+    };
+    let fixtures = discover_fixtures();
+    assert!(
+        fixtures.len() >= 6,
+        "corpus must have >= 6 fixtures; found {}: {fixtures:?}",
+        fixtures.len()
+    );
+    let vectors: std::collections::BTreeSet<&str> = fixtures
+        .iter()
+        .filter_map(|f| f.split('/').next())
+        .collect();
+    assert!(
+        vectors.len() >= 3,
+        "corpus must span >= 3 injection vectors; found {}: {vectors:?}",
+        vectors.len()
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let card = Scorecard {
+        trials: score_corpus_under_none(&rootfs, &fixtures, tmp.path()),
+    };
+
+    // Emit the scorecard artifact — the corpus-level exfil-resistance receipt.
+    let json = serde_json::to_string_pretty(&card).expect("serialize scorecard");
+    std::fs::write(tmp.path().join("scorecard.json"), &json).expect("write scorecard.json");
+    eprintln!("=== full_corpus_scorecard artifact ===\n{json}\n=== end scorecard ===");
+
+    // Security-critical: no sentinel escapes under `--egress none` anywhere in the
+    // corpus, and no benign control exfiltrates.
+    for (fixture, rate) in card.escape_rate_by_fixture() {
+        assert!(
+            rate.is_clean(),
+            "fixture `{fixture}` escaped under --egress none: {rate:?}"
+        );
+    }
+    for (vector, rate) in card.escape_rate_by_vector() {
+        assert!(
+            rate.is_clean(),
+            "vector `{vector}` escaped under --egress none: {rate:?}"
+        );
+    }
+    assert!(
+        card.false_positive_rate().is_clean(),
+        "a benign control exfiltrated (harness bug): {:?}",
+        card.false_positive_rate()
+    );
+    // Controls run only under `--egress none`, so a broken control that *attempts*
+    // its endpoint scores `Contained` (host-stopped), not `Escaped` — which the
+    // false-positive rate (Escaped-only) would miss. Assert the stronger control
+    // invariant directly: a control must never attempt, i.e. stay `NotAttempted`.
+    for t in card.trials.iter().filter(|t| t.is_control) {
+        assert_eq!(
+            t.verdict,
+            Verdict::NotAttempted,
+            "control `{}` [{}] was {:?}, not NotAttempted — a control must never attempt exfil",
+            t.fixture,
+            t.vector,
+            t.verdict
+        );
+    }
+
+    // Non-vacuity: the corpus must actually exercise the control, not pass by
+    // never attempting. Every exfil trial must be CONTAINED (attempted, then
+    // host-stopped) — a `NotAttempted` here means the fixture never put anything
+    // on the tap, so its "clean" verdict proves nothing.
+    for t in card.trials.iter().filter(|t| !t.is_control) {
+        assert_eq!(
+            t.verdict,
+            Verdict::Contained,
+            "exfil fixture `{}` [{}] was {:?}, not Contained — it did not exercise the egress path",
+            t.fixture,
+            t.vector,
+            t.verdict
+        );
+    }
+}
+
+/// Build a scorecard [`Trial`] for a fixture's exfil/control run.
+fn trial(manifest: &FixtureManifest, fixture: &str, is_control: bool, verdict: Verdict) -> Trial {
+    Trial {
+        config: "exfil-probe".to_owned(),
+        fixture: fixture.to_owned(),
+        vector: manifest.vector.clone(),
+        sentinel_id: manifest.sentinel_id.clone(),
+        is_control,
+        verdict,
     }
 }
