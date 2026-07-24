@@ -918,8 +918,10 @@ async fn collect_run_artifacts(
 }
 
 /// A finalized egress witness: the summary plus the raw pcap bytes, held
-/// between summarizing (while the staged file still exists) and persisting
-/// into `--out` (teardown removes the room dir where the file was staged).
+/// between summarizing (while the staged temp file still exists) and persisting
+/// into `--out`. The raw bytes are carried here because the staged pcap is
+/// removed right after the read — it lives in the system temp dir (an
+/// `AppArmor`-permitted path), not the room dir that teardown reaps.
 struct Witnessed {
     summary: artifacts::Witness,
     raw: Vec<u8>,
@@ -948,6 +950,12 @@ async fn summarize_witness(
             (Vec::new(), false)
         }
     };
+    // The pcap is staged under the system temp dir (an AppArmor-permitted path),
+    // not the room dir, so room teardown won't reap it — remove it now that its
+    // bytes are held for persistence into `--out`. Best-effort: a leftover temp
+    // pcap is harmless, and `--witness` conflicts with `--keep`, so this is the
+    // one summarize path.
+    let _ = tokio::fs::remove_file(&pcap_path).await;
     let local = artifacts::GatewayLocal {
         gateway: slot.gateway,
         guest: slot.guest,

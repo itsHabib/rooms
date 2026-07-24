@@ -33,8 +33,18 @@ use tracing::{debug, info, warn};
 /// The `tcpdump` binary, resolved on `PATH`.
 const TCPDUMP: &str = "tcpdump";
 
-/// Raw-capture file name inside the room work dir (staged, then copied to `out/`).
-pub const PCAP_FILE: &str = "witness.pcap";
+/// Prefix for the staged raw-capture file under the AppArmor-safe staging dir
+/// (`/tmp` on unix — see [`staging_dir`]); the full name is
+/// `{STAGED_PCAP_PREFIX}{room-id}.pcap`. tcpdump writes here rather than into the
+/// room work dir because Ubuntu's `AppArmor` `usr.bin.tcpdump` profile denies
+/// writes under any dot-directory in `$HOME` (`audit deny @{HOME}/.*/**`) —
+/// exactly where the room dir lives (`~/.local/state/rooms/<id>/`) — so staging
+/// there fails `--witness` closed (`tcpdump exited immediately`) on a stock
+/// (profile-enforcing) host. `/tmp` is permitted by the profile's
+/// `abstractions/user-tmp` include and its global `/**.pcap rw` rule, so the
+/// witness works with zero host provisioning. The bytes are read back and
+/// persisted into `--out`, then the staged file is removed.
+const STAGED_PCAP_PREFIX: &str = "rooms-witness-";
 
 /// Hard total cap for the raw capture, in bytes. The watcher stops the capture
 /// at the cap rather than letting it grow (or rotate) without bound — a runaway
@@ -124,7 +134,7 @@ impl Capture {
     /// start; see the module docs). A survivor is returned live, with the cap
     /// watcher running beside it.
     pub async fn start(tap: &str, room_dir: &Path) -> Result<Self, String> {
-        let pcap_path = room_dir.join(PCAP_FILE);
+        let pcap_path = staging_pcap_path(room_dir);
         let mut child = spawn_tcpdump(tap, &pcap_path)?;
         // A tap that doesn't exist, or a tcpdump lacking capture privilege,
         // exits within milliseconds. Watch briefly so start-failure is caught
@@ -156,7 +166,9 @@ impl Capture {
         &self.tap
     }
 
-    /// The staged raw-capture path in the room work dir.
+    /// The staged raw-capture path (under the system temp dir, not the room work
+    /// dir — see [`STAGED_PCAP_PREFIX`]). Read back into `--out`, then removed by
+    /// the caller after the summary.
     #[must_use]
     pub fn pcap_path(&self) -> &Path {
         &self.pcap_path
@@ -242,6 +254,36 @@ fn spawn_cap_watcher(
     })
 }
 
+/// The staged raw-capture path for the room, `{STAGED_PCAP_PREFIX}{room-id}.pcap`
+/// under the system temp dir. Keyed on the room id (the work dir's basename) so
+/// concurrent rooms never collide on the shared, tap-reused capture name. See
+/// [`STAGED_PCAP_PREFIX`] for why staging lives in the temp dir, not the room dir.
+fn staging_pcap_path(room_dir: &Path) -> PathBuf {
+    let id = room_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("room");
+    staging_dir().join(format!("{STAGED_PCAP_PREFIX}{id}.pcap"))
+}
+
+/// The AppArmor-safe staging directory. Hardcoded `/tmp` on unix rather than
+/// `std::env::temp_dir()`: the latter honors `TMPDIR`, which (preserved through
+/// `sudo -E`, or set by a service unit) could point back under a `$HOME`
+/// dot-directory the tcpdump profile denies — silently reintroducing the very
+/// fail-closed this staging fixes. `/tmp` is always profile-permitted
+/// (`abstractions/user-tmp`) and never under `$HOME`.
+#[cfg(unix)]
+fn staging_dir() -> PathBuf {
+    PathBuf::from("/tmp")
+}
+
+/// Non-unix has no tcpdump/`AppArmor` to appease (the capture never really runs
+/// there); the system temp dir keeps the cross-platform compile honest.
+#[cfg(not(unix))]
+fn staging_dir() -> PathBuf {
+    std::env::temp_dir()
+}
+
 /// Spawn the `tcpdump` capture process on `tap`, writing to `pcap_path`.
 ///
 /// `-i <tap>` binds to the room's own interface; `-w` writes raw pcap; `-U`
@@ -292,13 +334,51 @@ mod tests {
         reason = "test module"
     )]
 
+    use std::path::Path;
     use std::sync::Mutex;
 
-    use super::{ensure_tcpdump_available, which_tcpdump};
+    use super::{ensure_tcpdump_available, staging_pcap_path, which_tcpdump};
 
     /// Serializes the PATH-mutating tests: `set_var` is process-global and Rust
     /// runs tests in parallel, so every test that touches PATH must hold this.
     static PATH_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn staging_pcap_path_is_apparmor_safe_and_keyed_on_room_id() {
+        // The AppArmor fix: tcpdump must write outside the room dir (a HOME
+        // dot-dir the tcpdump profile denies). The staged path carries the room
+        // id so concurrent rooms don't collide, and never lands under $HOME.
+        let staged = staging_pcap_path(Path::new("/home/mh/.local/state/rooms/01ABCDEF"));
+        assert_eq!(
+            staged.file_name().and_then(|n| n.to_str()),
+            Some("rooms-witness-01ABCDEF.pcap"),
+            "keyed on the room id, with a .pcap suffix the profile permits"
+        );
+        assert!(
+            !staged.starts_with("/home/mh/.local"),
+            "must never stage under the denied HOME dot-dir path: {}",
+            staged.display()
+        );
+        // On unix the staging dir is the AppArmor-permitted `/tmp`, independent
+        // of `TMPDIR` (which could point back under a denied HOME dot-dir).
+        #[cfg(unix)]
+        assert!(
+            staged.starts_with("/tmp"),
+            "unix staging is the hardcoded, profile-permitted /tmp: {}",
+            staged.display()
+        );
+    }
+
+    #[test]
+    fn staging_pcap_path_falls_back_without_a_basename() {
+        // A pathological room dir with no basename still yields a valid staged
+        // path rather than panicking.
+        let staged = staging_pcap_path(Path::new("/"));
+        assert_eq!(
+            staged.file_name().and_then(|n| n.to_str()),
+            Some("rooms-witness-room.pcap")
+        );
+    }
 
     #[test]
     fn missing_tcpdump_is_a_clear_error() {
@@ -344,7 +424,7 @@ mod tests {
 
     /// Mark `path` executable on unix; a no-op elsewhere (Windows executes by
     /// extension, and the non-unix resolver only checks existence).
-    fn make_executable(path: &std::path::Path) {
+    fn make_executable(path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -361,7 +441,7 @@ mod tests {
     /// Run `f` with `PATH` set to `dir` alone, restoring the prior value after.
     /// Holds [`PATH_LOCK`] for the duration so parallel tests never observe the
     /// mutated PATH.
-    fn temp_env_path(dir: &std::path::Path, f: impl FnOnce()) {
+    fn temp_env_path(dir: &Path, f: impl FnOnce()) {
         let _guard = PATH_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

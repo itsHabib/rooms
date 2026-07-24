@@ -82,15 +82,15 @@ sudo chmod 0664 "$HOME/rooms/images/rootfs.ext4"
 sudo bash scripts/setup-tap.sh --host                      # installs the ROOMS_FWD chain (gone after every reboot)
 ```
 
-**`--witness` / `--egress` receipts need tcpdump unconfined.** Ubuntu ships an
-AppArmor profile (`/etc/apparmor.d/usr.bin.tcpdump`) that denies tcpdump writing
-its pcap under `~/.local/state/rooms/`, so the host witness fails to start
-(`tcpdump exited immediately`) and every `--witness` run — including the
-`--egress` proof-of-absence receipt — dies fail-closed. Unload the profile once
-per host (it re-loads on reboot, like the `ROOMS_FWD` chain):
-```bash
-sudo apparmor_parser -R /etc/apparmor.d/usr.bin.tcpdump   # let the witness write its pcap
-```
+**`--witness` / `--egress` receipts work under a stock AppArmor profile.** Ubuntu
+ships an AppArmor profile (`/etc/apparmor.d/usr.bin.tcpdump`) that denies tcpdump
+writing its pcap under `~/.local/state/rooms/`. The host witness stages its pcap
+under the system temp dir (`/tmp/rooms-witness-<id>.pcap`) instead — permitted by
+the profile's `abstractions/user-tmp` include and its global `/**.pcap rw` rule —
+and carries the bytes into `--out`, so `--witness` and the `--egress`
+proof-of-absence receipt run with the profile **enforcing**, no host provisioning
+needed. (Historical: before this staging fix, the per-boot workaround was
+`sudo apparmor_parser -R /etc/apparmor.d/usr.bin.tcpdump` to unload the profile.)
 
 Ship's Cursor runtime needs a separate image. Its native SDK build temporarily
 exceeds the base image's 512 MiB capacity, so build it with 1 GiB:
@@ -129,7 +129,7 @@ rooms ls        # must be clean afterwards — every slot freed
 | `sudo rooms <verb>` | `rooms ls` says "no rooms" though rooms exist | sudo reads root's `HOME`; run rooms verbs as `mh` |
 | cargo not found over SSH | `make: cargo: No such file or directory` | `export PATH="$HOME/.cargo/bin:$PATH"` (and `sudo -E env "PATH=$PATH"`) |
 | `ROOMS_FWD` missing | doctor `rooms_fwd` FAIL after a reboot | `sudo bash scripts/setup-tap.sh --host` |
-| `--witness` dies at boot | `tcpdump exited immediately (exit status: 1)`; every `--witness`/`--egress`-receipt run fails closed | AppArmor blocks the pcap write; `sudo apparmor_parser -R /etc/apparmor.d/usr.bin.tcpdump` (re-loads on reboot) |
+| `--witness` dies at boot | `tcpdump exited immediately (exit status: 1)` on a build predating the temp-dir staging fix | Update to a build whose witness stages its pcap under the temp dir (works with AppArmor enforcing). Legacy workaround: `sudo apparmor_parser -R /etc/apparmor.d/usr.bin.tcpdump` |
 | guest login fails | e2e egress `ReachableNoAuth` | rootfs must bake the `rooms` user (not just root) + `~/.ssh/id_rooms` |
 | VM IP not found | provision script's KVP wait times out | use the host neighbor table (see §0); KVP needs guest tools that install late |
 | BitLocker prompt on provision | seed volume write "media is write protected" | seed is built as an ISO in WSL, never a mounted volume (see §1) |
