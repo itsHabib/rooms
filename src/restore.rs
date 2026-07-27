@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::room::Provenance;
 use crate::snapshot::{
     SnapshotMeta, SNAPSHOT_MEM_FILE, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_VMSTATE_FILE,
 };
@@ -48,6 +49,12 @@ pub enum RestoreError {
     /// fault or silently corrupt. Refuse; the remedy is to re-snapshot on this host.
     #[error("snapshot incompatible with host: {} mismatch; re-snapshot on this host", .field.as_str())]
     SnapshotIncompatible { field: CompatField },
+    /// The snapshot's metadata does not attest a sealed `Neutral` base. A snapshot
+    /// is only ever *written* Neutral, so a non-Neutral `provenance` here means a
+    /// foreign or corrupt `snapshot.json` — restoring it could resurrect a guest
+    /// carrying unique or secret state. Refuse before loading.
+    #[error("refusing to restore a non-neutral snapshot (provenance: {found:?}); its metadata does not attest a sealed neutral base")]
+    NotNeutralSnapshot { found: Provenance },
 }
 
 /// One ordered restore operation. Pure data — the host-side runner executes the
@@ -143,14 +150,22 @@ pub fn check_compat(
 /// configuration operation.
 ///
 /// # Errors
-/// [`RestoreError::SnapshotIncompatible`] if the compat guard fails — no ops are
-/// emitted, nothing is loaded.
+/// - [`RestoreError::UnsupportedSchema`] / [`RestoreError::SnapshotIncompatible`]
+///   if the compat guard fails.
+/// - [`RestoreError::NotNeutralSnapshot`] if the metadata isn't `Neutral`.
+///
+/// On any error no ops are emitted — nothing is loaded.
 pub fn plan_restore(
     snap: &SnapshotMeta,
     host_fc_version: &str,
     host_rootfs_hash: &str,
 ) -> Result<RestorePlan, RestoreError> {
     check_compat(snap, host_fc_version, host_rootfs_hash)?;
+    if snap.provenance != Provenance::Neutral {
+        return Err(RestoreError::NotNeutralSnapshot {
+            found: snap.provenance,
+        });
+    }
     let ops = vec![
         RestoreOp::InstallCustody,
         RestoreOp::LoadSnapshot {
@@ -229,6 +244,22 @@ mod tests {
                 field: CompatField::RootfsHash
             }),
         );
+    }
+
+    #[test]
+    fn plan_refuses_a_snapshot_whose_metadata_is_not_neutral() {
+        // Defense in depth: a snapshot is only ever written Neutral, so a foreign
+        // or corrupt snapshot.json declaring Provisioning/Tainted must be refused
+        // before LoadSnapshot — restoring it could resurrect secret-bearing state.
+        for bad in [Provenance::Provisioning, Provenance::Tainted] {
+            let mut m = snap_meta();
+            m.provenance = bad;
+            assert_eq!(
+                plan_restore(&m, "1.9.0", "sha256:abc"),
+                Err(RestoreError::NotNeutralSnapshot { found: bad }),
+                "a {bad:?} snapshot must not restore"
+            );
+        }
     }
 
     #[test]
