@@ -228,6 +228,188 @@ pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Free
     }
 }
 
+/// The on-disk body of a reservation the walk allocator skips (the file exists,
+/// so `O_EXCL` create loses) and [`reconcile`] leaves held (not a `Claimed`
+/// token, so it is never judged by claimer liveness).
+fn reservation_token(snapshot_id: &str) -> String {
+    format!("@reservation {snapshot_id}\n")
+}
+
+/// The on-disk body of a leased reservation — the reservation plus the room
+/// currently holding the single live lease.
+fn lease_token(snapshot_id: &str, lessee_room_id: &str) -> String {
+    format!("@lease {snapshot_id} {lessee_room_id}\n")
+}
+
+/// Atomically replace slot `index`'s file body (temp-then-rename in the same
+/// dir, so the swap is a single rename even under the free-lock). Callers hold
+/// the free-lock across the read+verify+rewrite critical section.
+fn rewrite_slot_atomic(dir: &Path, index: u8, body: &str) -> Result<(), SlotError> {
+    let tmp = dir.join(format!(".{index}.tmp"));
+    std::fs::write(&tmp, body.as_bytes())?;
+    // rename replaces the target on both unix and Windows (MOVEFILE_REPLACE_
+    // EXISTING); the `.tmp` name is never a canonical index, so a crash between
+    // write and rename leaves a stray reconcile ignores.
+    std::fs::rename(&tmp, dir.join(index.to_string()))?;
+    Ok(())
+}
+
+/// What [`reserve`] found at the slot index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reserved {
+    /// The slot named `expected_room_id`; its claim was rewritten to this
+    /// snapshot's reservation.
+    Transferred,
+    /// The slot already holds *this* snapshot's reservation (idempotent retry).
+    AlreadyReserved,
+    /// The slot names a different room, is free, or holds another snapshot's
+    /// reservation — left untouched, never transferred out from under a live
+    /// owner.
+    NotOwned,
+}
+
+/// Transfer slot `slot_index` from the base's claim to a snapshot-owned
+/// reservation, but only if its file still names `expected_room_id` (D8).
+///
+/// Compare-and-rewrite under the free-lock, never a free-then-reclaim: a bare
+/// free would let the walk allocator refill the freed hole before restore
+/// reclaims it, permanently starving the snapshot whose guest IP is baked to
+/// this exact slot. The reservation is [`reconcile`]-exempt and `O_EXCL`-opaque
+/// to the walk, so the slot stays held with no live process claiming it.
+///
+/// # Errors
+/// [`SlotError::InvalidIndex`] for an out-of-pool index; [`SlotError::Io`] on a
+/// filesystem error.
+pub fn reserve(
+    state: &Path,
+    slot_index: u8,
+    snapshot_id: &str,
+    expected_room_id: &str,
+) -> Result<Reserved, SlotError> {
+    ensure_pool_index(slot_index)?;
+    let dir = state.join(SLOTS_DIR);
+    let path = dir.join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        // A free slot has no claim to transfer — the base must still own it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Reserved::NotOwned),
+        Err(e) => return Err(SlotError::Io(e)),
+    };
+    if parse_token(&contents)
+        == (SlotToken::Reserved {
+            snapshot_id: snapshot_id.to_owned(),
+        })
+    {
+        return Ok(Reserved::AlreadyReserved);
+    }
+    // Only a claim whose first line is the base may be transferred — a
+    // reservation line (`@…`) or a stranger's claim never matches.
+    if contents.lines().next() != Some(expected_room_id) {
+        return Ok(Reserved::NotOwned);
+    }
+    rewrite_slot_atomic(&dir, slot_index, &reservation_token(snapshot_id))?;
+    Ok(Reserved::Transferred)
+}
+
+/// Take the single live lease against snapshot `snapshot_id`'s reservation at
+/// `slot_index` for `lessee_room_id`, returning the derived slot identity.
+///
+/// A restore leases rather than consumes, so the reservation survives for a
+/// repeat restore. Re-leasing by the same room is idempotent; a lease held by
+/// another room is [`SlotError::LeaseHeld`] (the frozen IP forbids two).
+///
+/// # Errors
+/// [`SlotError::NotReserved`] if the slot holds no reservation for this
+/// snapshot; [`SlotError::LeaseHeld`] if another room already leases it;
+/// [`SlotError::InvalidIndex`] / [`SlotError::Io`] as for [`reserve`].
+pub fn lease(
+    state: &Path,
+    slot_index: u8,
+    snapshot_id: &str,
+    lessee_room_id: &str,
+) -> Result<Slot, SlotError> {
+    ensure_pool_index(slot_index)?;
+    let dir = state.join(SLOTS_DIR);
+    let path = dir.join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SlotError::NotReserved { index: slot_index })
+        }
+        Err(e) => return Err(SlotError::Io(e)),
+    };
+    match parse_token(&contents) {
+        SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id => {
+            rewrite_slot_atomic(&dir, slot_index, &lease_token(snapshot_id, lessee_room_id))?;
+            Ok(derive(slot_index))
+        }
+        // Idempotent: our own lease, re-taken after a crash/retry.
+        SlotToken::Leased {
+            snapshot_id: owner,
+            lessee,
+        } if owner == snapshot_id && lessee == lessee_room_id => Ok(derive(slot_index)),
+        SlotToken::Leased { .. } => Err(SlotError::LeaseHeld { index: slot_index }),
+        _ => Err(SlotError::NotReserved { index: slot_index }),
+    }
+}
+
+/// What [`release_lease`] found at the slot index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Released {
+    /// The slot was this room's lease; it was returned to a plain reservation.
+    Returned,
+    /// The slot already holds this snapshot's reservation (idempotent teardown
+    /// retry — the lease was returned on an earlier pass).
+    AlreadyReturned,
+    /// The slot is leased by a *different* room, or holds no lease of ours —
+    /// left untouched.
+    NotOurLease,
+}
+
+/// Return a leased reservation to its unleased state on teardown of a
+/// restored-from-snapshot room — never to the free pool, so a later restore of
+/// the same snapshot still reclaims its frozen slot (D8).
+///
+/// Compare-and-rewrite under the free-lock, keyed on both the snapshot and the
+/// lessee, so a stale teardown of an already-relet slot cannot yank a live
+/// sibling's lease.
+///
+/// # Errors
+/// [`SlotError::InvalidIndex`] for an out-of-pool index; [`SlotError::Io`] on a
+/// filesystem error.
+pub fn release_lease(
+    state: &Path,
+    slot_index: u8,
+    snapshot_id: &str,
+    lessee_room_id: &str,
+) -> Result<Released, SlotError> {
+    ensure_pool_index(slot_index)?;
+    let dir = state.join(SLOTS_DIR);
+    let path = dir.join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        // The reservation is gone entirely — nothing of ours to return.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Released::NotOurLease),
+        Err(e) => return Err(SlotError::Io(e)),
+    };
+    match parse_token(&contents) {
+        SlotToken::Leased {
+            snapshot_id: owner,
+            lessee,
+        } if owner == snapshot_id && lessee == lessee_room_id => {
+            rewrite_slot_atomic(&dir, slot_index, &reservation_token(snapshot_id))?;
+            Ok(Released::Returned)
+        }
+        SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id => {
+            Ok(Released::AlreadyReturned)
+        }
+        _ => Ok(Released::NotOurLease),
+    }
+}
+
 /// One leaked slot found by [`reconcile`]: its claimer is confirmed dead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reclaimed {
@@ -366,30 +548,54 @@ enum SlotToken {
         pid: u32,
         starttime: u64,
     },
+    /// A snapshot-owned reservation, transferred from the base's claim on
+    /// `snapshot --consume` (D8). It holds the frozen slot/IP for a later
+    /// restore; [`reconcile`] never reclaims it — only [`SlotToken::Claimed`]
+    /// slots are pool-reclaimable — so the walk allocator can never steal the
+    /// slot the snapshot's guest IP is baked to.
+    Reserved { snapshot_id: String },
+    /// A reservation currently leased by a restored room. A restore *leases*
+    /// the reservation rather than consuming it; the lease returns to
+    /// [`SlotToken::Reserved`] on that room's teardown, never to the free pool,
+    /// so a repeat restore of the same snapshot still finds its slot.
+    Leased { snapshot_id: String, lessee: String },
 }
 
-/// Parse `<room_id>\n<pid> <starttime>\n`. Anything that doesn't fully parse —
-/// including a malformed room id, which also gates the path join in
-/// [`reconcile_slot`] against traversal — is [`SlotToken::InProgress`].
+/// Parse a slot file into its token variant. The claim grammar is
+/// `<room_id>\n<pid> <starttime>\n`; the reservation grammars are the
+/// `@`-sentinel single lines [`reservation_token`] / [`lease_token`] write.
+/// Anything that doesn't fully parse — including a malformed room id, which
+/// also gates the path join in [`reconcile_slot`] against traversal — is
+/// [`SlotToken::InProgress`].
 fn parse_token(contents: &str) -> SlotToken {
-    // The trailing newline is the commit marker — the last byte claim writes.
-    // A crash can truncate the token mid-number ("42 777" → "42 7"), which
-    // would parse cleanly, probe the WRONG incarnation, read it dead, and
-    // reclaim a live claimer's slot. An unterminated token is in-progress.
+    // The trailing newline is the commit marker — the last byte every token
+    // writer emits. A crash can truncate a claim mid-number ("42 777" → "42
+    // 7"), which would parse cleanly, probe the WRONG incarnation, read it
+    // dead, and reclaim a live claimer's slot. An unterminated token is
+    // in-progress.
     if !contents.ends_with('\n') {
         return SlotToken::InProgress;
     }
     let mut lines = contents.lines();
-    let Some(room_id) = lines.next() else {
+    let Some(first) = lines.next() else {
         return SlotToken::InProgress;
     };
-    // Mirrors `registry::is_valid_room_id` (26 lowercase-alphanumerics); a
-    // local copy keeps this layer free of a sibling import.
-    let id_shaped = room_id.len() == 26
-        && room_id
-            .bytes()
-            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase());
-    if !id_shaped {
+    // Reservation sentinels lead with `@` and a space — neither a room id nor a
+    // snapshot id (both 26 lowercase-alphanumerics) can spell that, so a
+    // reservation line never collides with a claim's room-id line.
+    if let Some(rest) = first.strip_prefix("@reservation ") {
+        if !is_id_shaped(rest) {
+            return SlotToken::InProgress;
+        }
+        return SlotToken::Reserved {
+            snapshot_id: rest.to_owned(),
+        };
+    }
+    if let Some(rest) = first.strip_prefix("@lease ") {
+        return parse_lease(rest);
+    }
+    // Otherwise a claim.
+    if !is_id_shaped(first) {
         return SlotToken::InProgress;
     }
     let Some(token_line) = lines.next() else {
@@ -402,10 +608,36 @@ fn parse_token(contents: &str) -> SlotToken {
         return SlotToken::InProgress;
     };
     SlotToken::Claimed {
-        room_id: room_id.to_owned(),
+        room_id: first.to_owned(),
         pid,
         starttime,
     }
+}
+
+/// Parse a `@lease <snapshot_id> <lessee_room_id>` payload (the sentinel
+/// already stripped). Both ids must be shaped and be the *only* tokens — a
+/// trailing field is a torn or forged write and reads as in-progress.
+fn parse_lease(rest: &str) -> SlotToken {
+    let mut parts = rest.split(' ');
+    let (Some(snapshot_id), Some(lessee), None) = (parts.next(), parts.next(), parts.next()) else {
+        return SlotToken::InProgress;
+    };
+    if !is_id_shaped(snapshot_id) || !is_id_shaped(lessee) {
+        return SlotToken::InProgress;
+    }
+    SlotToken::Leased {
+        snapshot_id: snapshot_id.to_owned(),
+        lessee: lessee.to_owned(),
+    }
+}
+
+/// The 26-lowercase-alphanumeric shape a room id and a snapshot id share
+/// (mirrors `registry::is_valid_room_id`; a local copy keeps this layer free of
+/// a sibling import). Also gates the reconcile path join against traversal.
+fn is_id_shaped(s: &str) -> bool {
+    s.len() == 26
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
 }
 
 /// Classify a claimer's `/proc/<pid>/stat` line against its recorded start
@@ -466,8 +698,8 @@ mod tests {
     )]
 
     use super::{
-        claim, classify_claimer_stat, free, parse_token, reconcile, Claimer, Freed, Liveness,
-        SlotError, SlotToken, MAX_SLOT, SLOTS_DIR,
+        claim, classify_claimer_stat, free, lease, parse_token, reconcile, release_lease, reserve,
+        Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken, MAX_SLOT, SLOTS_DIR,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -655,14 +887,22 @@ mod tests {
         for partial in [
             "",
             "\n",
-            &room_id(1),                            // id only, no token line
-            &format!("{}\n", room_id(1)),           // id only, trailing newline
-            &format!("{}\n42", room_id(1)),         // pid only, truncated
-            &format!("{}\n42\n", room_id(1)),       // pid only, committed
-            &format!("{}\n42 x\n", room_id(1)),     // unparseable starttime
-            &format!("{}\n42 7", room_id(1)),       // complete-looking but uncommitted
-            "short-id\n42 7\n",                     // malformed room id
-            "../../../../../../etc/passwd\n42 7\n", // traversal-shaped id
+            &room_id(1),                             // id only, no token line
+            &format!("{}\n", room_id(1)),            // id only, trailing newline
+            &format!("{}\n42", room_id(1)),          // pid only, truncated
+            &format!("{}\n42\n", room_id(1)),        // pid only, committed
+            &format!("{}\n42 x\n", room_id(1)),      // unparseable starttime
+            &format!("{}\n42 7", room_id(1)),        // complete-looking but uncommitted
+            "short-id\n42 7\n",                      // malformed room id
+            "../../../../../../etc/passwd\n42 7\n",  // traversal-shaped id
+            "@reservation \n",                       // reservation, empty snapshot id
+            &format!("@reservation {}", room_id(2)), // reservation, uncommitted
+            "@reservation short\n",                  // reservation, malformed id
+            &format!("@reservation {} {}\n", room_id(2), room_id(3)), // reservation, extra token
+            "@lease \n",                             // lease, no ids
+            &format!("@lease {}\n", room_id(2)),     // lease, missing lessee
+            &format!("@lease {} {}", room_id(2), room_id(3)), // lease, uncommitted
+            &format!("@lease {} {} x\n", room_id(2), room_id(3)), // lease, trailing field
         ] {
             assert_eq!(
                 parse_token(partial),
@@ -676,6 +916,19 @@ mod tests {
                 room_id: room_id(1),
                 pid: 42,
                 starttime: 7
+            }
+        );
+        assert_eq!(
+            parse_token(&format!("@reservation {}\n", room_id(2))),
+            SlotToken::Reserved {
+                snapshot_id: room_id(2)
+            }
+        );
+        assert_eq!(
+            parse_token(&format!("@lease {} {}\n", room_id(2), room_id(3))),
+            SlotToken::Leased {
+                snapshot_id: room_id(2),
+                lessee: room_id(3)
             }
         );
     }
@@ -720,6 +973,320 @@ mod tests {
     fn reconcile_on_missing_slots_dir_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(reconcile(dir.path()), Vec::new());
+    }
+
+    // --- D8: reservation / lease / return --------------------------------
+
+    /// Claim the exact `index` for `base`, as boot does before a snapshot.
+    fn base_claim(state: &Path, index: u8, base: &str) {
+        let me = Claimer {
+            pid: 1,
+            starttime: 1,
+        };
+        claim(state, base, me, 8, Some(index)).unwrap();
+    }
+
+    #[test]
+    fn reserve_transfers_a_base_claim_to_a_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 3, &base);
+        assert_eq!(
+            reserve(dir.path(), 3, &snap, &base).unwrap(),
+            Reserved::Transferred
+        );
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 3)).unwrap();
+        assert_eq!(contents, format!("@reservation {snap}\n"));
+        assert_eq!(
+            parse_token(&contents),
+            SlotToken::Reserved { snapshot_id: snap }
+        );
+    }
+
+    #[test]
+    fn reserve_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 3, &base);
+        reserve(dir.path(), 3, &snap, &base).unwrap();
+        assert_eq!(
+            reserve(dir.path(), 3, &snap, &base).unwrap(),
+            Reserved::AlreadyReserved,
+            "a repeated reserve of our own snapshot is a no-op"
+        );
+    }
+
+    #[test]
+    fn reserve_refuses_a_slot_owned_by_another_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = room_id(1);
+        base_claim(dir.path(), 3, &owner);
+        // A snapshot must never transfer a live *other* room's slot out from
+        // under it.
+        assert_eq!(
+            reserve(dir.path(), 3, &room_id(100), &room_id(2)).unwrap(),
+            Reserved::NotOwned
+        );
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 3)).unwrap();
+        assert_eq!(
+            contents.lines().next(),
+            Some(owner.as_str()),
+            "the live claim is untouched"
+        );
+    }
+
+    #[test]
+    fn reserve_of_a_free_slot_is_not_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            reserve(dir.path(), 3, &room_id(100), &room_id(1)).unwrap(),
+            Reserved::NotOwned,
+            "a free slot has no claim to transfer — never conjure a reservation"
+        );
+        assert!(!slot_path(dir.path(), 3).exists());
+    }
+
+    #[test]
+    fn walk_alloc_never_steals_a_reserved_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 1, &base);
+        reserve(dir.path(), 1, &snap, &base).unwrap();
+        // The lowest hole is the reserved index 1, but O_EXCL makes the walk
+        // skip it — the frozen slot can never be stolen by a cold `rooms run`.
+        let walked = claim(dir.path(), &room_id(2), ME, 8, None).unwrap();
+        assert_eq!(walked.index, 2, "the walk steps over the reservation");
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 1)).unwrap();
+        assert_eq!(
+            parse_token(&contents),
+            SlotToken::Reserved { snapshot_id: snap }
+        );
+    }
+
+    #[test]
+    fn claim_target_on_a_reserved_slot_is_target_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        // A *claim* (not a lease) of the reserved index must be refused —
+        // restore takes a lease, never a bare claim.
+        let taken = claim(dir.path(), &room_id(2), ME, 8, Some(5));
+        assert!(matches!(taken, Err(SlotError::TargetTaken { index: 5 })));
+    }
+
+    #[test]
+    fn reconcile_never_reclaims_a_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(SLOTS_DIR)).unwrap();
+        std::fs::write(
+            slot_path(dir.path(), 1),
+            format!("@reservation {}\n", room_id(100)),
+        )
+        .unwrap();
+        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert!(
+            slot_path(dir.path(), 1).exists(),
+            "a reservation has no live claimer but is never reclaimed"
+        );
+    }
+
+    #[test]
+    fn reconcile_never_reclaims_a_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(SLOTS_DIR)).unwrap();
+        std::fs::write(
+            slot_path(dir.path(), 1),
+            format!("@lease {} {}\n", room_id(100), room_id(2)),
+        )
+        .unwrap();
+        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert!(slot_path(dir.path(), 1).exists());
+    }
+
+    #[test]
+    fn lease_takes_a_reservation_and_derives_the_frozen_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        let leased = lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        assert_eq!(leased.index, 5);
+        assert_eq!(
+            leased.guest,
+            Ipv4Addr::new(172, 16, 0, 22),
+            "the lease derives the exact frozen guest IP"
+        );
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap();
+        assert_eq!(
+            parse_token(&contents),
+            SlotToken::Leased {
+                snapshot_id: snap,
+                lessee: room_id(2)
+            }
+        );
+    }
+
+    #[test]
+    fn lease_refuses_a_non_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        // An ordinary claim is not leasable.
+        base_claim(dir.path(), 5, &room_id(1));
+        assert!(matches!(
+            lease(dir.path(), 5, &room_id(100), &room_id(2)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+        // A free slot is not leasable.
+        assert!(matches!(
+            lease(dir.path(), 6, &room_id(100), &room_id(2)),
+            Err(SlotError::NotReserved { index: 6 })
+        ));
+    }
+
+    #[test]
+    fn lease_refuses_a_different_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = room_id(1);
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &room_id(100), &base).unwrap();
+        // A restore of a *different* snapshot must not lease this reservation,
+        // even though it targets the same index/IP.
+        assert!(matches!(
+            lease(dir.path(), 5, &room_id(200), &room_id(2)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+    }
+
+    #[test]
+    fn a_second_lease_is_refused_while_one_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        assert!(
+            matches!(
+                lease(dir.path(), 5, &snap, &room_id(3)),
+                Err(SlotError::LeaseHeld { index: 5 })
+            ),
+            "the frozen IP forbids two live leases"
+        );
+    }
+
+    #[test]
+    fn re_leasing_by_the_same_room_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        let first = lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        let again = lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        assert_eq!(
+            first.index, again.index,
+            "a lease retry by the same room is a no-op"
+        );
+    }
+
+    #[test]
+    fn release_returns_a_lease_to_the_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(2)).unwrap(),
+            Released::Returned
+        );
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap();
+        assert_eq!(
+            parse_token(&contents),
+            SlotToken::Reserved { snapshot_id: snap },
+            "the lease returns to a reservation, never to the free pool"
+        );
+    }
+
+    #[test]
+    fn release_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        release_lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(2)).unwrap(),
+            Released::AlreadyReturned,
+            "a teardown retry after the return is a no-op"
+        );
+    }
+
+    #[test]
+    fn release_refuses_another_rooms_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        // A stale teardown of room 3 must not yank room 2's live lease.
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(3)).unwrap(),
+            Released::NotOurLease
+        );
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap();
+        assert_eq!(
+            parse_token(&contents),
+            SlotToken::Leased {
+                snapshot_id: snap,
+                lessee: room_id(2)
+            }
+        );
+    }
+
+    #[test]
+    fn double_restore_reuses_the_persistent_reservation() {
+        // The phase-gate double restore, in the slot layer: reserve once, then
+        // lease→return→lease→return, each restore reclaiming the same slot and
+        // the reservation surviving every cycle.
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 7, &base);
+        reserve(dir.path(), 7, &snap, &base).unwrap();
+        for lessee in [room_id(2), room_id(3)] {
+            let leased = lease(dir.path(), 7, &snap, &lessee).unwrap();
+            assert_eq!(leased.index, 7, "every restore reclaims the frozen slot");
+            assert_eq!(
+                release_lease(dir.path(), 7, &snap, &lessee).unwrap(),
+                Released::Returned
+            );
+        }
+        let contents = std::fs::read_to_string(slot_path(dir.path(), 7)).unwrap();
+        assert_eq!(
+            parse_token(&contents),
+            SlotToken::Reserved { snapshot_id: snap }
+        );
+        // And after every cycle the walk still cannot take the reserved slot.
+        let walked = claim(dir.path(), &room_id(9), ME, 8, None).unwrap();
+        assert_ne!(walked.index, 7);
+    }
+
+    #[test]
+    fn reservation_ops_reject_out_of_pool_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in [0, MAX_SLOT + 1] {
+            assert!(matches!(
+                reserve(dir.path(), bad, &room_id(100), &room_id(1)),
+                Err(SlotError::InvalidIndex { index, .. }) if index == bad
+            ));
+            assert!(matches!(
+                lease(dir.path(), bad, &room_id(100), &room_id(2)),
+                Err(SlotError::InvalidIndex { index, .. }) if index == bad
+            ));
+            assert!(matches!(
+                release_lease(dir.path(), bad, &room_id(100), &room_id(2)),
+                Err(SlotError::InvalidIndex { index, .. }) if index == bad
+            ));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1170,6 +1737,48 @@ mod tests {
                     SlotToken::InProgress,
                     "truncated at {}: {:?}",
                     cut.index(full.len()),
+                    prefix
+                );
+            }
+
+            #[test]
+            fn reservation_token_round_trips(sid in any::<u32>()) {
+                let snap = room_id(sid);
+                prop_assert_eq!(
+                    parse_token(&format!("@reservation {snap}\n")),
+                    SlotToken::Reserved { snapshot_id: snap }
+                );
+            }
+
+            #[test]
+            fn lease_token_round_trips(sid in any::<u32>(), lid in any::<u32>()) {
+                let (snap, lessee) = (room_id(sid), room_id(lid));
+                prop_assert_eq!(
+                    parse_token(&format!("@lease {snap} {lessee}\n")),
+                    SlotToken::Leased { snapshot_id: snap, lessee }
+                );
+            }
+
+            // Any strict prefix of a reservation/lease token — single-line, so
+            // no prefix carries the terminal newline — must read as in-progress,
+            // never a (mis)parsed reservation.
+            #[test]
+            fn every_reservation_truncation_is_in_progress(
+                sid in any::<u32>(),
+                lid in any::<u32>(),
+                is_lease in any::<bool>(),
+                cut in any::<proptest::sample::Index>(),
+            ) {
+                let full = if is_lease {
+                    format!("@lease {} {}\n", room_id(sid), room_id(lid))
+                } else {
+                    format!("@reservation {}\n", room_id(sid))
+                };
+                let prefix = &full[..cut.index(full.len())];
+                prop_assert_eq!(
+                    parse_token(prefix),
+                    SlotToken::InProgress,
+                    "truncated: {:?}",
                     prefix
                 );
             }

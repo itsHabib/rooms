@@ -48,6 +48,15 @@ pub enum SlotError {
     /// A requested target index is already claimed by another room.
     #[error("target slot {index} already claimed")]
     TargetTaken { index: u8 },
+    /// A lease or return was attempted on a slot that holds no reservation for
+    /// the named snapshot — it is free, an ordinary claim, or a *different*
+    /// snapshot's reservation. Restore leases only its own frozen slot.
+    #[error("slot {index} holds no reservation for this snapshot")]
+    NotReserved { index: u8 },
+    /// A lease was attempted while another lease is already live. The frozen
+    /// guest IP forbids two concurrent restores of one snapshot.
+    #[error("slot {index} reservation is already leased")]
+    LeaseHeld { index: u8 },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
