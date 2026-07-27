@@ -13,7 +13,9 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::snapshot::{SnapshotMeta, SNAPSHOT_MEM_FILE, SNAPSHOT_VMSTATE_FILE};
+use crate::snapshot::{
+    SnapshotMeta, SNAPSHOT_MEM_FILE, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_VMSTATE_FILE,
+};
 
 /// Which pinned field made a snapshot incompatible with the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,12 @@ impl CompatField {
 /// A restore refused before any Firecracker call — fail-closed, never best-effort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RestoreError {
+    /// The snapshot metadata is a schema version this build does not understand.
+    /// `snapshot.json` is versioned for forward-compat, so a newer/foreign file
+    /// may still deserialize by retaining the shared fields — refuse before
+    /// interpreting its semantics as v-current.
+    #[error("unsupported snapshot schema version {found}; this build supports v{supported}")]
+    UnsupportedSchema { found: u32, supported: u32 },
     /// The snapshot's pinned `field` does not match the host, so loading it would
     /// fault or silently corrupt. Refuse; the remedy is to re-snapshot on this host.
     #[error("snapshot incompatible with host: {} mismatch; re-snapshot on this host", .field.as_str())]
@@ -100,13 +108,20 @@ impl RestorePlan {
 /// Fail closed: any mismatch is a hard refusal, never a best-effort load.
 ///
 /// # Errors
-/// [`RestoreError::SnapshotIncompatible`] naming the first field that differs
-/// (`fc_version` before `rootfs_hash`).
+/// - [`RestoreError::UnsupportedSchema`] if the metadata schema is not v-current.
+/// - [`RestoreError::SnapshotIncompatible`] naming the first field that differs
+///   (`fc_version` before `rootfs_hash`).
 pub fn check_compat(
     snap: &SnapshotMeta,
     host_fc_version: &str,
     host_rootfs_hash: &str,
 ) -> Result<(), RestoreError> {
+    if snap.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Err(RestoreError::UnsupportedSchema {
+            found: snap.schema_version,
+            supported: SNAPSHOT_SCHEMA_VERSION,
+        });
+    }
     if snap.fc_version != host_fc_version {
         return Err(RestoreError::SnapshotIncompatible {
             field: CompatField::FcVersion,
@@ -177,6 +192,23 @@ mod tests {
     #[test]
     fn compat_guard_passes_on_an_exact_match() {
         assert_eq!(check_compat(&snap_meta(), "1.9.0", "sha256:abc"), Ok(()));
+    }
+
+    #[test]
+    fn compat_guard_rejects_an_unsupported_schema_version() {
+        // A newer/foreign snapshot.json that still deserializes must be refused
+        // before its semantics are interpreted as v-current.
+        let mut future = snap_meta();
+        future.schema_version = SNAPSHOT_SCHEMA_VERSION + 1;
+        assert_eq!(
+            check_compat(&future, "1.9.0", "sha256:abc"),
+            Err(RestoreError::UnsupportedSchema {
+                found: SNAPSHOT_SCHEMA_VERSION + 1,
+                supported: SNAPSHOT_SCHEMA_VERSION,
+            }),
+        );
+        // And plan_restore emits no ops for it.
+        assert!(plan_restore(&future, "1.9.0", "sha256:abc").is_err());
     }
 
     #[test]
