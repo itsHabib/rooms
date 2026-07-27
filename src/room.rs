@@ -139,9 +139,9 @@ pub struct RoomMeta {
     ///
     /// **Private and guarded** — the whole point of the primitive is that no
     /// caller can assign `Neutral` directly or reset an established state past
-    /// the monotonic ladder. The only ways in are [`RoomMeta::as_base`] (fresh →
-    /// `Provisioning`), [`RoomMeta::seal`] (`Provisioning` → `Neutral`), and
-    /// [`RoomMeta::taint`]; read it via [`RoomMeta::provenance`] /
+    /// the monotonic ladder. The only ways in are [`RoomMeta::new_base`] (fresh
+    /// construction → `Provisioning`), [`RoomMeta::seal`] (`Provisioning` →
+    /// `Neutral`), and [`RoomMeta::taint`]; read it via [`RoomMeta::provenance`] /
     /// [`RoomMeta::is_snapshottable`]. Not serialized when absent, so legacy
     /// files keep their exact shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,20 +173,28 @@ impl RoomMeta {
         }
     }
 
-    /// Mark a freshly-created room as a sealed-neutral base candidate: fresh
-    /// (`None`) provenance starts `Provisioning`, so rooms' own warm-up may run
-    /// without tainting it. Chains off [`RoomMeta::new`].
+    /// Build a fresh sealed-neutral base candidate — like [`RoomMeta::new`] but
+    /// with provenance seeded to `Provisioning`, so rooms' own warm-up may run
+    /// without tainting it.
     ///
-    /// Only *fresh* metadata is promoted — a room already carrying provenance (a
-    /// loaded `Neutral`/`Tainted`, or an already-provisioning base) is returned
-    /// unchanged, so this can never perform the forbidden reset to `Provisioning`
-    /// and hand `seal` a tainted room to re-neutralize.
+    /// Base promotion happens **only at fresh construction**, never as a mutation
+    /// on loaded metadata: there is deliberately no `promote`/`as_base` method,
+    /// because `None` provenance means *either* fresh *or* a plain/legacy room
+    /// read from disk — so treating `None` as proof of freshness would let a
+    /// workload room be promoted into the snapshottable ladder. A base can only
+    /// originate here, from raw fields, never from an existing `RoomMeta`.
     #[must_use]
-    pub const fn as_base(mut self) -> Self {
-        if self.provenance.is_none() {
-            self.provenance = Some(Provenance::Provisioning);
-        }
-        self
+    pub const fn new_base(
+        id: String,
+        label: Option<String>,
+        pid: Option<u32>,
+        pid_starttime: Option<u64>,
+        keep: bool,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        let mut meta = Self::new(id, label, pid, pid_starttime, keep, started_at);
+        meta.provenance = Some(Provenance::Provisioning);
+        meta
     }
 
     /// Seal this base to `Neutral` — the quiesced beacon fired.
@@ -427,6 +435,18 @@ mod tests {
         )
     }
 
+    // A fresh sealed-neutral base candidate (provenance = Provisioning).
+    fn base(pid: Option<u32>) -> RoomMeta {
+        RoomMeta::new_base(
+            "01abcdefghijklmnopqrstuvwx".to_owned(),
+            Some("id".to_owned()),
+            pid,
+            pid.map(u64::from),
+            false,
+            Utc::now(),
+        )
+    }
+
     #[test]
     fn meta_round_trips_through_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -655,7 +675,7 @@ mod tests {
 
     #[test]
     fn base_seals_once_then_refuses_reseal_and_taint_is_terminal() {
-        let mut base = sample(Some(1)).as_base();
+        let mut base = base(Some(1));
         assert_eq!(base.provenance, Some(Provenance::Provisioning));
         assert!(
             !base.is_snapshottable(),
@@ -683,37 +703,30 @@ mod tests {
     }
 
     #[test]
-    fn as_base_never_resets_an_established_provenance() {
-        // The security hole: as_base on a loaded Tainted (or Neutral) room must
-        // NOT reset it to Provisioning — otherwise seal() could re-neutralize a
-        // tainted base. Only fresh (None) metadata is promoted.
-        let mut tainted = sample(Some(1)).as_base();
-        tainted.taint();
-        assert_eq!(tainted.provenance, Some(Provenance::Tainted));
-        let mut still_tainted = tainted.as_base();
-        assert_eq!(
-            still_tainted.provenance,
-            Some(Provenance::Tainted),
-            "as_base must not resurrect a tainted room to provisioning"
-        );
-        assert!(
-            still_tainted.seal().is_err(),
-            "and so it can never be re-sealed to neutral"
-        );
+    fn base_promotion_is_fresh_construction_only() {
+        // new_base is the ONLY route into Provisioning. There is deliberately no
+        // as_base/promote mutator: `None` provenance means *either* fresh *or* a
+        // plain/legacy room loaded from disk, so a runtime promotion path would
+        // let a workload room be lifted into the snapshottable ladder.
+        assert_eq!(base(Some(1)).provenance, Some(Provenance::Provisioning));
 
-        // Same guard for an already-neutral base: no reset, stays snapshottable-as-is.
-        let mut sealed = sample(Some(2)).as_base();
-        sealed.seal().expect("seal");
-        let re = sealed.as_base();
-        assert_eq!(re.provenance, Some(Provenance::Neutral));
+        // A plain room deserialized from disk stays None — not a base, never
+        // snapshottable, never sealable. The only way it becomes a base is a
+        // deliberate fresh new_base, never a mutation of this loaded record.
+        let plain: RoomMeta = serde_json::from_str(
+            r#"{"schema_version":4,"id":"01abcdefghijklmnopqrstuvwx","label":null,"started_at":"2026-06-28T00:00:00Z","pid":1,"pid_starttime":1,"keep":false}"#,
+        )
+        .expect("deserialize plain room");
+        assert_eq!(plain.provenance, None);
+        assert!(!plain.is_snapshottable());
     }
 
     #[test]
     fn taint_is_idempotent() {
-        let mut base = sample(Some(1)).as_base();
-        base.taint();
-        base.taint(); // a second taint must not change or resurrect the state
-        assert_eq!(base.provenance, Some(Provenance::Tainted));
+        let mut room = base(Some(1));
+        room.taint();
+        room.taint(); // a second taint must not change or resurrect the state
+        assert_eq!(room.provenance, Some(Provenance::Tainted));
     }
 
     #[test]
@@ -736,7 +749,7 @@ mod tests {
     #[test]
     fn provenance_round_trips_and_serializes_lowercase() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut meta = sample(Some(7)).as_base();
+        let mut meta = base(Some(7));
         meta.seal().expect("seal");
         write_atomic(dir.path(), &meta).expect("write");
         let back = read(dir.path()).expect("read").expect("present");
