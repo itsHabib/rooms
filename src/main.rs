@@ -726,6 +726,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         witness: args.witness,
         secrets: args.secrets.as_ref(),
         egress: &egress_plan,
+        base: false,
     };
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,

@@ -96,6 +96,7 @@ async fn firecracker_exits_early_is_caught() {
         witness: false,
         secrets: None,
         egress: &rooms::egress::Plan::Observe,
+        base: false,
     };
     let err = firecracker::boot(&req, &config)
         .await
@@ -149,6 +150,7 @@ async fn api_socket_never_appears() {
         witness: false,
         secrets: None,
         egress: &rooms::egress::Plan::Observe,
+        base: false,
     };
     let err = firecracker::boot(&req, &config)
         .await
@@ -192,6 +194,7 @@ async fn guest_unreachable() {
         witness: false,
         secrets: None,
         egress: &rooms::egress::Plan::Observe,
+        base: false,
     };
     let vm = firecracker::boot(&req, &config)
         .await
