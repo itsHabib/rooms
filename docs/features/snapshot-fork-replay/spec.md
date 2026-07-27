@@ -159,9 +159,12 @@ is in the file and in every clone. v1 tried to enforce this by *observing* a `se
 lifecycle event — but `RoomMeta` has no such field, lifecycle output is non-authoritative, and a
 `--keep` room can be tainted over SSH or vsock *after* the check (codex P1). So neutrality is a
 property of **how the base is created**, recorded as durable authoritative state:
-- `RoomMeta` gains a monotonic `provenance: neutral | tainted` field (authoritative, persisted).
-  It starts `neutral` only for a `base-create` room and flips to `tainted` **irreversibly** the
-  instant anything that could introduce unique/secret state occurs. There is no path back.
+- `RoomMeta` gains a monotonic `provenance: provisioning | neutral | tainted` field (authoritative,
+  persisted). A `base-create` room starts **`provisioning`** — the pre-seal window where only rooms'
+  own controlled warm-up session is legitimate (warm-up over SSH is itself an interactive session and
+  would otherwise taint the base before it could ever be sealed, codex P1). `provisioning → neutral`
+  happens only on the quiesced beacon; any *non-warm-up* ingress / secret-arm / workload-start flips
+  `tainted` **irreversibly** from either state. No path back.
 - `rooms snapshot` refuses unless `provenance == neutral`.
 - **v3 — sealing must cut the *actual* reachability, not just rooms-managed verbs (codex P1).** The
   canonical image bakes a running `sshd` + the operator's authorized key (`build-rootfs-alpine.sh:271`),
@@ -207,8 +210,12 @@ per-clone. `claim(target)` reclaim is thus the single-restore path; fan-out is n
   unusable. Fix: on `snapshot --consume`, **don't free k** — rewrite the slot file to a
   snapshot-owned reservation token (a shape `parse_token` classifies as **never-reclaim**), so
   `reconcile` (`slot.rs:297-329`) — which would otherwise judge a dead `rooms snapshot` process's
-  claim reclaimable via `(pid, starttime)` — leaves it held; `rooms restore` consumes the token via
-  `claim(target)`. Also name the narrow crash window: a crash **between** snapshot-create success and
+  claim reclaimable via `(pid, starttime)` — leaves it held. **The reservation is *persistent*: a
+  `rooms restore` takes a *lease* against it, not a consume (codex P1). Teardown of a
+  restored-from-snapshot room returns the slot to the reservation, never to the free pool** — else the
+  phase-gate double-restore fails (the first restore ate the only token) or the freed slot is stolen
+  between restores, recreating the race. One live lease at a time (the frozen IP forbids two). Also
+  name the narrow crash window: a crash **between** snapshot-create success and
   base teardown leaves the slot live-claimed → restore fails `TargetTaken` until `rooms gc` reaps the
   dead base (recoverable; remedy = gc-then-retry).
 Rejected: naive free-then-reclaim (the race above); the v3 form assumed atomic transfer was heavier
@@ -292,9 +299,11 @@ tuning — §10 Q2, now bounded to poll-retry), and **the exact per-daemon quies
 
 ## 5. Data model
 
-- **`RoomMeta.provenance`** (new, D2): `neutral | tainted`, monotonic, authoritative, persisted.
-  `neutral` only for a `base-create` room; flips to `tainted` irreversibly on any secret-arm /
-  workload-start / interactive session. `rooms snapshot` reads *this*, never a lifecycle event.
+- **`RoomMeta.provenance`** (new, D2): `provisioning | neutral | tainted`, monotonic, authoritative,
+  persisted. Starts `provisioning` for a `base-create` room (rooms' own warm-up is exempt); the
+  quiesced beacon writes `neutral`; any non-warm-up secret-arm / workload-start / interactive session
+  flips `tainted` irreversibly from either state. `rooms snapshot` reads *this* (requires `neutral`),
+  never a lifecycle event.
 - **Snapshot artifact** (per snapshot, room state dir `0700`): `snapshot.vmstate` (device/vCPU
   state, **includes the `/vsock` device**), `snapshot.mem` (guest memory — treat as a credential,
   though under D2 it holds no secret), `snapshot.json`: `{ schema_version, snapshot_id, created_at,
@@ -553,3 +562,15 @@ verified accurate; the holes were in ordering, verifiability, and staging.
   the CoW density thesis.
 - **P3 "private-repo warm-up can taint the base"** → **FR1 + §7A**: repo transfer uses the host-side
   bundle (no guest credential); a guest-side authed clone in `base-create` is forbidden.
+
+**v4.1 (2026-07-27) — spec-PR review (codex, 2×P1 + 1×P2 on the phase-1 task specs #91).**
+- **P1 "preserve the reservation across repeated restores"** → **D8**: the snapshot's slot reservation
+  is *persistent*; a restore *leases* it and teardown *returns* it (not free-to-pool), or the
+  gate-required double-restore re-opens the steal race.
+- **P1 "exempt the provisioning SSH session from taint"** → **D2/§5**: `provenance` gains a
+  **`provisioning`** pre-seal state so the rooms-controlled warm-up-over-SSH doesn't taint the base
+  before it can be sealed; `provisioning → neutral` on the beacon.
+- **P2 "deleting a loaded host key isn't sanitization"** → **D2/§7A**: if `sshd` ran pre-snapshot it
+  already loaded the baked private key into pages that reach `snapshot.mem`; the snapshot-capable base
+  must never load a baked host key (no baked keys + non-interactive warm-up preferred), not merely
+  unlink the file during quiesce.

@@ -24,7 +24,8 @@ Nothing restores a snapshot. Restore is a **different** Firecracker flow from bo
 
 - **New `restore(req: RestoreRequest) -> Result<Guard, FirecrackerError>`** — a **sibling to `boot()`** (design D4 — *not* a flag on `boot()`/`configure_vm`, `firecracker.rs:1232`), sharing the jail / guard / staging plumbing.
 - **`rooms restore <snap> [--slot <k>]`**:
-  - `claim(target: Some(k))` **consumes the snapshot-owned reservation token** left by task `snapshot-create` (design D8 v4) — returns `TargetTaken` if the slot is busy, **never** a silent fallback to another slot. (The token is why the frozen IP's slot is still available: the base was torn down but the slot was transferred, not freed, so no concurrent room could steal it.)
+  - `claim(target: Some(k))` takes a **lease against the snapshot-owned reservation** left by task `snapshot-create` (design D8 v4) — returns `TargetTaken` if the slot already has a live lease, **never** a silent fallback to another slot. (The reservation is why the frozen IP's slot is still available: the base was torn down but the slot was transferred to the snapshot, not freed, so no concurrent room could steal it.)
+  - **The snapshot's ownership is *persistent*; a restore only *leases* the slot (codex P1).** The lease must NOT consume/replace the reservation token, and **teardown of a restored-from-snapshot room returns the slot to the snapshot reservation, not to the free pool.** Otherwise the *second* restore the phase gate requires hits `TargetTaken` (the first restore ate the only token) or — worse — first-room teardown frees the slot and a concurrent room steals it, recreating the exact race D8 exists to kill. Restore-then-teardown-then-restore-again must round-trip through the reservation, leaving it intact for the next lease.
   - **`snapshot.mem` is bind-mounted (not copied) into the jail** (design D6 v4, boot-path precedent `firecracker.rs:29-31/951-952`) so N clones later `MAP_PRIVATE` the same inode and CoW-share; `snapshot.vmstate` (small, read once) may be copied.
   - **install the witness pcap + egress chain BEFORE resume** (design FR7 v4, same fail-closed posture as boot `firecracker.rs:478-498`) — a warm restored guest has network up instantly with no boot delay, so custody must exist before `Resumed` or the guest transmits in the gap. `restore` accepts the same `--witness` / egress flags as `boot`.
   - fresh FC process; `PUT /snapshot/load {mem_backend:{backend_type:"File"}}` **BEFORE** any other config → `PATCH /vm {state:"Resumed"}`.
@@ -37,13 +38,14 @@ Nothing restores a snapshot. Restore is a **different** Firecracker flow from bo
 
 - `rooms restore` on a fresh snapshot reaches SSH-ready on the **same slot/IP** against a **freshly-keyed `sshd`**; `room::probe` liveness works against the restored guest.
 - A snapshot with a mismatched `fc_version` **or** `rootfs_hash` → `SnapshotIncompatible{field}`, **nothing loaded**.
-- Same-slot restore has **zero IP collision** (the reservation token is consumed, not double-allocated).
+- Same-slot restore has **zero IP collision** (one live lease at a time).
+- **Restore → teardown → restore again** (the phase-gate double-restore) succeeds both times: teardown returns the slot to the snapshot reservation, so the second restore leases it cleanly and no concurrent room can steal it in between.
 - Witness + egress are active **before** the guest resumes (no transmit gap); `restore` honors `--witness` / egress flags.
 - The hygiene nudge is **acked before `workload_started`**; a withheld ack ⇒ no workload (fail closed).
 
 ## Test plan
 
-Rust unit tests: restore flow (assert witness/egress install **and** `snapshot/load` both precede `Resumed`, and `snapshot/load` precedes any other config), both compat-guard branches (fc_version mismatch, rootfs_hash mismatch), reservation-token consume (`TargetTaken` on busy, no silent fallback), ack-gate (no ack ⇒ no workload). **Phase intermediate gate** (rooms-host): snapshot a room, restore it **twice**, confirm both reach workload-ready, compat guard fires on a forced mismatch, and the two restores show **distinct kernel RNG draws, a resynced clock, and distinct `sshd` host keys** (hygiene fires on every restore).
+Rust unit tests: restore flow (assert witness/egress install **and** `snapshot/load` both precede `Resumed`, and `snapshot/load` precedes any other config), both compat-guard branches (fc_version mismatch, rootfs_hash mismatch), lease acquire (`TargetTaken` on busy, no silent fallback), **lease round-trip** (restore → teardown returns the slot to the snapshot reservation → second restore leases it again; the reservation is never freed to the pool), ack-gate (no ack ⇒ no workload). **Phase intermediate gate** (rooms-host): snapshot a room, restore it **twice**, confirm both reach workload-ready, compat guard fires on a forced mismatch, and the two restores show **distinct kernel RNG draws, a resynced clock, and distinct `sshd` host keys** (hygiene fires on every restore).
 
 ## Non-goals
 

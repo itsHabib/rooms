@@ -32,20 +32,21 @@ Introduce a sealed neutral-base boot mode and an authoritative provenance marker
 - **Quiesce before sealing (design D2 v3/v4 — load-bearing).** After warm-up, seal the base:
   - a **detached guest-side quiesce script** stops `sshd` + every non-essential daemon, **waits for its own invoking `sshd` ancestor to exit** (`rc-service sshd stop` only stops the *listener* — the per-connection child servicing the stop command lives on, and would be captured live in the snapshot), and asserts the process table is exactly `{init, kworkers, resume-apply agent}`.
   - the resume-apply agent then flips a **"quiesced" beacon** the host reads over a single vsock connect. `provenance = neutral` is written **only after** that beacon — never on the bare exit of the stop command (Fable P1).
-  - **host keys:** the canonical image bakes `ssh_host_*` at build (`build-rootfs-alpine.sh:281`); a snapshot-capable image must drop build-time keygen (or delete the keys during quiesce) so no shared host key is captured — the fresh per-clone key is generated on resume (task `restore-single`) (Fable P2).
-- **`RoomMeta.provenance: neutral | tainted`** — additive `room.rs` field (v-bump the persisted schema per the additive-write convention). Semantics:
-  - `neutral` is set **only** for a `base-create` room, **only after the quiesced beacon**.
-  - flips to `tainted` **irreversibly and monotonically** on any secret-arm, workload/agent start, or interactive session. No path back to `neutral`.
-  - authoritative and persisted — not derived from lifecycle output.
+  - **host keys — deleting a *loaded* key does not sanitize it (codex P2).** The canonical image bakes `ssh_host_*` at build (`build-rootfs-alpine.sh:281`); if warm-up runs `sshd`, it has **already read the private key into process + page-cache pages**, so unlinking `/etc/ssh/ssh_host_*` during quiesce leaves those bytes recoverable in `snapshot.mem` and fails the mem-grep gate. So delete-after-load is **not** an acceptable path. The snapshot-capable base must **never load a baked private host key**: either (a) the snapshot-capable image ships with **no baked host keys** *and* warm-up does not run `sshd` (move warm-up to a non-interactive channel — design §10 Q7, now the strong lean), or (b) if `sshd` must run pre-snapshot, it uses an **ephemeral key generated into a tmpfs/overlay path that quiesce can actually drop before pages are dirtied into the snapshot** — and the mem-grep then targets *that* ephemeral key. The fresh per-clone key is always generated on resume (task `restore-single`). Resolve which in the phase-1 spike; option (a) is cleanest.
+- **`RoomMeta.provenance: provisioning | neutral | tainted`** — additive `room.rs` field (v-bump the persisted schema per the additive-write convention). Three states, because warm-up-over-SSH is itself an interactive session and would otherwise taint the base before it can ever be sealed (codex P1):
+  - a `base-create` room starts in **`provisioning`** — the pre-seal window where **only rooms' own controlled warm-up session** (repo bundle already staged, toolchain-warm over SSH) is legitimate. Warm-up in `provisioning` does **not** taint.
+  - **`provisioning → neutral`** happens **only** on the quiesced beacon (after the detached quiesce script + process-table assertion).
+  - flips to **`tainted`** **irreversibly and monotonically** from *either* state on any secret-arm, workload/agent start, or **any interactive ingress that is not the rooms-controlled warm-up** (e.g. an operator `exec`, a session opened after seal). No path back.
+  - authoritative and persisted — not derived from lifecycle output. The legal ladder is `provisioning → neutral` and `{provisioning, neutral} → tainted`; never `tainted → *` or `neutral → provisioning`.
 - **Decision (design §10 Q1):** distinct `base-create` mode vs. default boot + a `--seal` flag. **Lean distinct mode** — a separate verb keeps the neutral boot shape un-ambiguous and avoids a boot-flag matrix; implement `base-create` as its own mode.
 
 ## Acceptance
 
-- `rooms base-create` yields a room with `provenance=neutral`, `/vsock` present, **no agent running**, and repo content delivered via the transport bundle (no guest credential present).
-- `provenance=neutral` is written **only after** the quiesced beacon — the process table at seal time is `{init, kworkers, resume-apply agent}` with no live `sshd` (listener or session child).
-- Arming a secret / starting the agent / opening an interactive session flips `provenance=tainted` **durably and irreversibly** (a subsequent read never returns `neutral`).
-- The snapshot path (task `snapshot-create`) reads `provenance` and refuses a non-neutral room.
-- Unit tests cover: provenance monotonicity (no neutral-after-tainted transition), seal/ingress enforcement, the `base-create` boot shape (vsock present, agent absent), and that the neutral write is gated on the beacon (not the stop-command exit).
+- `rooms base-create` yields a room in `provenance=provisioning`, `/vsock` present, **no agent running**, repo content delivered via the transport bundle (no guest credential present); the rooms-controlled warm-up runs in `provisioning` **without** tainting.
+- `provisioning → neutral` is written **only after** the quiesced beacon — the process table at seal time is `{init, kworkers, resume-apply agent}` with no live `sshd` (listener or session child) and no loaded baked host key.
+- Any non-warm-up interactive ingress, secret-arm, or agent start flips `provenance=tainted` **durably and irreversibly** from either state (a subsequent read never returns `neutral`/`provisioning`).
+- The snapshot path (task `snapshot-create`) reads `provenance` and refuses anything other than `neutral` (a still-`provisioning` or `tainted` room is refused).
+- Unit tests cover: the state ladder (`provisioning→neutral`, `{provisioning,neutral}→tainted`, no illegal transition), the warm-up-does-not-taint exemption vs. a non-warm-up session that does, the `base-create` boot shape (vsock present, agent absent), and that the neutral write is gated on the beacon (not the stop-command exit).
 
 ## Test plan
 
