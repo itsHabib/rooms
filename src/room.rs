@@ -10,11 +10,14 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-/// Schema version for `room.json` (forward-compat, mirrors `result.json`). v2
-/// adds `pid_starttime`; v3 adds the optional `slot` object. Older files still
-/// read (both fields default to `None`).
-pub const ROOM_META_SCHEMA_VERSION: u32 = 3;
+/// Schema version for `room.json` (forward-compat, mirrors `result.json`).
+///
+/// v2 adds `pid_starttime`; v3 adds the optional `slot` object; v4 adds the
+/// optional `provenance` (sealed-neutral-base lineage). Older files still read
+/// (each added field defaults to `None`).
+pub const ROOM_META_SCHEMA_VERSION: u32 = 4;
 
 /// Metadata file name inside a room's state dir.
 pub const ROOM_META_FILE: &str = "room.json";
@@ -50,6 +53,63 @@ pub struct Slot {
     pub prefix: u8,
 }
 
+/// Neutrality lineage of a room — authoritative, persisted, and monotonic.
+///
+/// A Full snapshot's memory file is plaintext guest RAM, so a base may be frozen
+/// only when it is provably secret-free. Rather than *observe* a "no secrets yet"
+/// event — unenforceable, since a held room can be tainted after the check —
+/// neutrality is a property of how the base was built, recorded here as durable
+/// state that only ever moves one way.
+///
+/// Legal transitions: `Provisioning → Neutral` (the seal, once the base is
+/// quiesced) and `{Provisioning, Neutral} → Tainted` (any secret-arm, workload
+/// start, or ingress that isn't rooms' own warm-up). `Tainted` is terminal —
+/// there is no path back. A plain workload room (or a pre-v4 `room.json`) carries
+/// no provenance at all and is never snapshottable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provenance {
+    /// Pre-seal: rooms is warming the base over its own controlled session. Only
+    /// that warm-up is legitimate here, and it does not taint.
+    Provisioning,
+    /// Sealed and provably secret-free — the only state a snapshot may freeze.
+    Neutral,
+    /// Poisoned: unique or secret state may be present. Terminal.
+    Tainted,
+}
+
+/// The one illegal provenance move: sealing a room that isn't provisioning.
+///
+/// Tainting is always legal (monotonic, terminal), so [`Provenance::seal`] is the
+/// only fallible transition. Carries the offending state — `None` means the room
+/// has no provenance at all (not a base).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("illegal seal: only a provisioning base seals to neutral (was {0:?})")]
+pub struct IllegalSeal(pub Option<Provenance>);
+
+impl Provenance {
+    /// Seal a provisioning base to `Neutral` — the guest is quiesced and the
+    /// beacon fired. Legal only from `Provisioning`; sealing a `Neutral` or
+    /// `Tainted` room is refused, the load-bearing rule: a tainted base must
+    /// never present as neutral to the snapshot path.
+    ///
+    /// # Errors
+    /// [`IllegalSeal`] when `self` is not `Provisioning`.
+    pub const fn seal(self) -> Result<Self, IllegalSeal> {
+        match self {
+            Self::Provisioning => Ok(Self::Neutral),
+            other => Err(IllegalSeal(Some(other))),
+        }
+    }
+
+    /// Whether a snapshot may freeze a room in this state — `true` only for
+    /// `Neutral`.
+    #[must_use]
+    pub const fn is_snapshottable(self) -> bool {
+        matches!(self, Self::Neutral)
+    }
+}
+
 /// Persisted metadata for one room, written atomically at boot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoomMeta {
@@ -74,6 +134,12 @@ pub struct RoomMeta {
     /// keep their exact shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<Slot>,
+    /// Sealed-neutral-base lineage (`rooms base-create`); `None` for a plain
+    /// workload room or a pre-v4 `room.json`. The snapshot path freezes a room
+    /// only when this is `Some(Provenance::Neutral)`. Not serialized when absent,
+    /// so legacy files keep their exact shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 impl RoomMeta {
@@ -97,7 +163,43 @@ impl RoomMeta {
             pid_starttime,
             keep,
             slot: None,
+            provenance: None,
         }
+    }
+
+    /// Mark a freshly-booted room as a sealed-neutral base candidate: its
+    /// provenance starts `Provisioning`, so rooms' own warm-up may run without
+    /// tainting it. Chains off [`RoomMeta::new`].
+    #[must_use]
+    pub const fn as_base(mut self) -> Self {
+        self.provenance = Some(Provenance::Provisioning);
+        self
+    }
+
+    /// Seal this base to `Neutral` — the quiesced beacon fired.
+    ///
+    /// # Errors
+    /// [`IllegalSeal`] unless the room is a provisioning base: a non-base
+    /// (`None`), an already-`Neutral`, or a `Tainted` room cannot be sealed.
+    pub fn seal(&mut self) -> Result<(), IllegalSeal> {
+        let sealed = self.provenance.ok_or(IllegalSeal(None))?.seal()?;
+        self.provenance = Some(sealed);
+        Ok(())
+    }
+
+    /// Taint this room's provenance irreversibly. A no-op on a non-base (`None`)
+    /// room — there is no neutrality to lose.
+    pub const fn taint(&mut self) {
+        if self.provenance.is_some() {
+            self.provenance = Some(Provenance::Tainted);
+        }
+    }
+
+    /// Whether the snapshot path may freeze this room — `true` only for a base
+    /// sealed to `Neutral`. The consumption point for `rooms snapshot`.
+    #[must_use]
+    pub fn is_snapshottable(&self) -> bool {
+        self.provenance.is_some_and(Provenance::is_snapshottable)
     }
 }
 
@@ -287,7 +389,7 @@ mod tests {
 
     use super::{
         classify_comm, classify_stat, classify_stat_with_identity, parse_starttime, probe, read,
-        write_atomic, Liveness, RoomMeta, Slot,
+        write_atomic, IllegalSeal, Liveness, Provenance, RoomMeta, Slot,
     };
     use chrono::Utc;
     use std::net::Ipv4Addr;
@@ -503,5 +605,112 @@ mod tests {
         // existence, so this must read Dead.
         let me = std::process::id();
         assert_eq!(probe(Some(me), None), Liveness::Dead);
+    }
+
+    // ---- provenance: the sealed-neutral-base security primitive ----
+
+    #[test]
+    fn seal_is_legal_only_from_provisioning() {
+        assert_eq!(Provenance::Provisioning.seal(), Ok(Provenance::Neutral));
+        assert_eq!(
+            Provenance::Neutral.seal(),
+            Err(IllegalSeal(Some(Provenance::Neutral))),
+            "an already-neutral base must not re-seal"
+        );
+        assert_eq!(
+            Provenance::Tainted.seal(),
+            Err(IllegalSeal(Some(Provenance::Tainted))),
+            "a tainted base must never present as neutral — the load-bearing rule"
+        );
+    }
+
+    #[test]
+    fn only_neutral_is_snapshottable() {
+        assert!(!Provenance::Provisioning.is_snapshottable());
+        assert!(Provenance::Neutral.is_snapshottable());
+        assert!(!Provenance::Tainted.is_snapshottable());
+    }
+
+    #[test]
+    fn base_seals_once_then_refuses_reseal_and_taint_is_terminal() {
+        let mut base = sample(Some(1)).as_base();
+        assert_eq!(base.provenance, Some(Provenance::Provisioning));
+        assert!(
+            !base.is_snapshottable(),
+            "a provisioning base is not yet freezable"
+        );
+
+        base.seal().expect("a provisioning base seals to neutral");
+        assert_eq!(base.provenance, Some(Provenance::Neutral));
+        assert!(base.is_snapshottable(), "a sealed base is freezable");
+
+        // Sealing again is refused — no re-seal.
+        assert_eq!(base.seal(), Err(IllegalSeal(Some(Provenance::Neutral))));
+
+        // Taint is irreversible and terminal: it poisons, and seal never recovers.
+        base.taint();
+        assert_eq!(base.provenance, Some(Provenance::Tainted));
+        assert!(
+            !base.is_snapshottable(),
+            "a tainted base is never freezable"
+        );
+        assert!(
+            base.seal().is_err(),
+            "a tainted base never re-seals to neutral"
+        );
+    }
+
+    #[test]
+    fn non_base_room_is_unsealable_and_never_snapshottable() {
+        let mut plain = sample(Some(1)); // a plain workload room: provenance None
+        assert_eq!(plain.provenance, None);
+        assert!(!plain.is_snapshottable());
+        assert_eq!(
+            plain.seal(),
+            Err(IllegalSeal(None)),
+            "a room with no provenance is not a base and cannot be sealed"
+        );
+        plain.taint();
+        assert_eq!(
+            plain.provenance, None,
+            "tainting a non-base room stays None"
+        );
+    }
+
+    #[test]
+    fn provenance_round_trips_and_serializes_lowercase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut meta = sample(Some(7)).as_base();
+        meta.seal().expect("seal");
+        write_atomic(dir.path(), &meta).expect("write");
+        let back = read(dir.path()).expect("read").expect("present");
+        assert_eq!(back.provenance, Some(Provenance::Neutral));
+
+        let json = serde_json::to_string(&meta).expect("serialize");
+        assert!(
+            json.contains("\"provenance\":\"neutral\""),
+            "provenance serializes as a lowercase tag, got {json}"
+        );
+    }
+
+    #[test]
+    fn provenanceless_room_omits_the_key() {
+        // A plain workload room must keep its exact file shape: no "provenance".
+        let json = serde_json::to_string(&sample(None)).expect("serialize");
+        assert!(
+            !json.contains("provenance"),
+            "absent provenance must not serialize"
+        );
+    }
+
+    #[test]
+    fn v3_meta_without_provenance_still_reads() {
+        // A pre-v4 room.json (no provenance field) must still deserialize, with
+        // the field defaulting to None (a plain workload room) — back-compat.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let v3 = r#"{"schema_version":3,"id":"01abcdefghijklmnopqrstuvwx","label":null,"started_at":"2026-06-28T00:00:00Z","pid":42,"pid_starttime":7,"keep":false}"#;
+        std::fs::write(dir.path().join("room.json"), v3).expect("write v3");
+        let back = read(dir.path()).expect("read").expect("present");
+        assert_eq!(back.provenance, None);
     }
 }
