@@ -11,6 +11,7 @@ pub mod isolation;
 pub mod lifecycle;
 pub mod preflight;
 pub mod registry;
+pub mod restore;
 pub mod room;
 pub mod rootfs;
 pub mod runner;
