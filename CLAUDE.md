@@ -21,9 +21,11 @@ These MCPs, planes, and skills are available in any agent session on this machin
 - **huddle** — *optional* multi-seat coordination (Slack-backed); off the normal PR path.
 - **playwright** — browser automation when a task needs a real DOM.
 
-**Planes (CLIs, composed via exit codes + JSONL — not MCPs):**
-- **gate** — authorization: evaluates the *exact* PR head, emits governed-path merge authorization. Findings ≠ authorization; gate is the merge boundary.
+**Planes (workbench tenants — CLIs composed via exit codes + JSONL, not MCPs; `itsHabib/workbench` `cmd/<tool>`):**
+- **gate** — the flagship: authorization. Evaluates the *exact* PR head against an operator-minted grant + the escalate-only verifier ladder; hash-chained audit log; exit 0 pass / 1 blocked / 2 parked / 3 refused / 4 error. Findings ≠ authorization; gate is the merge boundary. State + keys stay `~/pers/gate`.
 - **flare** — notification: best-effort escalation sink over authoritative receipts → its own Slack app/channel. Pure sink; never gates; not built on huddle.
+- **console** — read-only local web view of gate's inbox (parked runs + grant ledger); shells the gate binary, owns no authoritative state.
+- **escalate** — the agent→human→agent back-channel: ingests the human's decision for a parked escalation and drives `gate resolve`.
 
 **Skills:**
 - **/work-driver** [+ **/work-driver-prep**] — drive agent-led impl end-to-end; prep builds the specs + conflict-batched plan.
@@ -38,8 +40,9 @@ These MCPs, planes, and skills are available in any agent session on this machin
 ```
 dossier task → /worktree-add → spec → ship driver (cloud-first: dispatch→poll→judgment→land→record)
    → PR + CI → /pr-risk tiers it → reviewers fire → /review-coordinator → one verdict
-   → gate evaluates the exact head → governed-path authorization → merge
+   → gate evaluates the exact head → 0: governed-path authorization → merge
    → authoritative receipts → dossier close-out → /worktree-remove
+        ↘ 2: gate PARKS → console / gate next surface it → human decides → escalate → gate resolve → re-judge
         ↘ any attention/terminal receipt → best-effort flare sweep → Slack   (independent; never gates)
 ```
 
@@ -47,19 +50,19 @@ dossier task → /worktree-add → spec → ship driver (cloud-first: dispatch�
 
 ### Why this shape
 
-Each layer owns one responsibility and is swappable without rippling: dossier owns *what needs doing*; worktree skills own *where work happens*; ship owns *drive an agent + persist the run*; pr-risk owns *how much review*; review-coordinator owns *consolidate the finders* (the bots are swappable under it); **gate owns *authorization* — is this exact head allowed to merge — which is not the reviewers' findings**; **flare owns *notification* — a best-effort sink on authoritative receipts, its own Slack app, never blocking the driver, never depending on huddle**; consult owns the stuck path; huddle owns optional multi-seat; playwright owns browser. The workbench is a menu, not a checklist — skip what a flow doesn't need.
+Each layer owns one responsibility and is swappable without rippling: dossier owns *what needs doing*; worktree skills own *where work happens*; ship owns *drive an agent + persist the run*; pr-risk owns *how much review*; review-coordinator owns *consolidate the finders* (the bots are swappable under it); **gate owns *authorization* — is this exact head allowed to merge — which is not the reviewers' findings**; **escalate owns *resolution* — closing the agent→human→agent loop a park opens, without ever deciding for the human**; **console owns the *read-only view* of gate's inbox — it explains, never decides**; **flare owns *notification* — a best-effort sink on authoritative receipts, its own Slack app, never blocking the driver, never depending on huddle**; consult owns the stuck path; huddle owns optional multi-seat; playwright owns browser. The workbench is a menu, not a checklist — skip what a flow doesn't need.
 
 ### The shape underneath
 
 These tools instantiate the redesign's five contract planes — coupled only by typed artifacts (`evidence → verdict → action`), never call stacks:
 
-- **State** (remembers) — dossier + run/verdict/grant/receipt artifacts; the append-only substrate.
+- **State** (remembers) — dossier + gate's hash-chained log + run/verdict/grant/receipt artifacts; the append-only substrate.
 - **Execution** (does) — ship's driver; emits evidence, never judges itself.
-- **Verification** (judges) — the escalate-only ladder (deterministic floor → local → premium), monotone `worst`/`max`: gate's reducer, review-coordinator, sense/triage/tracelens.
+- **Verification** (judges) — the escalate-only ladder (deterministic floor → local → premium), monotone `worst`/`max`: gate's reducer, review-coordinator, triage/tracelens.
 - **Capability** (bounds) — scoped/timed grants; every effectful verb needs a live grant + a supporting verdict.
-- **Observability** (explains) — read-only, storeless views from State: flare, /wip, /shipped, /status.
+- **Observability** (explains) — read-only, storeless views from State: flare, console, /wip, /shipped, /status.
 
-This section is the sixth — **Composition**: the agent + thin policy choosing which planes a task needs. The boundaries above *are* the plane laws, not conventions.
+This section is the sixth — **Composition**: the agent + thin policy choosing which planes a task needs. gate is the flagship — the one tool spanning Verification + Capability, holding the merge boundary. The boundaries above *are* the plane laws, not conventions.
 <!-- END dev-workbench -->
 
 ## Architecture
