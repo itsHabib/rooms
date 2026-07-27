@@ -425,7 +425,7 @@ fn main() -> ExitCode {
     let secrets = match harvest_cli_secrets(&cli) {
         Ok(secrets) => secrets,
         Err(err) => {
-            if run_wants_json(&cli) {
+            if wants_json_error_record(&cli) {
                 emit_run_error_json(&err);
             }
             warn!(error = %err, "command failed");
@@ -444,9 +444,13 @@ fn harvest_cli_secrets(cli: &Cli) -> Result<Option<vsock::SecretsPayload>, Rooms
     harvest_secrets(secret)
 }
 
-/// Whether the invocation asked for the machine-readable error record.
-const fn run_wants_json(cli: &Cli) -> bool {
-    matches!(cli.command, Command::Run { json: true, .. })
+/// Whether the invocation asked for the machine-readable error record — the
+/// `--json` verbs, for a failure raised before `async_main` starts.
+const fn wants_json_error_record(cli: &Cli) -> bool {
+    matches!(
+        cli.command,
+        Command::Run { json: true, .. } | Command::BaseCreate { json: true, .. }
+    )
 }
 
 #[tokio::main]
@@ -936,11 +940,13 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
 /// provisioning provenance so a caller can later gate the seal on it.
 fn emit_base_created(room_id: &str, slot: &room::Slot, json: bool) {
     if json {
+        // Serialize the provenance from the enum, not a literal, so `room.json`
+        // and this record can never drift on a variant rename.
         let record = serde_json::json!({
             "room_id": room_id,
             "slot": slot.index,
             "guest_ip": slot.guest.to_string(),
-            "provenance": "provisioning",
+            "provenance": room::Provenance::Provisioning,
         });
         match serde_json::to_string(&record) {
             Ok(line) => {
