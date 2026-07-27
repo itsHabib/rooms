@@ -7,6 +7,8 @@
 
 > **v2 (2026-07-27)** — revised after design review. codex flagged five load-bearing holes (4×P1, 1×P2); all folded in. The shape changed in two places: **(D2)** neutrality is now enforced *by construction* via a sealed neutral-base boot mode + authoritative monotonic provenance state, not an observed `secrets_delivered` flag; **(D7)** the post-resume nudge now has a real guest receiver (the base carries `/vsock` into the snapshot + a resume-apply agent), and **restore-time hygiene — reseed, clock, identity — moved into phase 1** (single restore reused >once already duplicates RNG/clock, so it can't wait for the fork phase). See the §12 changelog for the finding-by-finding map.
 
+> **v3 (2026-07-27)** — second review pass. codex found four deeper holes (3×P1, 1×P2), all converging on one fact: **the base still ran live crypto daemons (`sshd`, the resume-apply agent) at snapshot time.** The fix is one move — **quiesce the base before sealing**: rooms drives warm-up over SSH, then **stops `sshd` and quiesces non-essential daemons** *before* marking neutral, so the snapshot captures no live SSH session, no baked-in reachable SSH path, and no duplicated userspace DRBG; the resume-apply agent brings a **freshly-keyed `sshd`** back per clone on resume (which also fixes duplicate host keys). Plus: the base is an explicit **template destroyed to free its slot before restore** (D8), and the density gate measures **PSS**, not `free`. See §12.
+
 > **Reviewers — focus areas:**
 > - **§4 D2 + §7 A** — neutrality *by construction*: the sealed neutral-base boot mode + monotonic `provenance` state. This is the load-bearing security rule; if a base can be tainted after the neutrality check, the design leaks secrets into `snapshot.mem`.
 > - **§4 D7 + §7 B** — the post-resume receiver + the ack gate. A neutral base boots without `--secret`; the guest still needs a live consumer for the reseed/clock/identity nudge *on resume*, or every clone fails closed. The resume-trigger mechanism is the one genuinely open sub-decision (§10 Q2).
@@ -145,23 +147,41 @@ buys warm-base reuse + pause/resume. Fork buys the differentiated parallelism pa
 "Deterministic replay" is struck as unachievable (D5). This drives §9: snapshot+restore value first
 (phase 1), netns fan-out second (phase 2), receipts as vocabulary (phase 3).
 
-**D2 — neutrality by construction, not by observation. (DECIDED — load-bearing; revised in v2.)**
+**D2 — neutrality by construction, and the base is *quiesced* before it's sealed. (DECIDED — load-bearing; revised v2, hardened v3.)**
 A Full snapshot's memory file is **plaintext guest RAM on disk**; a secret in RAM at snapshot time
 is in the file and in every clone. v1 tried to enforce this by *observing* a `secrets_delivered`
 lifecycle event — but `RoomMeta` has no such field, lifecycle output is non-authoritative, and a
-`--keep` room can be tainted over SSH or vsock *after* the check (codex P1). So v2 makes neutrality
-a property of **how the base is created**, recorded as durable authoritative state:
-- `rooms base-create` boots a **sealed** base: the vsock **secrets** payload is never armed, no
-  agent workload runs, and interactive/`exec` ingress is refused. The only mutations are the
-  warm-up steps rooms itself drives (repo clone, toolchain warm).
+`--keep` room can be tainted over SSH or vsock *after* the check (codex P1). So neutrality is a
+property of **how the base is created**, recorded as durable authoritative state:
 - `RoomMeta` gains a monotonic `provenance: neutral | tainted` field (authoritative, persisted).
   It starts `neutral` only for a `base-create` room and flips to `tainted` **irreversibly** the
-  instant anything that could introduce unique/secret state occurs (secret armed, agent/workload
-  started, interactive session opened). There is no path back to `neutral`.
-- `rooms snapshot` refuses unless `provenance == neutral`. Neutrality is thus *unforgeable by
-  a later action*, not a best-effort assertion.
-Rejected: encrypt the snapshot (adds key management to dodge an ordering rule that construction
-makes free); trust a `--neutral` CLI flag (an assertion, not an enforcement).
+  instant anything that could introduce unique/secret state occurs. There is no path back.
+- `rooms snapshot` refuses unless `provenance == neutral`.
+- **v3 — sealing must cut the *actual* reachability, not just rooms-managed verbs (codex P1).** The
+  canonical image bakes a running `sshd` + the operator's authorized key (`build-rootfs-alpine.sh:271`),
+  so "refuse `exec`" alone leaves a live SSH path into the base that mutates RAM with no `RoomMeta`
+  transition. The base lifecycle is therefore: **(1)** `base-create` boots; **(2)** rooms drives
+  repo-clone + toolchain-warm *over SSH* (the last legitimate interactive use); **(3)** rooms
+  **quiesces** the guest — stops `sshd` and every non-essential daemon (§8), leaving only the minimal
+  resume-apply agent (D7); **(4)** *only then* is `provenance` marked `neutral`. After step 3 there is
+  no reachable interactive path, so neutrality is unforgeable — there is nothing left running that
+  can be reached to taint the RAM.
+Rejected: encrypt the snapshot (adds key management to dodge an ordering rule construction makes
+free); a `--neutral` flag (an assertion, not an enforcement); leaving `sshd` up and firewalling the
+guest IP (a net boundary the guest could still be reached behind on the host — stopping the service
+is the smaller, surer cut).
+
+**D8 — the base is a template, terminated to free its slot before restore. (DECIDED — new v3.)**
+`rooms snapshot` only *pauses* the base, so its guard + slot file stay live; a restore that calls
+`claim(target: Some(k))` on the frozen index hits `TargetTaken` (`slot.rs:75-77`) and can never reach
+`/snapshot/load` (codex P1). The base exists only to *produce* the snapshot, so after
+`snapshot` succeeds the base is **terminated and its slot released** (an explicit teardown, or a
+`--consume` on `snapshot`). Then: a **single** restore (phase 1) reclaims that freed slot/IP via
+`claim(target)`; **N clones** (phase 2) do *not* share one slot — each runs in its own netns (D3), so
+the identical frozen guest IP lives once *per namespace* and the host-side slot/tap is allocated
+per-clone. `claim(target)` reclaim is thus the single-restore path; fan-out is netns allocation.
+Rejected: atomically transferring the live reservation from base to clone (more moving parts than
+just destroying a template that has served its purpose).
 
 **D3 — netns-per-clone, not in-guest re-IP. (DECIDED.)** Each slot's /30 gives a distinct guest IP
 frozen into the kernel cmdline `ip=` (`firecracker.rs:1205`); a clone believes it is the base's IP.
@@ -204,14 +224,23 @@ RNG state** (codex P1). So v2:
   (kernel via VMGenID/virtio-rng per `random-for-clones.md`, plus the userspace guarantee below),
   steps the clock, and sets identity, behind the ack gate (reuses the vsock-secrets host sequencing:
   no ack ⇒ no `workload_started`). Phase 2 adds only the netns fan-out around this.
-- **Userspace PRNG** (codex P1): kernel reseed does not touch an already-started process's PRNG. The
-  guarantee is structural — the neutral base is snapshotted **before the agent process starts**
-  (D2 sealed base), so no long-lived userspace-PRNG state exists to duplicate; the agent starts
-  *after* restore hygiene and seeds fresh from the reseeded kernel. If a runtime must be pre-started
-  in a future variant, it owns a named reseed step and the §9 gate validates *its* PRNG, not just
-  `/dev/urandom`.
-The one genuinely open sub-decision is **how the resume-apply agent knows to re-connect on resume**
-(poll-retry loop captured mid-wait, vs a resume signal, vs host-driven SSH trigger) — §10 Q2.
+- **Userspace PRNG — every *retained* process, not just the agent (codex P1, hardened v3).** Kernel
+  reseed does not touch an already-started process's userspace DRBG. v2 delayed the *agent*, but the
+  base also ran `sshd` and the resume-apply agent itself — each can hold cloned DRBG state that new
+  sessions reuse. v3 closes this at the source via D2 quiescing: **`sshd` and every non-essential
+  daemon are stopped before the snapshot**, so the only process captured is the **minimal resume-apply
+  agent, which draws no randomness before the nudge** (it blocks on the channel). The agent and a
+  **freshly-keyed `sshd`** both start/reseed *after* the kernel reseed on resume. Any daemon that must
+  survive the snapshot owns a named reseed/restart step, and the §9 gate validates *those* processes'
+  draws, not just `/dev/urandom`.
+- **Fresh `sshd` per clone (v3).** Because sealing stops `sshd` (D2), the snapshot has no `sshd`
+  running and no host-key/session state to duplicate. On resume the resume-apply agent starts `sshd`
+  with a **freshly generated host key** and the clone's identity — so the duplicate-host-key problem
+  (§8) is solved by the same quiesce-then-restart move, and rooms' workload SSH (`wait_for_ssh`,
+  `runner.rs:104`) reconnects to a distinct, freshly-keyed daemon per clone.
+Two genuinely open sub-decisions: **how the resume-apply agent re-connects on resume** (poll-retry
+mid-wait vs resume signal vs host trigger — §10 Q2), and **the exact per-daemon quiesce/reseed
+protocol** (which services stop cleanly vs need restart — §10 Q6).
 
 ## 5. Data model
 
@@ -267,20 +296,23 @@ The agent process starts only after this.
 
 ## 7. Key flows
 
-**A — create a sealed neutral base (D2).** `rooms base-create --repo r`: `boot()` a room with the
-secrets payload **unarmed** but `/vsock` **present** (for the resume-apply agent) and interactive/
-`exec` ingress **refused**; rooms drives repo-clone + toolchain-warm; the agent process is NOT
-started. `provenance = neutral` (authoritative). Any attempt to arm a secret, start the agent, or
-open an interactive session flips `provenance = tainted` irreversibly.
+**A — create + quiesce + seal a neutral base (D2, v3).** `rooms base-create --repo r`: `boot()` a room
+with the secrets payload **unarmed** but `/vsock` **present** (for the resume-apply agent); rooms
+drives repo-clone + toolchain-warm **over SSH** (the last legitimate interactive use); the workload
+agent process is NOT started. Then rooms **quiesces**: stop `sshd` and every non-essential daemon,
+leaving only the minimal resume-apply agent. **Only after quiescing** is `provenance = neutral`
+(authoritative). After this there is no reachable interactive path; any earlier attempt to arm a
+secret / start the agent / open a session flips `provenance = tainted` irreversibly.
 
-**B — snapshot + restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`: refuse if
-`provenance != neutral`; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; write `snapshot.json`.
-`rooms restore <snap> --slot k`: `claim(target: Some(k))` reclaims the frozen IP's slot
-(`TargetTaken` if busy); compat guard (FR5); stage snapshot+mem; fresh FC process; `PUT
-/snapshot/load` (File) → `Resumed`; the waiting resume-apply agent applies the hygiene nudge (reseed,
-clock, identity) and ACKs — **no ack ⇒ no workload**; re-probe SSH (`wait_for_ssh`, `runner.rs:104`,
-pre-snapshot TCP is dead); the agent process starts fresh. Even a *single* restore reseeds — a
-warm-base reused twice must not repeat RNG/clock.
+**B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
+refuse if `provenance != neutral`; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; write
+`snapshot.json`; then **terminate the base and release its slot** (D8 — else the frozen index stays
+`TargetTaken`). `rooms restore <snap> --slot k`: `claim(target: Some(k))` reclaims the now-free slot;
+compat guard (FR5); stage snapshot+mem; fresh FC process; `PUT /snapshot/load` (File) → `Resumed`; the
+waiting resume-apply agent applies the hygiene nudge — reseed kernel RNG, step clock, start a
+**freshly-keyed `sshd`**, deliver identity — and ACKs (**no ack ⇒ no workload**); re-probe SSH
+(`wait_for_ssh`, `runner.rs:104`, against the fresh `sshd`); the agent process starts fresh. Even a
+*single* restore reseeds — a warm base reused twice must not repeat RNG/clock/host-key.
 
 **C — fork N clones (phase 2, the payoff).** `rooms clone <snap> -n 8`: for each clone allocate a
 **netns** + veth + host NAT (identical inner IP, isolated), restore as in B into that netns with its
@@ -307,23 +339,25 @@ Every clone must diverge from its siblings on each axis or it's unsafe:
 |---|---|---|
 | MAC / IP / hostname | two clones same address → collision | **netns-per-clone + host NAT (D3)** — inner MAC/IP intentionally identical, disambiguated + isolated by namespace; frozen IP reclaimed per clone via slot target |
 | Kernel RNG | identical CSPRNG stream → repeated TLS nonces/keys/UUIDs | virtio entropy device (`firecracker.rs:1292`) + **post-resume kernel reseed** in the hygiene nudge (`random-for-clones.md`: VMGenID auto-reseed on kernel ≥5.18) — applied on **every** restore (D7) |
-| **Userspace PRNG** | kernel reseed does **not** touch an already-started process's PRNG (OpenSSL pools, session keys) | **structural: snapshot the base *before* the agent process starts (D2 sealed base)** — no userspace-PRNG state to duplicate; agent seeds fresh post-hygiene. Future pre-started runtimes own a named reseed + app-PRNG validation |
+| **Userspace PRNG (every retained process)** | kernel reseed does **not** touch an already-started process's DRBG — and the base ran `sshd` + the resume-apply agent, not just the workload | **D2 quiesce (v3): stop `sshd` + non-essential daemons before snapshot**, so the only captured process is the minimal resume-apply agent, which draws no randomness pre-nudge. Agent + fresh `sshd` start after the kernel reseed. §9 gate validates the retained processes' draws, not only `/dev/urandom` |
+| **SSH host key / sessions** | a running `sshd` in the snapshot → every clone shares host key + session RNG | **D2 quiesce (v3): `sshd` is stopped before snapshot**; the resume-apply agent starts a **freshly-keyed `sshd`** per clone on resume |
 | Wall clock / kvmclock | resumes stale → token-expiry + TLS-validity wrong | post-resume clock step in the same hygiene nudge, on every restore |
 | Secrets in RAM | baked into `snapshot.mem`, shared by all clones | **D2 neutrality by construction**: no secret ever in the base; secrets only post-fork over vsock |
+| Base still owns its slot | snapshot pauses (doesn't free) the base → restore's `claim(target)` hits `TargetTaken` | **D8 (v3): the base is a template, terminated to release its slot before restore**; single-restore reclaims it, fan-out uses netns |
 | Snapshot files on disk | plaintext memory readable | `0700` room state dir; treat as credential; runbook note |
 | FC version pinning | snapshot unloadable after FC upgrade | record `fc_version`; compat guard refuses (FR5); non-goal to migrate |
-| Dead TCP / vsock across restore | pre-snapshot connections gone | host re-probes SSH; the resume-apply agent (re)connects the per-clone vsock listener on resume (D7) |
+| Dead TCP / vsock across restore | pre-snapshot connections gone | host re-probes SSH (fresh `sshd`); the resume-apply agent (re)connects the per-clone vsock listener on resume (D7) |
 | Agent run identity | same git author / run id across forks | hygiene nudge delivers per-clone `run_id` + `git_identity`; agent starts idle-then-fresh post-resume |
 
 The invariant reviewers should try to break: **no clone reaches `workload_started` sharing another
-clone's network identity, kernel or userspace RNG stream, stale clock, or a secret from the base
-snapshot.**
+clone's network identity, SSH host key, kernel or userspace RNG stream (in *any* retained process),
+stale clock, or a secret from the base snapshot.**
 
 ## 9. Rollout / implementation plan
 
 | Phase | Goal | High-level tasks | Depends on | Gate |
 |---|---|---|---|---|
-| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create` (no secret channel, no agent start, `/vsock` present, refuse interactive ingress) [opus]; (1b) `snapshot` module + `rooms snapshot`: pause → Full create → `snapshot.json`, refuse non-neutral [opus]; (1c) `restore()` sibling + `rooms restore`: `/snapshot/load` File backend, reclaim frozen slot, FR5 compat guard, **resume-apply agent + restore-hygiene nudge (reseed/clock/identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
+| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: no secret channel, no agent start, `/vsock` present, **warm over SSH then quiesce (stop `sshd` + daemons) before marking neutral** (D2) [opus]; (1b) `snapshot` module + `rooms snapshot`: pause → Full create → `snapshot.json`, refuse non-neutral, **terminate the base to free its slot** (D8) [opus]; (1c) `restore()` sibling + `rooms restore`: `/snapshot/load` File backend, reclaim freed slot, FR5 compat guard, **resume-apply agent + hygiene nudge (reseed / clock / fresh-keyed `sshd` / identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
 | **2. fork-clones** | N clones from one snapshot, each isolated — the differentiated payoff | netns-per-clone allocator (rework slot layer + `create_slot_tap`, `firecracker.rs:609`) + veth/NAT (`network-for-clones.md`); per-clone hygiene nudge + witness/egress attach; `rooms clone -n N` | phase 1 | **VALIDATION GATE** (killer demo) below |
 | **3. checkpoint-receipts + hardening** (stub) | replay-rescope vocabulary + fleet ergonomics | checkpoint receipt as a first-class artifact (D5); snapshot GC/retention; FC-upgrade library-invalidation ergonomics; UFFD only if density missed | phase 2 + gate | each item needs a demonstrated need first |
 
@@ -334,18 +368,24 @@ unsized.
 
 **Intermediate gate (after phase 1):** on the rooms-host, `base-create` a neutral base, `snapshot`
 it, `restore` it **twice** and confirm: (a) both restores reach workload-ready; (b) the compat guard
-refuses a forced fc_version/rootfs mismatch; (c) **the two restores show distinct kernel RNG draws
-and a correct (resynced) clock** — proving hygiene fires on every restore, not just fork; (d)
-`snapshot` refuses a non-neutral room.
+refuses a forced fc_version/rootfs mismatch; (c) the two restores show **distinct kernel RNG draws, a
+correct (resynced) clock, and distinct `sshd` host keys** — hygiene fires on every restore, not just
+fork; (d) `snapshot` refuses a non-neutral room; (e) the snapshot memory file, grepped for the SSH
+host key and any warm-up-time secret, contains **neither** — proving quiesce + neutrality actually
+cleared them.
 
 **VALIDATION GATE (after phase 2) — the killer demo:** boot one base, clone a repo + warm the
 `claude` toolchain, `rooms snapshot`; then `rooms clone <snap> -n 8` and:
 - (a) 8 clones reach workload-ready in **under a second total**;
-- (b) `free -m` shows aggregate RSS **≪ 8 × 256 MiB** (CoW sharing);
+- (b) **aggregate PSS** (`/proc/*/smaps_rollup`, or a controlled cgroup memory delta with a
+  before/after baseline) shows the fleet **≪ 8 × 256 MiB** of private memory — proving CoW page-cache
+  sharing, not eight private copies (v3: `free -m`/RSS can't establish this — a shared page counts once
+  in every process's RSS, codex P2);
 - (c) 8 real `/work-driver` tasks run in parallel on a host that could not hold 8 cold rooms;
 - (d) **8 distinct witness pcaps** — per-clone custody survives fork;
 - (e) **each clone is a distinct netns/veth/NAT identity with verified cross-clone isolation** (clone
-  A cannot reach clone B), and an **application-level** RNG-draw probe (not just `/dev/urandom`) shows
+  A cannot reach clone B), a **freshly-keyed `sshd`** (distinct host keys), and an
+  **application-level** RNG-draw probe across the *retained* processes (not just `/dev/urandom`) shows
   distinct output per clone — the hygiene matrix holds.
 Phase 3 is not committed until this passes.
 
@@ -369,16 +409,26 @@ Phase 3 is not committed until this passes.
 5. **How warm is the neutral base?** Snapshot after repo-clone + toolchain-warm but **before** the
    agent process starts (D2/D7). Which caches can be primed without starting a long-lived
    PRNG-holding process is the phase-1 tuning question that sets the payoff size.
+6. **The quiesce/reseed protocol (D2/D7).** Which daemons stop cleanly before snapshot vs must be
+   restarted on resume, and how the resume-apply agent orders {kernel reseed → clock step →
+   fresh-key `sshd` → identity}. Lean: stop everything but the resume-apply agent, start a fresh
+   `sshd` post-reseed; enumerate the image's baked services in the phase-1 spike.
+7. **`base-create` warm-up transport.** Warm-up is driven over SSH today, but that same `sshd` is what
+   D2 then stops. Is SSH-then-stop clean, or should warm-up move to a non-interactive channel (a boot
+   script / the vsock) so `sshd` never needs to have run? Resolve in phase 1; SSH-then-stop is the
+   current favorite (smallest change).
 
 ## 11. Validation plan
 
-The §9 gates are the plan; both signals are binary and baseline-free. **Phase 1 (cheap):** a neutral
-base restores twice to workload-ready, the compat guard fires on a forced mismatch, `snapshot`
-refuses a non-neutral room, and the two restores show distinct kernel-RNG draws + a correct clock —
-proving hygiene fires on every restore. **Phase 2 (the payoff):** the killer demo — 8 clones < 1s,
-`free -m` proves CoW sharing, 8 parallel real tasks, 8 distinct witness pcaps, verified netns
-isolation + distinct **application-level** RNG draws. If (b) fails (RSS ≈ 8×256 MiB) the density
-thesis is unproven; if the isolation/RNG check fails the fork is unsafe regardless of speed.
+The §9 gates are the plan; both signals are binary. **Phase 1 (cheap):** a neutral base restores
+twice to workload-ready, the compat guard fires on a forced mismatch, `snapshot` refuses a non-neutral
+room, the two restores show distinct kernel-RNG draws + a correct clock + distinct `sshd` host keys,
+and the snapshot memory file contains neither the host key nor a warm-up secret — proving quiesce +
+hygiene actually work. **Phase 2 (the payoff):** the killer demo — 8 clones < 1s, **aggregate PSS**
+(not `free`/RSS) proves CoW sharing against a baseline, 8 parallel real tasks, 8 distinct witness
+pcaps, verified netns isolation + distinct **application-level** RNG draws across retained processes.
+If PSS ≈ 8×256 MiB the density thesis is unproven; if the isolation/RNG/host-key checks fail the fork
+is unsafe regardless of speed.
 
 ## 12. Changelog
 
@@ -397,3 +447,21 @@ thesis is unproven; if the isolation/RNG check fails the fork is unsafe regardle
 - **P2 "align identity validation with the netns model"** → **§9 gate rewritten**: verify distinct
   netns/veth/NAT identity + cross-clone isolation (inner MAC/IP are intentionally identical under
   D3), replacing the impossible "no two clones share a MAC/IP" check.
+
+**v3 (2026-07-27) — second review pass (codex, 3×P1 + 1×P2).** All four converged on live crypto
+daemons in the base at snapshot time; fixed by quiescing the base before sealing.
+- **P1 "free the base slot before restore"** → **D8 (new)** + §7 B: the base is a template,
+  terminated to release its slot before restore (else `claim(target)` hits `TargetTaken`,
+  `slot.rs:75-77`); single-restore reclaims the freed slot, fan-out uses netns.
+- **P1 "seal the guest's direct SSH path"** → **D2 hardened** + §7 A: sealing now **stops `sshd` +
+  non-essential daemons** (the image bakes a reachable `sshd` + the operator key,
+  `build-rootfs-alpine.sh:271`) *before* marking neutral — refusing rooms `exec` alone left a live SSH
+  path into the "neutral" base.
+- **P1 "reseed every snapshotted userspace process"** → **§8 + D7 hardened**: quiesce removes `sshd`'s
+  and other daemons' captured DRBG; the only retained process is the minimal resume-apply agent (draws
+  no randomness pre-nudge); a fresh-keyed `sshd` starts post-reseed; the gate validates retained
+  processes, not just `/dev/urandom`.
+- **P2 "measure sharing with PSS instead of `free`"** → **§9/§11 gate**: aggregate PSS
+  (`smaps_rollup`) or a cgroup memory delta with a baseline, since RSS counts a shared page in every
+  process.
+- New open questions §10 Q6 (quiesce/reseed protocol) + Q7 (warm-up transport vs the `sshd` it stops).
