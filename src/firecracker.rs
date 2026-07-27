@@ -1601,6 +1601,62 @@ mod tests {
         reason = "test module"
     )]
 
+    #[test]
+    fn write_room_meta_base_records_provisioning_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let descriptor = crate::room::RoomDescriptor {
+            command: Some("base-create".to_owned()),
+            keep: true,
+        };
+        // base = true routes through RoomMeta::new_base, so the room enters the
+        // provenance ladder at Provisioning (rooms' warm-up may run un-tainting).
+        super::write_room_meta(
+            dir.path(),
+            "01aaaaaaaaaaaaaaaaaaaaaaaa",
+            &descriptor,
+            None,
+            None,
+            true,
+        );
+        let meta = crate::room::read(dir.path())
+            .expect("read room.json")
+            .expect("room.json present");
+        assert_eq!(
+            meta.provenance(),
+            Some(crate::room::Provenance::Provisioning)
+        );
+        assert!(
+            !meta.is_snapshottable(),
+            "a provisioning base is not yet snapshottable — sealing to Neutral comes later"
+        );
+    }
+
+    #[test]
+    fn write_room_meta_non_base_has_no_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let descriptor = crate::room::RoomDescriptor {
+            command: Some("run".to_owned()),
+            keep: false,
+        };
+        // base = false is the plain-workload path: no provenance, never sealable.
+        super::write_room_meta(
+            dir.path(),
+            "01bbbbbbbbbbbbbbbbbbbbbbbb",
+            &descriptor,
+            None,
+            None,
+            false,
+        );
+        let meta = crate::room::read(dir.path())
+            .expect("read room.json")
+            .expect("room.json present");
+        assert_eq!(
+            meta.provenance(),
+            None,
+            "a plain run room has no provenance"
+        );
+    }
+
     #[cfg(unix)]
     mod unix_tests {
         use std::time::Duration;

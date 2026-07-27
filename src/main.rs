@@ -137,6 +137,40 @@ enum Command {
         #[arg(long = "egress", value_parser = egress::parse)]
         egress: Option<egress::Policy>,
     },
+    /// Boot a sealed neutral-base *candidate* and leave it running for a later
+    /// `rooms snapshot`.
+    ///
+    /// The room comes up with `/vsock` present but its secrets payload unarmed,
+    /// no agent started, and no interactive-exec path (this verb has no
+    /// `--command`): it enters `provenance = provisioning`, where only rooms'
+    /// own warm-up (`--repo` clone + `--warm`) may run without tainting it.
+    /// Sealing it to `neutral` — the quiesce + "quiesced" beacon — is a separate
+    /// step; a still-`provisioning` base is not yet snapshottable.
+    BaseCreate {
+        /// Path to the rootfs image (ext4).
+        #[arg(long)]
+        image: PathBuf,
+        /// Git URL cloned into `/workspace/repo` to warm the base (at `HEAD`).
+        #[arg(long)]
+        repo: Option<String>,
+        /// A warm-up command run in the guest over SSH after the clone (e.g. a
+        /// toolchain fetch). Runs in the provisioning window, so it does not
+        /// taint the base.
+        #[arg(long, value_parser = non_empty_command)]
+        warm: Option<String>,
+        /// Mount the rootfs read-only with a tmpfs overlay (needs an image
+        /// carrying `/sbin/overlay-init`).
+        #[arg(long = "readonly-rootfs")]
+        readonly_rootfs: bool,
+        /// Lower the pool ceiling for this invocation (never raise it). Also
+        /// settable via `ROOMS_MAX_POOL`.
+        #[arg(long = "max-pool", env = "ROOMS_MAX_POOL", value_parser = parse_max_pool)]
+        max_pool: Option<u8>,
+        /// Emit a machine-readable record (`room_id`, `slot`, `provenance`) on
+        /// stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Validate runner artifacts in a local `out/` directory.
     Collect {
         /// Path to the collected `out/` directory on the host.
@@ -547,6 +581,27 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             )
             .await
         }
+        Command::BaseCreate {
+            image,
+            repo,
+            warm,
+            readonly_rootfs,
+            max_pool,
+            json,
+        } => {
+            base_create(
+                BaseCreateArgs {
+                    image,
+                    repo,
+                    warm,
+                    readonly_rootfs,
+                    max_pool,
+                    json,
+                },
+                &config,
+            )
+            .await
+        }
         Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
         Command::Diff { from, json } => diff_changeset(&from, json).await,
@@ -763,6 +818,154 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
     outcome
+}
+
+/// Flags for `rooms base-create` (a flat mirror of the CLI variant).
+struct BaseCreateArgs {
+    image: PathBuf,
+    repo: Option<String>,
+    warm: Option<String>,
+    readonly_rootfs: bool,
+    max_pool: Option<u8>,
+    json: bool,
+}
+
+/// `rooms base-create`: boot a sealed neutral-base candidate and hand it off
+/// running (see the [`Command::BaseCreate`] docs). The `--json` error record
+/// mirrors `run`.
+async fn base_create(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    let json = args.json;
+    let result = base_create_inner(args, config).await;
+    if json {
+        if let Err(err) = &result {
+            emit_run_error_json(err);
+        }
+    }
+    result
+}
+
+async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(image = ?args.image, repo = ?args.repo, "rooms base-create");
+    let json = args.json;
+
+    let kernel = args
+        .image
+        .parent()
+        .map(|p| p.join("vmlinux.bin"))
+        .ok_or_else(|| {
+            RoomsError::Internal(format!(
+                "--image has no parent directory: {}",
+                args.image.display()
+            ))
+        })?;
+    rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
+    // A base always wires the vsock device; prove the guest kernel can open one
+    // before claiming a slot or booting.
+    ensure_kernel_has_vsock(&kernel)?;
+    if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
+        return Err(RoomsError::Internal(remediation));
+    }
+
+    let state_base = config.resolved_state_base().ok_or_else(|| {
+        RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
+    })?;
+    let key = key_path()?;
+
+    let room_id = firecracker::mint_room_id();
+    let me = slot::Claimer::current().ok_or_else(|| {
+        RoomsError::Internal("cannot read this process's identity for the slot claim".to_owned())
+    })?;
+    // The cap is a host fact; --max-pool / ROOMS_MAX_POOL can only lower it.
+    let cap = config.effective_max_pool(args.max_pool);
+    let claimed = slot::claim(&state_base, &room_id, me, cap, None)?;
+    let network = network_config_for(&claimed);
+    // A base is always kept alive for a later `rooms snapshot`.
+    let descriptor = room::RoomDescriptor {
+        command: Some("base-create".to_owned()),
+        keep: true,
+    };
+    let egress_plan = egress::resolve(&egress::Policy::Observe).map_err(RoomsError::Internal)?;
+    let boot_req = firecracker::BootRequest {
+        kernel: &kernel,
+        rootfs: &args.image,
+        network: Some(&network),
+        slot: Some(&claimed),
+        room_id: &room_id,
+        readonly_rootfs: args.readonly_rootfs,
+        descriptor: &descriptor,
+        witness: false,
+        secrets: None,
+        egress: &egress_plan,
+        base: true,
+    };
+    let mut vm = match firecracker::boot(&boot_req, config).await {
+        Ok(vm) => vm,
+        Err(e) => {
+            // boot's guard frees the slot once it owns it; this covers an early
+            // failure before that (compare-and-delete makes the double free safe).
+            let _ = slot::free(&state_base, claimed.index, &room_id);
+            return Err(e.into());
+        }
+    };
+
+    // Warm the base over SSH (still `provisioning`, so this does not taint). On
+    // failure, tear the half-warmed base down rather than hand off a bad base.
+    if let Err(e) = runner::warm_base(
+        &network.guest_ip,
+        &key,
+        config,
+        args.repo.as_deref(),
+        args.warm.as_deref(),
+    )
+    .await
+    {
+        let _ = vm.shutdown().await;
+        return Err(e.into());
+    }
+
+    // Hand the base off running: dismiss the guard and forget the VM so neither
+    // drop nor kill_on_drop tears it down. `rooms snapshot` freezes it later;
+    // `rooms gc` / `rooms kill` reaps it otherwise.
+    vm.guard_mut().dismiss();
+    std::mem::forget(vm);
+    emit_base_created(&room_id, &claimed, json);
+    Ok(0)
+}
+
+/// Report a created base — a human line, or a `--json` record carrying the
+/// provisioning provenance so a caller can later gate the seal on it.
+fn emit_base_created(room_id: &str, slot: &room::Slot, json: bool) {
+    if json {
+        let record = serde_json::json!({
+            "room_id": room_id,
+            "slot": slot.index,
+            "guest_ip": slot.guest.to_string(),
+            "provenance": "provisioning",
+        });
+        match serde_json::to_string(&record) {
+            Ok(line) => {
+                #[allow(
+                    clippy::print_stdout,
+                    reason = "base-create --json record; stdout is the documented contract"
+                )]
+                {
+                    println!("{line}");
+                }
+            }
+            Err(e) => warn!(error = %e, "failed to serialize base-create --json record"),
+        }
+        return;
+    }
+    #[allow(
+        clippy::print_stdout,
+        reason = "base-create human summary; stdout is the documented contract"
+    )]
+    {
+        println!(
+            "base created: room {room_id} on slot {} (guest {}); provenance=provisioning — seal, then `rooms snapshot`",
+            slot.index, slot.guest
+        );
+    }
 }
 
 /// The on-disk traces a completed teardown must have erased. `cleanup` keeps
