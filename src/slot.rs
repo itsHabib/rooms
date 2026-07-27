@@ -296,11 +296,10 @@ pub fn reserve(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Reserved::NotOwned),
         Err(e) => return Err(SlotError::Io(e)),
     };
-    if parse_token(&contents)
-        == (SlotToken::Reserved {
-            snapshot_id: snapshot_id.to_owned(),
-        })
-    {
+    if matches!(
+        parse_token(&contents),
+        SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id
+    ) {
         return Ok(Reserved::AlreadyReserved);
     }
     // Only a claim whose first line is the base may be transferred — a
@@ -350,7 +349,13 @@ pub fn lease(
             snapshot_id: owner,
             lessee,
         } if owner == snapshot_id && lessee == lessee_room_id => Ok(derive(slot_index)),
-        SlotToken::Leased { .. } => Err(SlotError::LeaseHeld { index: slot_index }),
+        // Our snapshot's reservation is leased by another room — the one live
+        // lease the frozen IP allows is taken.
+        SlotToken::Leased {
+            snapshot_id: owner, ..
+        } if owner == snapshot_id => Err(SlotError::LeaseHeld { index: slot_index }),
+        // Anything else — free, a claim, or a *different* snapshot's token — is
+        // no reservation of ours; never a busy-signal the caller might retry.
         _ => Err(SlotError::NotReserved { index: slot_index }),
     }
 }
@@ -1158,6 +1163,23 @@ mod tests {
     }
 
     #[test]
+    fn lease_refuses_a_different_snapshots_active_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = room_id(1);
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &room_id(100), &base).unwrap();
+        lease(dir.path(), 5, &room_id(100), &room_id(2)).unwrap();
+        // A different snapshot has no reservation here at all — it must see
+        // NotReserved, never LeaseHeld (which would imply a busy slot of its
+        // own it could retry). In correct execution the O_EXCL walk forbids two
+        // snapshots on one index; this pins the contract regardless.
+        assert!(matches!(
+            lease(dir.path(), 5, &room_id(200), &room_id(3)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+    }
+
+    #[test]
     fn a_second_lease_is_refused_while_one_is_held() {
         let dir = tempfile::tempdir().unwrap();
         let (base, snap) = (room_id(1), room_id(100));
@@ -1218,6 +1240,18 @@ mod tests {
             release_lease(dir.path(), 5, &snap, &room_id(2)).unwrap(),
             Released::AlreadyReturned,
             "a teardown retry after the return is a no-op"
+        );
+    }
+
+    #[test]
+    fn release_of_an_absent_slot_is_not_our_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(SLOTS_DIR)).unwrap();
+        // gc reaped the slot (or it never existed) — an idempotent teardown
+        // retry finds nothing of ours to return, never errors.
+        assert_eq!(
+            release_lease(dir.path(), 5, &room_id(100), &room_id(2)).unwrap(),
+            Released::NotOurLease
         );
     }
 
