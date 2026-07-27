@@ -45,6 +45,12 @@ pub enum SnapshotError {
         "refusing to snapshot with an active vsock connection; it would be severed on restore"
     )]
     ActiveVsock,
+    /// The base has no claimed pool slot. Restore reclaims the *exact* frozen
+    /// slot/IP (the guest network identity is baked into `snapshot.mem`), so a
+    /// slotless snapshot could never participate in the required same-slot
+    /// restore — refuse to create one.
+    #[error("refusing to snapshot a base with no claimed slot; restore needs the frozen slot/IP")]
+    MissingSlot,
 }
 
 /// One ordered Firecracker API operation a snapshot performs. Pure data — the
@@ -54,6 +60,12 @@ pub enum FcOp {
     /// `PATCH /vm {state: "Paused"}` — must precede the create.
     PauseVm,
     /// `PUT /snapshot/create {snapshot_type: "Full", snapshot_path, mem_file_path}`.
+    ///
+    /// The paths are **jail-visible** — rooted at the jailer chroot (e.g.
+    /// `/snapshot.vmstate`), the same convention `boot` uses for `/kernel` and
+    /// `/rootfs`. The execution mechanism stages the targets into the jail before
+    /// the request and collects the results to the host `out_dir` after; the API
+    /// itself never sees a host path.
     CreateFullSnapshot {
         snapshot_path: PathBuf,
         mem_file_path: PathBuf,
@@ -108,12 +120,24 @@ pub struct SnapshotRequest {
     pub active_vsock: bool,
 }
 
-/// A fully-decided snapshot: the ordered API operations plus the metadata to write.
+/// A fully-decided snapshot: the ordered API operations plus the host artifact
+/// paths and metadata to write.
+///
+/// The `ops` carry **jail-visible** paths (what the API receives); `host_vmstate`
+/// / `host_mem` / `meta_path` are the **host** locations under `out_dir` the
+/// execution mechanism collects to. Keeping the two namespaces separate is the
+/// whole point — a host path handed to the jailed API resolves inside the chroot,
+/// where it does not exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotPlan {
-    /// The Firecracker API calls, in the order the runner must issue them.
+    /// The Firecracker API calls, in the order the runner must issue them
+    /// (jail-visible paths).
     pub ops: Vec<FcOp>,
     pub meta: SnapshotMeta,
+    /// Host destination for the collected vmstate (`<out_dir>/snapshot.vmstate`).
+    pub host_vmstate: PathBuf,
+    /// Host destination for the collected memory file (`<out_dir>/snapshot.mem`).
+    pub host_mem: PathBuf,
     /// Where `meta` is written (`<out_dir>/snapshot.json`).
     pub meta_path: PathBuf,
 }
@@ -127,6 +151,7 @@ pub struct SnapshotPlan {
 /// # Errors
 /// - [`SnapshotError::NotNeutral`] if `base` is not a sealed neutral base.
 /// - [`SnapshotError::ActiveVsock`] if a vsock connection is still open.
+/// - [`SnapshotError::MissingSlot`] if the neutral base has no claimed slot.
 pub fn plan(
     base: &RoomMeta,
     req: SnapshotRequest,
@@ -140,21 +165,18 @@ pub fn plan(
     if req.active_vsock {
         return Err(SnapshotError::ActiveVsock);
     }
+    let slot = base.slot.as_ref().ok_or(SnapshotError::MissingSlot)?;
 
-    let snapshot_path = req.out_dir.join(SNAPSHOT_VMSTATE_FILE);
-    let mem_file_path = req.out_dir.join(SNAPSHOT_MEM_FILE);
+    // The API paths are jail-visible (chroot-rooted); the host paths under
+    // out_dir are where the mechanism collects the results.
     let ops = vec![
         FcOp::PauseVm,
         FcOp::CreateFullSnapshot {
-            snapshot_path,
-            mem_file_path,
+            snapshot_path: PathBuf::from(format!("/{SNAPSHOT_VMSTATE_FILE}")),
+            mem_file_path: PathBuf::from(format!("/{SNAPSHOT_MEM_FILE}")),
         },
     ];
 
-    let (slot_index, guest_ip) = base
-        .slot
-        .as_ref()
-        .map_or((None, None), |s| (Some(s.index), Some(s.guest)));
     let meta = SnapshotMeta {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         snapshot_id: req.snapshot_id,
@@ -162,16 +184,17 @@ pub fn plan(
         fc_version: req.fc_version,
         rootfs_hash: req.rootfs_hash,
         base_room_id: base.id.clone(),
-        slot_index,
-        guest_ip,
+        slot_index: Some(slot.index),
+        guest_ip: Some(slot.guest),
         base_repo_sha: req.base_repo_sha,
         provenance: Provenance::Neutral,
     };
-    let meta_path = req.out_dir.join(SNAPSHOT_META_FILE);
     Ok(SnapshotPlan {
         ops,
         meta,
-        meta_path,
+        host_vmstate: req.out_dir.join(SNAPSHOT_VMSTATE_FILE),
+        host_mem: req.out_dir.join(SNAPSHOT_MEM_FILE),
+        meta_path: req.out_dir.join(SNAPSHOT_META_FILE),
     })
 }
 
@@ -244,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_neutral_base_emits_pause_then_create_in_order() {
+    fn plan_neutral_base_emits_pause_then_create_with_jail_visible_paths() {
         let base = neutral_base(3);
         let p = plan(&base, req("/state/room"), Utc::now()).expect("neutral base plans");
         assert_eq!(
@@ -252,13 +275,41 @@ mod tests {
             vec![
                 FcOp::PauseVm,
                 FcOp::CreateFullSnapshot {
-                    snapshot_path: PathBuf::from("/state/room/snapshot.vmstate"),
-                    mem_file_path: PathBuf::from("/state/room/snapshot.mem"),
+                    // Jail-visible (chroot-rooted), NOT the host out_dir — a host
+                    // path handed to the jailed API resolves inside the chroot.
+                    snapshot_path: PathBuf::from("/snapshot.vmstate"),
+                    mem_file_path: PathBuf::from("/snapshot.mem"),
                 },
             ],
             "pause must precede create, and both must be present in that order"
         );
+        // Host artifact paths stay under out_dir, separate from the API paths.
+        assert_eq!(
+            p.host_vmstate,
+            PathBuf::from("/state/room/snapshot.vmstate")
+        );
+        assert_eq!(p.host_mem, PathBuf::from("/state/room/snapshot.mem"));
         assert_eq!(p.meta_path, PathBuf::from("/state/room/snapshot.json"));
+    }
+
+    #[test]
+    fn plan_refuses_a_neutral_base_with_no_slot() {
+        // A sealed neutral base is still unsnapshottable without a slot: restore
+        // reclaims the exact frozen slot/IP baked into snapshot.mem.
+        let mut slotless = RoomMeta::new_base(
+            "01slotlessslotlessslotles0".to_owned(),
+            None,
+            Some(9),
+            Some(9),
+            true,
+            Utc::now(),
+        );
+        slotless.seal().expect("seal");
+        assert_eq!(slotless.slot, None);
+        assert_eq!(
+            plan(&slotless, req("/x"), Utc::now()),
+            Err(SnapshotError::MissingSlot),
+        );
     }
 
     #[test]
