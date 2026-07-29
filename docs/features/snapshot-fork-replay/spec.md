@@ -377,8 +377,8 @@ rename and the slot directory after); cleanly reap process/jail/room plus egress
 publish `snapshot.json` as the completion marker. A
 `rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` leases the persistent
 reservation only after writing both room-local and globally indexed restore intent; compat guard
-(FR5); a command output tree must be canonically disjoint from the entire rooms state base, every
-jail-instance root, and every known custom completed or pending snapshot tree; stage the
+(FR5); a command output tree must be canonically disjoint from the supplied rootfs image, the entire
+rooms state base, every jail-instance root, and every known custom completed or pending snapshot tree; stage the
 hash-verified rootfs read-only; **bind-mount**
 `snapshot.mem` + stage `vmstate`
 into the jail (never copy the mem file, D6 v4); fresh FC process; **install the witness pcap + egress
