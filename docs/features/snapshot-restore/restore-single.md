@@ -34,7 +34,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Add `rooms restore <snapshot-dir> --image <path> [--slot <k>] [--witness] [egress flags] [--json]`.
 - Read `snapshot.json`; validate the supplied rootfs, compute its hash, and verify schema, `Neutral` provenance, Firecracker version, rootfs hash, and requested/original slot before creating the VM.
 - Start a fresh jailed Firecracker process in an inert state: no tap/network, snapshot load, or guest execution. Atomically persist its PID/starttime, `snapshot_lineage`, and a non-owning slot intent with the snapshot's exact derived slot/tap before acquiring the lease; leave `RoomMeta.slot` unset and TAP ownership false. If that recovery-breadcrumb write fails, terminate the inert process and do not lease.
-- Lease the snapshot reservation only after the room has a conclusive liveness/recovery breadcrumb. The lease token is authoritative: a busy or foreign lease fails closed and pre-lease cleanup must neither delete the shared TAP nor release another room's lease. On success, atomically transition the room to leased ownership and set `RoomMeta.slot` before creating the TAP.
+- Lease the snapshot reservation only after the room has a conclusive liveness/recovery breadcrumb. The lease token is authoritative and durable: the shared slot rewrite syncs the token file before rename and the slot directory after rename for both lease acquisition and return. A busy or foreign lease fails closed and pre-lease cleanup must neither delete the shared TAP nor release another room's lease. On success, atomically transition the room to leased ownership and set `RoomMeta.slot` before creating the TAP.
 - Reuse jail/guard/staging mechanisms, but preserve restore's distinct order.
 - Stage the supplied hash-verified rootfs at the snapshot's saved jail path as a read-only block device with the overlay init contract before `snapshot/load`; restore never mutates the backing image.
 - Bind-mount `snapshot.mem` into the jail so later clones share the inode privately; the small vmstate file may be copied.
@@ -55,14 +55,14 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - No hygiene ACK means no SSH/workload readiness.
 - Compatibility mismatch loads nothing.
 - A crash before the recovery breadcrumb is durable holds no lease. A crash immediately before or after lease acquisition is classifiable as live or orphaned-dead; cleanup consults the exact lease token before claiming TAP ownership, so a failed competing restore cannot delete the active restore's TAP.
-- Restore → teardown → restore again succeeds; the reservation persists and the slot is never walk-claimable.
+- Restore → teardown → restore again succeeds across process and host crashes; the durably synced reservation persists and the slot is never walk-claimable.
 - Clean teardown returns the lease to the reservation; incomplete teardown keeps the lease held until GC proves a clean reap, preventing slot/IP reuse over residue.
 - After an incomplete teardown, `rooms gc` uses persisted lineage to return the lease to the reservation after clean reap; it cannot strand an `@lease` token or free the reservation.
 - Two restores have distinct RNG output, corrected clocks, fresh host keys, and distinct room identity.
 
 ## Test plan
 
-Run `make check`. Unit tests assert ordering, read-only rootfs staging and hash refusal, bind-mount behavior, compatibility refusal, non-owning intent before lease, no lease on breadcrumb-write failure, a competing pre-lease cleanup never deleting the active TAP, idempotent GC immediately before and after leasing, lease return after clean reap, lease retention after incomplete jail or room cleanup, registry reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice from the same unchanged image, race a competing restore, inject a crash immediately before and after lease acquisition, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, backing-image immutability, and reservation recovery.
+Run `make check`. Unit tests assert ordering, read-only rootfs staging and hash refusal, bind-mount behavior, compatibility refusal, non-owning intent before lease, no lease on breadcrumb-write failure, durable lease/return token rewrites, a competing pre-lease cleanup never deleting the active TAP, idempotent GC immediately before and after leasing, lease return after clean reap, lease retention after incomplete jail or room cleanup, registry reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice from the same unchanged image, race a competing restore, inject a crash immediately before and after lease acquisition, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, backing-image immutability, and reservation recovery.
 
 ## Non-goals
 

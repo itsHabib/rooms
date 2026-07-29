@@ -342,8 +342,10 @@ vsock connection exists at snapshot time.
 
 **B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
-`PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; sync the artifacts; write the indexed intent;
-**reserve the slot while the base claim is live**; cleanly reap the base; then publish
+canonicalize the output and reject both the room and jail-instance trees; durably index the recovery
+intent; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; sync the artifacts; **durably reserve the
+slot while the base claim is live** (sync the token before rename and the slot directory after);
+cleanly reap the base; then publish
 `snapshot.json` as the completion marker. `rooms restore <snap> --image <rootfs> --slot k` leases the
 persistent reservation; compat guard (FR5); stage the hash-verified rootfs read-only; **bind-mount**
 `snapshot.mem` + stage `vmstate`

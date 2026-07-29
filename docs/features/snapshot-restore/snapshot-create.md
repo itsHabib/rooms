@@ -36,11 +36,11 @@ Execute a Full Firecracker snapshot of a sealed neutral base, durably commit its
 - Execute the returned operations verbatim against the room API socket:
   1. `PATCH /vm {"state":"Paused"}`
   2. `PUT /snapshot/create` with `snapshot_type:"Full"` and the plan's jail-visible paths.
-- Default `--out` to `<state-base>/snapshots/<snapshot-id>`, outside every per-room directory that `RoomGuard` may delete. Refuse an explicit output at or below the base room directory.
+- Default `--out` to `<state-base>/snapshots/<snapshot-id>`, outside every per-room directory that `RoomGuard` may delete. Canonicalize an explicit output and refuse it at or below either the base room directory or that room's live jail-instance directory, including a custom chroot base.
 - Create the host artifact directory at `0700`; keep memory, vmstate, metadata, and transaction state owner-only. Refuse an unrelated non-empty directory, but resume an exact matching pending transaction idempotently.
 - Before snapshot creation, durably write a pending intent at `<state-base>/snapshot-intents/<snapshot-id>.json` that binds snapshot id, base room, slot, artifact paths, and completed transaction boundaries. This stable index is outside the room and output trees and remains discoverable after either is absent.
 - Verify both Firecracker-created files exist and are non-empty, `sync_all` each file, and sync the artifact directory before publishing metadata. Strengthen `snapshot::write_meta_atomic` to sync its temporary file and the parent directory around the rename. A completed `snapshot.json` must never advertise partial artifacts after a host crash.
-- After both binary artifacts are durable, call the landed `slot::reserve` while the live base still owns the claim, then cleanly terminate and reap the base. This protected handoff must leave no dead-claim interval in which `rooms gc` can free the frozen slot; cleanup observes the snapshot reservation and cannot return it to the walk allocator.
+- After both binary artifacts are durable, call the landed `slot::reserve` while the live base still owns the claim, then cleanly terminate and reap the base. Strengthen the shared slot-token rewrite so it syncs the temporary file before rename and the slot directory after rename; `reserve`, `lease`, and `release_lease` must not report their transitions complete before that durable boundary. This protected handoff must leave no dead-claim interval in which `rooms gc` can free the frozen slot; cleanup observes the snapshot reservation and cannot return it to the walk allocator.
 - Publish `snapshot.json` only after the reservation is durable and the base reap-clean gate succeeds; metadata is the public completion marker. Remove and directory-sync the indexed intent after publication. `snapshot-recover` must idempotently validate and finish any indexed transaction left before or after publication, including the reservation-complete/base-absent case, while the non-empty-directory guard continues to reject unrelated contents.
 - Failure before snapshot creation attempts to resume a paused base. Failure after creation never silently frees the frozen slot. A failed reservation leaves the live base claim intact; a crash or teardown failure after reservation preserves the snapshot reservation and pending intent for recovery. Preserve the primary error.
 - Emit human/JSON success with snapshot id, directory, base room, slot, and provenance.
@@ -50,12 +50,12 @@ Execute a Full Firecracker snapshot of a sealed neutral base, durably commit its
 - A sealed neutral room produces non-empty `snapshot.vmstate`, `snapshot.mem`, and `snapshot.json`.
 - A provisioning, tainted, slotless, or active-vsock room is refused before any pause.
 - API requests use the exact jail-visible paths and `Paused → CreateFullSnapshot` order.
-- The default artifact directory survives base cleanup; an output inside the base room is refused.
-- Metadata is written only after both binary artifacts and their directory are synced, the slot is reserved, and the base is cleanly reaped; the atomic metadata publish is itself synced.
+- The default artifact directory survives base cleanup; an output inside either the base room or its jail-instance tree is refused after canonicalization.
+- Metadata is written only after both binary artifacts and their directory are synced, the slot reservation file and slot directory are synced, and the base is cleanly reaped; the atomic metadata publish is itself synced.
 - Successful completion leaves a never-reclaim snapshot reservation, not a free slot or dead base claim, and concurrent GC cannot observe an unowned handoff gap.
 - Every crash point from pending-intent creation through metadata publication is retryable without overwriting unrelated files or exposing a complete-looking unusable snapshot.
 - A transaction whose base has already been reaped remains discoverable through `snapshot-recover`; recovery can publish the validated artifacts and clear the index without a live-room lookup.
-- Mocked failure tests cover pause, create, missing/empty files, sync, reservation-before-termination, concurrent GC at the handoff, incomplete teardown, metadata publication, indexed discovery with the base absent, and transaction recovery at every boundary.
+- Mocked failure tests cover output rejection under both room and jail trees, pause, create, missing/empty files, artifact sync, slot-token file/directory sync, reservation-before-termination, concurrent GC at the handoff, incomplete teardown, metadata publication, indexed discovery with the base absent, and transaction recovery at every boundary.
 
 ## Test plan
 
