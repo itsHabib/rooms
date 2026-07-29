@@ -25,7 +25,7 @@ Do not redesign those APIs. This slice supplies the live Firecracker and CLI mec
 
 ## Goal
 
-Execute a Full Firecracker snapshot of a sealed neutral base, durably publish its protected artifact set, destroy the template, and transfer the frozen network slot to the snapshot without ever exposing it to the walk allocator.
+Execute a Full Firecracker snapshot of a sealed neutral base, durably publish its protected artifact set, transfer the frozen network slot to the snapshot, and then destroy the template without ever exposing the slot to the walk allocator.
 
 ## Behavior
 
@@ -36,9 +36,9 @@ Execute a Full Firecracker snapshot of a sealed neutral base, durably publish it
   1. `PATCH /vm {"state":"Paused"}`
   2. `PUT /snapshot/create` with `snapshot_type:"Full"` and the plan's jail-visible paths.
 - Create the host artifact directory at `0700`; keep memory, vmstate, and metadata owner-only. Refuse to overwrite a non-empty snapshot directory.
-- Verify both Firecracker-created files exist and are non-empty before `snapshot::write_meta_atomic`. A completed `snapshot.json` must never advertise partial artifacts.
-- After all three artifacts are durable, terminate the base and call the landed `slot::reserve` to transfer ownership from the base room to `snapshot_id`.
-- Failure before snapshot creation attempts to resume a paused base. Failure after creation never silently frees the frozen slot; preserve a named recoverable state and the primary error.
+- Verify both Firecracker-created files exist and are non-empty, `sync_all` each file, and sync the artifact directory before publishing metadata. Strengthen `snapshot::write_meta_atomic` to sync its temporary file and the parent directory around the rename. A completed `snapshot.json` must never advertise partial artifacts after a host crash.
+- After all three artifacts are durable, call the landed `slot::reserve` while the live base still owns the claim, then terminate the base. This protected handoff must leave no dead-claim interval in which `rooms gc` can free the frozen slot; cleanup observes the snapshot reservation and cannot return it to the walk allocator.
+- Failure before snapshot creation attempts to resume a paused base. Failure after creation never silently frees the frozen slot. A failed reservation leaves the live base claim intact; a teardown failure after reservation preserves the snapshot reservation and a named recoverable state. Preserve the primary error.
 - Emit human/JSON success with snapshot id, directory, base room, slot, and provenance.
 
 ## Acceptance
@@ -46,9 +46,9 @@ Execute a Full Firecracker snapshot of a sealed neutral base, durably publish it
 - A sealed neutral room produces non-empty `snapshot.vmstate`, `snapshot.mem`, and `snapshot.json`.
 - A provisioning, tainted, slotless, or active-vsock room is refused before any pause.
 - API requests use the exact jail-visible paths and `Paused → CreateFullSnapshot` order.
-- Metadata is written only after both binary artifacts are durable.
-- Successful completion leaves a never-reclaim snapshot reservation, not a free slot or dead base claim.
-- Mocked failure tests cover pause, create, missing/empty files, metadata write, teardown, and reservation transfer.
+- Metadata is written only after both binary artifacts and their directory are synced; the atomic metadata publish is itself synced.
+- Successful completion leaves a never-reclaim snapshot reservation, not a free slot or dead base claim, and concurrent GC cannot observe an unowned handoff gap.
+- Mocked failure tests cover pause, create, missing/empty files, sync and metadata write, reservation-before-termination, concurrent GC at the handoff, and teardown.
 
 ## Test plan
 

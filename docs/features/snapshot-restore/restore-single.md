@@ -41,7 +41,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - The guest nudge reseeds randomness, corrects the clock, assigns the new room/run identity, generates a fresh SSH host key in the overlay, starts `sshd`, and ACKs only after all steps succeed.
 - No active vsock connection is assumed to survive the snapshot. The agent reconnects with bounded poll/retry and read deadlines.
 - Re-probe SSH only after the ACK. Persist additive `snapshot_lineage` before reporting readiness.
-- Every failure after lease acquisition tears down the process/jail and calls `release_lease`, returning ownership to the snapshot reservation. Preserve the primary error if cleanup also fails.
+- Every failure after lease acquisition attempts process/jail teardown. Call `release_lease` only after the reap-clean gate proves the jail and room directory are gone; incomplete cleanup retains the room's lease and recovery breadcrumb so `rooms gc` can finish teardown before returning ownership to the snapshot reservation. Preserve the primary error if cleanup also fails.
 
 ## Acceptance
 
@@ -51,11 +51,12 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - No hygiene ACK means no SSH/workload readiness.
 - Compatibility mismatch loads nothing.
 - Restore → teardown → restore again succeeds; the reservation persists and the slot is never walk-claimable.
+- Clean teardown returns the lease to the reservation; incomplete teardown keeps the lease held until GC proves a clean reap, preventing slot/IP reuse over residue.
 - Two restores have distinct RNG output, corrected clocks, fresh host keys, and distinct room identity.
 
 ## Test plan
 
-Run `make check`. Unit tests assert ordering, bind-mount behavior, compatibility refusal, lease return on every failure, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice, force one compatibility mismatch, and prove distinct RNG, clock, key, identity, and custody-before-resume.
+Run `make check`. Unit tests assert ordering, bind-mount behavior, compatibility refusal, lease return after clean reap, lease retention after incomplete jail or room cleanup, GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice, force one compatibility mismatch, and prove distinct RNG, clock, key, identity, and custody-before-resume.
 
 ## Non-goals
 
