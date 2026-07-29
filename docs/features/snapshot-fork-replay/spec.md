@@ -375,8 +375,9 @@ them, then durably record the create-and-collect-success boundary;
 **durably reserve the slot while the base claim is live** (sync the token before
 rename and the slot directory after); cleanly reap process/jail/room plus egress/TAP state; then
 publish `snapshot.json` as the completion marker. A
-`rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` leases the persistent
-reservation only after writing both room-local and globally indexed restore intent; compat guard
+`rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` writes a global
+`PreSpawn` restore intent first, holds the child behind a parent-death barrier until PID/starttime are
+durable in both indexed and room-local state, then leases the persistent reservation; compat guard
 (FR5); a command output tree must be canonically disjoint from the supplied rootfs image, the entire
 rooms state base, every jail-instance root, and every known custom completed or pending snapshot tree; stage the
 hash-verified rootfs read-only; **bind-mount**
