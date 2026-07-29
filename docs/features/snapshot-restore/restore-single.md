@@ -31,7 +31,8 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 ## Behavior
 
 - Add a live `restore(req: RestoreRequest) -> Result<Guard, FirecrackerError>` sibling to `boot()` that consumes `restore::plan_restore`.
-- Add `rooms restore <snapshot-dir> --image <path> (--keep | --command <cmd>) [--slot <k>] [--witness] [egress flags] [--json]`; require exactly one lifecycle mode before any effect, and keep the existing `--witness`/`--keep` conflict because a kept room outlives capture finalization.
+- Add `rooms restore <snapshot-dir> --image <path> (--keep | --command <cmd>) [--slot <k>] [--secret <ENV>]... [--out <dir>] [--witness] [egress flags] [--json]`; require exactly one lifecycle mode before any effect. `--out` and `--witness` conflict with `--keep`, and `--witness` requires `--out`, matching the existing capture lifecycle.
+- Extend the existing pre-runtime `--secret` admission/harvesting to restore: validate every named host variable, remove it from the process environment before worker threads start, and carry the values only in the per-restore resume nudge. Never fall back to SSH `SendEnv` or ambient guest credentials.
 - Read `snapshot.json`; validate the supplied rootfs, compute its hash, and verify schema, `Neutral` provenance, Firecracker version, rootfs hash, and requested/original slot before creating the VM.
 - Start a fresh jailed Firecracker process in an inert state: no tap/network, snapshot load, or guest execution. Atomically persist its PID/starttime, `snapshot_lineage`, and a non-owning slot intent with the snapshot's exact derived slot/tap before acquiring the lease; leave `RoomMeta.slot` unset and TAP ownership false. Also durably index that recovery tombstone at `<state-base>/restore-intents/<room-id>.json`, outside the room and jail trees, so it survives room deletion. If either recovery-breadcrumb write fails, terminate the inert process and do not lease.
 - Lease the snapshot reservation only after the room has a conclusive liveness/recovery breadcrumb. The lease token is authoritative and durable: the shared slot rewrite syncs the token file before rename and the slot directory after rename for both lease acquisition and return. A busy or foreign lease fails closed and pre-lease cleanup must neither delete the shared TAP nor release another room's lease. On success, atomically transition the room to leased ownership and set `RoomMeta.slot` before creating the TAP.
@@ -40,7 +41,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Bind-mount `snapshot.mem` into the jail so later clones share the inode privately; the small vmstate file may be copied.
 - Install witness and egress controls before `Resumed`.
 - Execute the landed plan exactly: load snapshot first, resume, then serve the resume nudge and await the guest ACK.
-- The guest nudge reseeds randomness, corrects the clock, assigns the new room/run identity, generates a fresh SSH host key in the overlay, starts `sshd`, and ACKs only after all steps succeed.
+- The guest nudge reseeds randomness, corrects the clock, assigns the new room/run identity, stages the admitted secrets in guest tmpfs with owner-only permissions, generates a fresh SSH host key in the overlay, starts `sshd`, and ACKs only after every hygiene and secret-delivery step succeeds.
 - No active vsock connection is assumed to survive the snapshot. The agent reconnects with bounded poll/retry and read deadlines.
 - Re-probe SSH only after the ACK. Preserve the already-persisted additive `snapshot_lineage` through readiness and teardown.
 - After readiness, `--command` executes through the existing runner and drops the guard only after the workload result is captured; `--keep` explicitly suppresses guard cleanup, emits the live room id, and hands ownership to the persisted room. A bare restore is refused rather than immediately dropping a successful guard.
@@ -51,6 +52,8 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 
 - A compatible snapshot restores on the same slot/IP and reaches SSH through a freshly keyed server.
 - `--keep` returns a live durable room id; `--command` runs one workload and then tears down; omitting both modes fails before process creation or lease acquisition.
+- Restore secrets use the existing host-env admission rules, are removed from the launcher environment, arrive only through the acknowledged nudge, and never traverse SSH environment forwarding.
+- A witnessed command restore requires `--out` and persists `witness.json` plus `witness.pcap`; capture/output modes are refused with `--keep`.
 - Restore requires a supplied rootfs whose hash matches metadata, stages it read-only at the saved jail path, and leaves its hash/mtime unchanged.
 - Custody and snapshot load both precede `Resumed`; no network transmit gap exists.
 - `snapshot.mem` is bind-mounted, not copied.
@@ -65,7 +68,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 
 ## Test plan
 
-Run `make check`. Unit tests assert lifecycle-mode admission, keep handoff, command teardown, ordering, read-only rootfs staging and hash refusal, bind-mount behavior, compatibility refusal, non-owning room and indexed tombstone intent before lease, no lease on breadcrumb-write failure, durable lease/return token rewrites, a competing pre-lease cleanup never deleting the active TAP, idempotent GC immediately before and after leasing, checked egress/TAP teardown, lease return after clean reap, a crash between room deletion and lease return, lease retention after any incomplete resource cleanup, indexed reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice with `--command` from the same unchanged image, exercise one `--keep` handoff, race a competing restore, inject a crash immediately before and after lease acquisition, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, backing-image immutability, and reservation recovery.
+Run `make check`. Unit tests assert lifecycle/output/witness parse admission, restore secret harvesting and nudge delivery, no SSH-env fallback, keep handoff, command teardown, ordering, read-only rootfs staging and hash refusal, bind-mount behavior, compatibility refusal, non-owning room and indexed tombstone intent before lease, no lease on breadcrumb-write failure, durable lease/return token rewrites, a competing pre-lease cleanup never deleting the active TAP, idempotent GC immediately before and after leasing, checked egress/TAP teardown, lease return after clean reap, a crash between room deletion and lease return, lease retention after any incomplete resource cleanup, indexed reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice with `--command --out` from the same unchanged image, exercise one `--keep` handoff, deliver one secret per restore, race a competing restore, inject a crash immediately before and after lease acquisition, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, backing-image immutability, witness persistence, and reservation recovery.
 
 ## Non-goals
 

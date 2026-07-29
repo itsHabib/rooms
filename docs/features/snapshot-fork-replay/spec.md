@@ -317,7 +317,7 @@ tuning — §10 Q2, now bounded to poll-retry), and **the exact per-daemon quies
 rooms base-create --image <rootfs> --repo <r> [--warm <cmd>]  # forced RO+overlay, no SSH/secrets, agent-vsock provisioning
 rooms snapshot    <base-id>                                  # transactional Full snapshot; REFUSES provenance != neutral
 rooms snapshot-recover [<snapshot-id>]                       # list/resume indexed incomplete snapshot transactions
-rooms restore     <snapshot> --image <rootfs> (--keep | --command <cmd>) [--slot <k>]
+rooms restore     <snapshot> --image <rootfs> (--keep | --command <cmd>) [--slot <k>] [--secret <ENV>]... [--out <dir>] [--witness]
                                                             # lease frozen slot/IP, File backend, hygiene + explicit lifecycle
 rooms clone       <snapshot> -n <N>                          # N clones: netns-per-clone around restore() (phase 2)
 ```
@@ -374,10 +374,11 @@ chain BEFORE resume** (FR7 — same fail-closed posture as boot, `firecracker.rs
 `PUT /snapshot/load` (File) → `Resumed`; the
 waiting resume-apply agent applies the hygiene nudge — reseed kernel RNG, step clock, start a
 **freshly-keyed `sshd`**, deliver identity — and ACKs (**no ack ⇒ no workload**); re-probe SSH
-(`wait_for_ssh`, `runner.rs:104`, against the fresh `sshd`); `--command` runs through the existing
-runner and then tears down, while `--keep` explicitly hands off the live persisted room id. A bare
-restore is refused before effects. Even a *single* restore reseeds — a warm base reused twice must not
-repeat RNG/clock/host-key.
+(`wait_for_ssh`, `runner.rs:104`, against the fresh `sshd`); admitted `--secret` values travel only
+inside that acknowledged nudge, never SSH env forwarding. `--command` runs through the existing
+runner and then tears down, while `--keep` explicitly hands off the live persisted room id. Witnessed
+commands require `--out`; capture/output conflict with `--keep`. A bare restore is refused before
+effects. Even a *single* restore reseeds — a warm base reused twice must not repeat RNG/clock/host-key.
 
 **C — fork N clones (phase 2, the payoff).** `rooms clone <snap> -n 8`: for each clone allocate a
 **netns** + veth + host NAT (identical inner IP, isolated), restore as in B into that netns with its
