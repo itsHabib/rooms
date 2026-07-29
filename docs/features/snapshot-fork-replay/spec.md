@@ -167,8 +167,9 @@ property of **how the base is created**, recorded as durable authoritative state
   happens only on the quiesced beacon; any *non-warm-up* ingress / secret-arm / workload-start flips
   `tainted` **irreversibly** from either state. No path back.
 - `rooms snapshot` refuses unless `provenance == neutral`.
-- **v5 — snapshot bases never start SSH (locked).** `base-create` forces the read-only rootfs +
-  tmpfs-overlay path, suppresses `sshd`, and carries no baked host key. Rooms sends the host-created
+- **v5 — snapshot bases never start SSH (locked).** The snapshot-capable image build omits host keys;
+  `base-create` fails closed before boot if a supplied image contains any SSH host private key,
+  forces the read-only rootfs + tmpfs-overlay path, and suppresses `sshd`. Rooms sends the host-created
   repo bundle plus an optional credential-free warm command over a dedicated typed guest-agent
   vsock protocol with a scrubbed environment. After stage/clone/warm ACKs, the agent stops
   non-essential services, closes every provisioning connection, validates the retained process set,
@@ -349,8 +350,9 @@ The retained resume agent is the nudge receiver; only workload and `sshd` proces
 
 ## 7. Key flows
 
-**A — create + quiesce + seal a neutral base (D2, v5).** `rooms base-create --repo r` forces a
-read-only backing rootfs with tmpfs overlay, no host keys, and no `sshd`; `/vsock` is present for the
+**A — create + quiesce + seal a neutral base (D2, v5).** The snapshot-capable build omits SSH host
+keys, and `rooms base-create --repo r` rejects a supplied image containing any before boot. It then
+forces a read-only backing rootfs with tmpfs overlay and no `sshd`; `/vsock` is present for the
 minimal provisioning/resume agent. Rooms transfers a host-created credential-free repo bundle and
 optional credential-free warm command over the typed guest-agent protocol. After stage/clone/warm
 ACKs, the agent closes the provisioning channel, stops non-essential services, validates the
