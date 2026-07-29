@@ -71,9 +71,9 @@ only after a verified quiesce (D2).
 guest-memory file, which includes the `/vsock` device) plus metadata; it **refuses** any room
 whose `provenance` is not `neutral`.
 
-**FR3.** `rooms restore <snap>` boots a fresh microVM from a snapshot — no kernel boot — reaching
-SSH-ready, and applies **restore-time hygiene** (reseed RNG, resync clock, deliver identity + any
-secrets) over vsock, gated: no ack → no workload.
+**FR3.** `rooms restore <snap> (--keep | --command <cmd>)` boots a fresh microVM from a snapshot — no
+kernel boot — reaching SSH-ready, and applies **restore-time hygiene** (reseed RNG, resync clock,
+deliver identity + any secrets) over vsock, gated: no ack → no workload.
 
 **FR4.** `rooms clone <snap> -n N` restores N clones concurrently, each in its own network
 namespace (distinct host-side identity, isolated from siblings), each with fresh entropy, a
@@ -191,10 +191,14 @@ consumed base or recomputing its metadata.
 GC consults the intent index before ordinary dead-room reconciliation: a matching pre-reservation
 transaction fences both the base claim and its jail artifacts until the shared recovery state machine
 collects the outputs and completes the handoff, or leaves the transaction protected and pending.
+If a conclusively dead pre-reservation base has only invalid/partial outputs, the same state machine
+terminally aborts: discard partials, prove no metadata/reservation exists, cleanly reap, and free only
+the exact ordinary base claim. A reservation is never eligible for this abort.
 The reservation is persistent: `rooms restore` takes a one-live lease against it and clean teardown
 returns the lease to the reservation, never to the free pool. A global restore tombstone survives
-room deletion until that return is durably synced; incomplete teardown or return retains the
-tombstone and lease until GC proves clean reap and retries the exact return. **N clones** (phase 2)
+room deletion until process/jail/room plus egress/TAP teardown and lease return are durably complete;
+any incomplete teardown or return retains the tombstone and lease until GC proves clean reap and
+retries the exact return. **N clones** (phase 2)
 use netns-per-clone (D3); phase 1 intentionally allows only one live restore because the frozen IP
 is identical.
 Rejected: naive free-then-reclaim (the race above); the v3 form assumed atomic transfer was heavier
@@ -298,8 +302,9 @@ tuning — §10 Q2, now bounded to poll-retry), and **the exact per-daemon quies
   `room.json` already versions additively (`room.rs:17`).
 - **Transaction indexes** (owner-only, outside room/jail/artifact trees): `snapshot-intents` embeds the
   complete planned `SnapshotMeta` before snapshot creation; `restore-intents` retains PID/starttime,
-  lineage, exact slot/tap, and expected lease through room deletion until durable lease return. GC
-  scans both indexes so recovery never depends on an already-consumed room directory.
+  lineage, exact slot/tap, egress policy, cleanup progress, and expected lease through room deletion
+  until resource cleanup and durable lease return. GC scans both indexes so recovery never depends on
+  an already-consumed room directory.
 - **Slot** (`slot.rs`): a live base claim transfers to a persistent snapshot reservation; each
   restore takes one exact `(snapshot_id, lessee_room_id)` lease and clean teardown returns it to the
   reservation. Reserved/leased tokens are reconcile-exempt and never enter the walk allocator.
@@ -312,7 +317,8 @@ tuning — §10 Q2, now bounded to poll-retry), and **the exact per-daemon quies
 rooms base-create --image <rootfs> --repo <r> [--warm <cmd>]  # forced RO+overlay, no SSH/secrets, agent-vsock provisioning
 rooms snapshot    <base-id>                                  # transactional Full snapshot; REFUSES provenance != neutral
 rooms snapshot-recover [<snapshot-id>]                       # list/resume indexed incomplete snapshot transactions
-rooms restore     <snapshot> --image <rootfs> [--slot <k>]   # lease frozen slot/IP, File backend, hygiene + ack
+rooms restore     <snapshot> --image <rootfs> (--keep | --command <cmd>) [--slot <k>]
+                                                            # lease frozen slot/IP, File backend, hygiene + explicit lifecycle
 rooms clone       <snapshot> -n <N>                          # N clones: netns-per-clone around restore() (phase 2)
 ```
 
@@ -354,20 +360,24 @@ vsock connection exists at snapshot time.
 **B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
 canonicalize the output and reject both the room and jail-instance trees; durably index the recovery
-intent; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; collect both jail-created outputs into
-their owner-only host artifact paths and sync them; **durably reserve the slot while the base claim is
-live** (sync the token before rename and the slot directory after); cleanly reap the base; then publish
-`snapshot.json` as the completion marker. `rooms restore <snap> --image <rootfs> --slot k` leases the
-persistent reservation only after writing both room-local and globally indexed restore intent; compat
-guard (FR5); stage the hash-verified rootfs read-only; **bind-mount**
+intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
+`PUT /snapshot/create {Full}`; collect both jail-created outputs into their owner-only host artifact
+paths and sync them; **durably reserve the slot while the base claim is live** (sync the token before
+rename and the slot directory after); cleanly reap the base; then publish
+`snapshot.json` as the completion marker. A
+`rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` leases the persistent
+reservation only after writing both room-local and globally indexed restore intent; compat guard
+(FR5); stage the hash-verified rootfs read-only; **bind-mount**
 `snapshot.mem` + stage `vmstate`
 into the jail (never copy the mem file, D6 v4); fresh FC process; **install the witness pcap + egress
 chain BEFORE resume** (FR7 — same fail-closed posture as boot, `firecracker.rs:478-498`);
 `PUT /snapshot/load` (File) → `Resumed`; the
 waiting resume-apply agent applies the hygiene nudge — reseed kernel RNG, step clock, start a
 **freshly-keyed `sshd`**, deliver identity — and ACKs (**no ack ⇒ no workload**); re-probe SSH
-(`wait_for_ssh`, `runner.rs:104`, against the fresh `sshd`); the agent process starts fresh. Even a
-*single* restore reseeds — a warm base reused twice must not repeat RNG/clock/host-key.
+(`wait_for_ssh`, `runner.rs:104`, against the fresh `sshd`); `--command` runs through the existing
+runner and then tears down, while `--keep` explicitly hands off the live persisted room id. A bare
+restore is refused before effects. Even a *single* restore reseeds — a warm base reused twice must not
+repeat RNG/clock/host-key.
 
 **C — fork N clones (phase 2, the payoff).** `rooms clone <snap> -n 8`: for each clone allocate a
 **netns** + veth + host NAT (identical inner IP, isolated), restore as in B into that netns with its
@@ -412,7 +422,7 @@ stale clock, or a secret from the base snapshot.**
 
 | Phase | Goal | High-level tasks | Depends on | Gate |
 |---|---|---|---|---|
-| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: forced RO+overlay rootfs, no secret channel or SSH, credential-free bundle/warm over the guest-agent vsock protocol, terminal beacon before marking neutral (D2 v5) [opus]; (1b) `snapshot` module + `rooms snapshot`: indexed complete intent → pause → Full create → collect/sync jailed outputs → durable reserve-before-reap with GC fencing → publish `snapshot.json`, with `snapshot-recover` for crash windows (D8 v5) [opus]; (1c) `restore()` sibling + `rooms restore --image`: `/snapshot/load` File backend, **lease and durably return the persistent reservation with a global tombstone**, FR5 rootfs/FC compat guard, **bind-mount (not copy) `snapshot.mem`**, **install witness + egress BEFORE `Resumed`** (FR7), **resume-apply agent + hygiene nudge (reseed / clock / overlay-keyed fresh `sshd` / identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
+| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: forced RO+overlay rootfs, no secret channel or SSH, credential-free bundle/warm over the guest-agent vsock protocol, terminal beacon before marking neutral (D2 v5) [opus]; (1b) `snapshot` module + `rooms snapshot`: indexed complete intent → writable jail targets → pause → Full create → collect/sync jailed outputs → durable reserve-before-reap with GC fencing + terminal partial abort → publish `snapshot.json`, with `snapshot-recover` for crash windows (D8 v5) [opus]; (1c) `restore()` sibling + `rooms restore --image (--keep | --command)`: `/snapshot/load` File backend, **lease and durably return the persistent reservation with a global tombstone after checked egress/TAP cleanup**, FR5 rootfs/FC compat guard, **bind-mount (not copy) `snapshot.mem`**, **install witness + egress BEFORE `Resumed`** (FR7), **resume-apply agent + hygiene nudge (reseed / clock / overlay-keyed fresh `sshd` / identity) + ack gate**, re-probe SSH, explicit live handoff or command teardown [opus] | Firecracker snapshot GA | **intermediate gate** below |
 | **2. fork-clones** | N clones from one snapshot, each isolated — the differentiated payoff | netns-per-clone allocator (rework slot layer + `create_slot_tap`, `firecracker.rs:609`) + veth/NAT (`network-for-clones.md`); per-clone hygiene nudge + witness/egress attach; `rooms clone -n N` | phase 1 | **VALIDATION GATE** (killer demo) below |
 | **3. checkpoint-receipts + hardening** (stub) | replay-rescope vocabulary + fleet ergonomics | checkpoint receipt as a first-class artifact (D5); snapshot GC/retention; FC-upgrade library-invalidation ergonomics; UFFD only if density missed | phase 2 + gate | each item needs a demonstrated need first |
 
@@ -422,7 +432,8 @@ slot/egress/witness) — a stub here, tasks materialized when phase 1 lands. Pha
 unsized.
 
 **Intermediate gate (after phase 1):** on the rooms-host, `base-create` a neutral base, `snapshot`
-it, `restore` it **twice** and confirm: (a) both restores reach workload-ready; (b) the compat guard
+it, `restore --command` it **twice**, then exercise one `restore --keep` handoff and confirm: (a) all
+restores reach workload-ready; (b) the compat guard
 refuses a forced fc_version/rootfs mismatch; (c) the two restores show **distinct kernel RNG draws, a
 correct (resynced) clock, and distinct `sshd` host keys** — hygiene fires on every restore, not just
 fork; (d) `snapshot` refuses a non-neutral room; (e) the snapshot memory file, grepped for **any
