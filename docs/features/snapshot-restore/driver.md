@@ -23,7 +23,7 @@ batches:
         runtime: local
         model: opus
         effort: extra
-        touches: [scripts/lib, scripts/build-rootfs-alpine.sh, src/vsock.rs, src/runner.rs, src/main.rs]
+        touches: [scripts/lib, scripts/build-rootfs-alpine.sh, src/egress.rs, src/vsock.rs, src/runner.rs, src/main.rs]
         status: pending
   - id: 2
     label: after batch 1 — execute the landed snapshot policy
@@ -77,8 +77,8 @@ conflict_notes:
     note: "snapshot-intent fencing and restore-tombstone release both extend GC reconciliation"
   - kind: file_overlap
     file: src/egress.rs
-    tasks: [snapshot-create, restore-single]
-    note: "both cleanup gates require fallible, idempotent egress-chain removal"
+    tasks: [sealed-neutral-base, snapshot-create, restore-single]
+    note: "base creation forces fail-closed no-egress; both later cleanup gates require fallible, idempotent chain removal"
 ---
 
 # snapshot/fork P1 — remaining execution driver manifest
@@ -96,8 +96,8 @@ restore consumes the resulting artifact and reservation.
 ## Batches
 
 **Batch 1 — `sealed-neutral-base`**
-- Replace SSH warm-up with host-bundled agent provisioning, verify quiescence over vsock, and
-  persist `Provisioning → Neutral` only after the terminal beacon.
+- Replace SSH warm-up with host-bundled, no-egress agent provisioning, verify quiescence over
+  vsock, and persist `Provisioning → Neutral` only after the terminal beacon.
 
 **Batch 2 — `snapshot-create`**
 - Execute the existing snapshot plan against Firecracker, persist the protected artifact set,

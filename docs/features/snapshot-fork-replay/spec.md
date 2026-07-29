@@ -167,9 +167,10 @@ property of **how the base is created**, recorded as durable authoritative state
   happens only on the quiesced beacon; any *non-warm-up* ingress / secret-arm / workload-start flips
   `tainted` **irreversibly** from either state. No path back.
 - `rooms snapshot` refuses unless `provenance == neutral`.
-- **v5 — snapshot bases never start SSH (locked).** The snapshot-capable image build omits host keys;
+- **v5 — snapshot bases never start SSH or reach the network (locked).** The snapshot-capable image build omits host keys;
   `base-create` fails closed before boot if a supplied image contains any SSH host private key,
-  forces the read-only rootfs + tmpfs-overlay path, and suppresses `sshd`. Rooms sends the host-created
+  forces the read-only rootfs + tmpfs-overlay path, installs `egress::Policy::None` before the VMM
+  can transmit, and suppresses `sshd`. Rooms sends the host-created
   repo bundle plus an optional credential-free warm command over a dedicated typed guest-agent
   vsock protocol with a scrubbed environment. After stage/clone/warm ACKs, the agent stops
   non-essential services, closes every provisioning connection, validates the retained process set,
@@ -352,7 +353,8 @@ The retained resume agent is the nudge receiver; only workload and `sshd` proces
 
 **A — create + quiesce + seal a neutral base (D2, v5).** The snapshot-capable build omits SSH host
 keys, and `rooms base-create --repo r` rejects a supplied image containing any before boot. It then
-forces a read-only backing rootfs with tmpfs overlay and no `sshd`; `/vsock` is present for the
+forces a read-only backing rootfs with tmpfs overlay, fail-closed `Policy::None` before guest
+execution, and no `sshd`; `/vsock` is present for the
 minimal provisioning/resume agent. Rooms transfers a host-created credential-free repo bundle and
 optional credential-free warm command over the typed guest-agent protocol. After stage/clone/warm
 ACKs, the agent closes the provisioning channel, stops non-essential services, validates the
@@ -365,7 +367,8 @@ refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 
 canonicalize the output and reject every managed room/jail cleanup tree; durably index the recovery
 intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
 `PUT /snapshot/create {Full}`; collect both jail-created outputs into their private host artifact
-paths, preserving a Firecracker-uid-readable/no-group-or-other-access memory inode, and sync them;
+paths, preserving a Firecracker-uid-readable/no-group-or-other-access memory inode, sync and validate
+them, then durably record the create-and-collect-success boundary;
 **durably reserve the slot while the base claim is live** (sync the token before
 rename and the slot directory after); cleanly reap process/jail/room plus egress/TAP state; then
 publish `snapshot.json` as the completion marker. A
