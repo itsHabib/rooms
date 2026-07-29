@@ -23,7 +23,7 @@ batches:
         runtime: local
         model: opus
         effort: extra
-        touches: [scripts/lib, scripts/build-rootfs-alpine.sh, src/egress.rs, src/vsock.rs, src/runner.rs, src/main.rs]
+        touches: [scripts/lib, scripts/build-rootfs-alpine.sh, src/egress.rs, src/firecracker.rs, src/vsock.rs, src/runner.rs, src/main.rs]
         status: pending
   - id: 2
     label: after batch 1 — execute the landed snapshot policy
@@ -69,8 +69,8 @@ conflict_notes:
     note: "all three add orchestration on the same CLI surface; the dependency chain serializes them"
   - kind: file_overlap
     file: src/firecracker.rs
-    tasks: [snapshot-create, restore-single]
-    note: "snapshot execution and restore process staging share the Firecracker mechanism layer"
+    tasks: [sealed-neutral-base, snapshot-create, restore-single]
+    note: "base creation disables IPv6; snapshot execution and restore staging share the Firecracker mechanism layer"
   - kind: file_overlap
     file: src/registry.rs
     tasks: [snapshot-create, restore-single]

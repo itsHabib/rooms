@@ -170,7 +170,8 @@ property of **how the base is created**, recorded as durable authoritative state
 - **v5 — snapshot bases never start SSH or reach the network (locked).** The snapshot-capable image build omits host keys;
   `base-create` fails closed before boot if a supplied image contains any SSH host private key,
   forces the read-only rootfs + tmpfs-overlay path, installs `egress::Policy::None` before the VMM
-  can transmit across both `FORWARD` and host-local `INPUT`, and suppresses `sshd`. Rooms sends the host-created
+  can transmit across both IPv4 `FORWARD` and host-local `INPUT`, disables IPv6 before interface
+  setup, and suppresses `sshd`. Rooms sends the host-created
   repo bundle plus an optional credential-free warm command over a dedicated typed guest-agent
   vsock protocol with a scrubbed environment. After stage/clone/warm ACKs, the agent stops
   non-essential services, closes every provisioning connection, validates the retained process set,
@@ -354,7 +355,7 @@ The retained resume agent is the nudge receiver; only workload and `sshd` proces
 **A — create + quiesce + seal a neutral base (D2, v5).** The snapshot-capable build omits SSH host
 keys, and `rooms base-create --repo r` rejects a supplied image containing any before boot. It then
 forces a read-only backing rootfs with tmpfs overlay, fail-closed `Policy::None` across forwarded
-and host-local traffic before guest
+and host-local IPv4 traffic plus base-only `ipv6.disable=1` before guest
 execution, and no `sshd`; `/vsock` is present for the
 minimal provisioning/resume agent. Rooms transfers a host-created credential-free repo bundle and
 optional credential-free warm command over the typed guest-agent protocol. After stage/clone/warm
@@ -376,8 +377,8 @@ rename and the slot directory after); cleanly reap process/jail/room plus egress
 publish `snapshot.json` as the completion marker. A
 `rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` leases the persistent
 reservation only after writing both room-local and globally indexed restore intent; compat guard
-(FR5); a command output tree must be canonically disjoint from every known completed or pending
-snapshot artifact/transaction tree, including sibling/default and custom-output snapshots; stage the
+(FR5); a command output tree must be canonically disjoint from the entire rooms state base, every
+jail-instance root, and every known custom completed or pending snapshot tree; stage the
 hash-verified rootfs read-only; **bind-mount**
 `snapshot.mem` + stage `vmstate`
 into the jail (never copy the mem file, D6 v4); fresh FC process; **install the witness pcap + egress
