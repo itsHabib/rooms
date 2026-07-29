@@ -17,7 +17,7 @@
 > - **§4 D2 + §7 A** — neutrality *by construction*: the sealed neutral-base boot mode + monotonic `provenance` state. This is the load-bearing security rule; if a base can be tainted after the neutrality check, the design leaks secrets into `snapshot.mem`.
 > - **§4 D7 + §7 B** — the post-resume receiver + the ack gate. A neutral base boots without `--secret`; the guest still needs a live consumer for the reseed/clock/identity nudge *on resume*, or every clone fails closed. The resume-trigger mechanism is the one genuinely open sub-decision (§10 Q2).
 > - **§4 D3 + §9** — netns-per-clone is the long pole (drags egress-chain install + witness tap-naming). Phase 1 now ships snapshot + restore **with hygiene**; phase 2 adds only netns fan-out.
-> - **§8** — the fork hygiene matrix, especially the **userspace-PRNG** row: kernel entropy does not reseed an already-started process, so the neutral base is snapshotted **before the agent process starts**.
+> - **§8** — the fork hygiene matrix, especially the **userspace-PRNG** row: the captured minimal resume agent waits without drawing randomness; workload and `sshd` processes start only after hygiene.
 
 ## 1. Problem & hypothesis
 
@@ -83,8 +83,8 @@ resynced clock, its own secrets/identity, and its own witness/egress plane.
 match the host.
 
 **FR6.** No secret is ever present in a snapshot file; secrets reach a guest **only** post-resume,
-per-clone, over vsock. The agent process starts **after** restore hygiene, so its userspace PRNG
-seeds fresh.
+per-clone, over vsock. The captured minimal resume agent waits without drawing randomness; workload
+and `sshd` processes start **after** restore hygiene so their userspace PRNGs seed fresh.
 
 **FR7.** Each clone produces its own witness pcap and honors its own egress policy — per-clone
 custody survives fork. This holds for a **single** restore too (FR3): witness capture + egress
@@ -103,7 +103,7 @@ weaker-custodied than a cold-booted one.
 
 ```
   rooms base-create  →  SEALED NEUTRAL BASE (once):
-     boot (no --secret, /vsock present, resume-apply agent waiting; NO agent process, NO interactive ingress)
+     boot (no --secret, /vsock present, minimal resume-apply agent waiting; NO workload agent, NO interactive ingress)
        → clone repo → warm toolchain → idle.  provenance = neutral (authoritative, monotonic)
         │  rooms snapshot <base>   (refuses if provenance != neutral)
         ▼
@@ -116,7 +116,7 @@ weaker-custodied than a cold-booted one.
    │              resume-apply agent (already waiting in the snapshot) connects the per-clone   │
    │              vsock listener → applies: reseed RNG · resync clock · secrets · run identity  │
    │              → ACKs.  Host gates: no ack ⇒ no workload_started.                            │
-   │              THEN the agent process starts (fresh userspace PRNG) · own witness · own egress│
+   │              THEN workload + freshly-keyed sshd start (fresh userspace PRNG) · own custody │
    └───────────────────────────────────────────────────────────────────────────────────────────┘
         shared warm memory (clean pages), per-clone dirtied pages copy-on-write
 ```
@@ -345,7 +345,7 @@ pub async fn restore(req: RestoreRequest<'_>) -> Result<Guard, FirecrackerError>
 waiting) connects the per-clone vsock listener and receives `{ reseed:true, clock:<host-now>,
 secrets:{…}, run_id, git_identity }`; it reseeds the kernel RNG, steps the clock, stages secrets +
 identity, ACKs. Host blocks `workload_started` until the ack (reuses vsock-secrets §5.4 sequencing).
-The agent process starts only after this.
+The retained resume agent is the nudge receiver; only workload and `sshd` processes start after this.
 
 ## 7. Key flows
 
@@ -360,7 +360,7 @@ vsock connection exists at snapshot time.
 
 **B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
-canonicalize the output and reject both the room and jail-instance trees; durably index the recovery
+canonicalize the output and reject every managed room/jail cleanup tree; durably index the recovery
 intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
 `PUT /snapshot/create {Full}`; collect both jail-created outputs into their owner-only host artifact
 paths and sync them; **durably reserve the slot while the base claim is live** (sync the token before
@@ -415,7 +415,7 @@ Every clone must diverge from its siblings on each axis or it's unsafe:
 | Snapshot files on disk | plaintext memory readable | `0700` snapshot-owned directory outside room cleanup; treat as credential; runbook note |
 | FC version pinning | snapshot unloadable after FC upgrade | record `fc_version`; compat guard refuses (FR5); non-goal to migrate |
 | Dead TCP / vsock across restore | pre-snapshot connections gone | host re-probes SSH (fresh `sshd`); the resume-apply agent (re)connects the per-clone vsock listener on resume (D7) |
-| Agent run identity | same git author / run id across forks | hygiene nudge delivers per-clone `run_id` + `git_identity`; agent starts idle-then-fresh post-resume |
+| Agent run identity | same git author / run id across forks | retained resume agent receives per-clone `run_id` + `git_identity`; workload agent starts fresh only after the ACK |
 
 The invariant reviewers should try to break: **no clone reaches `workload_started` sharing another
 clone's network identity, SSH host key, kernel or userspace RNG stream (in *any* retained process),
@@ -480,7 +480,7 @@ Phase 3 is not committed until this passes.
    the page-cache sharing is the win, but confirm the mem-file write on `snapshot create` isn't a
    latency cliff. Measure in phase 1.
 5. **How warm is the neutral base?** Snapshot after repo-clone + toolchain-warm but **before** the
-   agent process starts (D2/D7). Which caches can be primed without starting a long-lived
+   workload agent starts (D2/D7). Which caches can be primed without starting another long-lived
    PRNG-holding process is the phase-1 tuning question that sets the payoff size.
 6. **The quiesce/reseed protocol (D2/D7).** Which daemons stop cleanly before snapshot vs must be
    restarted on resume, and how the resume-apply agent orders {kernel reseed → clock step →
@@ -515,7 +515,7 @@ is unsafe regardless of speed.
   phase 1 (single restore reused >once already duplicates RNG/clock); phase 2 is netns fan-out only.
   New phase-1 intermediate gate checks RNG/clock on a double-restore.
 - **P1 "reset cloned userspace PRNG"** → **§8 userspace-PRNG row + D7**: structural fix — snapshot
-  *before* the agent process starts; §9 gate probes the **application** PRNG, not just `/dev/urandom`.
+  before workload/`sshd` processes start; §9 gate probes the **application** PRNG, not just `/dev/urandom`.
 - **P2 "align identity validation with the netns model"** → **§9 gate rewritten**: verify distinct
   netns/veth/NAT identity + cross-clone isolation (inner MAC/IP are intentionally identical under
   D3), replacing the impossible "no two clones share a MAC/IP" check.
