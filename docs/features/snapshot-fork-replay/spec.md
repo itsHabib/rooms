@@ -170,7 +170,7 @@ property of **how the base is created**, recorded as durable authoritative state
 - **v5 — snapshot bases never start SSH or reach the network (locked).** The snapshot-capable image build omits host keys;
   `base-create` fails closed before boot if a supplied image contains any SSH host private key,
   forces the read-only rootfs + tmpfs-overlay path, installs `egress::Policy::None` before the VMM
-  can transmit, and suppresses `sshd`. Rooms sends the host-created
+  can transmit across both `FORWARD` and host-local `INPUT`, and suppresses `sshd`. Rooms sends the host-created
   repo bundle plus an optional credential-free warm command over a dedicated typed guest-agent
   vsock protocol with a scrubbed environment. After stage/clone/warm ACKs, the agent stops
   non-essential services, closes every provisioning connection, validates the retained process set,
@@ -184,7 +184,7 @@ is the smaller, surer cut).
 
 **D8 — snapshot atomically inherits a persistent slot reservation before the base is reaped. (DECIDED — revised v4/v5.)**
 The frozen guest IP is baked into the snapshot, so the slot must never enter the walk allocator.
-Before snapshot creation, `rooms snapshot` durably records an indexed transaction intent containing
+Before snapshot creation, `rooms snapshot` exclusively creates a durable per-base indexed transaction intent containing
 the complete planned `SnapshotMeta`, artifact paths, and transaction boundaries. After both binary
 artifacts are synced, it durably rewrites the still-live base claim to a snapshot-owned reservation
 under the slot lock, and only then terminates/reaps the base. `snapshot.json` is published last, after
@@ -353,7 +353,8 @@ The retained resume agent is the nudge receiver; only workload and `sshd` proces
 
 **A — create + quiesce + seal a neutral base (D2, v5).** The snapshot-capable build omits SSH host
 keys, and `rooms base-create --repo r` rejects a supplied image containing any before boot. It then
-forces a read-only backing rootfs with tmpfs overlay, fail-closed `Policy::None` before guest
+forces a read-only backing rootfs with tmpfs overlay, fail-closed `Policy::None` across forwarded
+and host-local traffic before guest
 execution, and no `sshd`; `/vsock` is present for the
 minimal provisioning/resume agent. Rooms transfers a host-created credential-free repo bundle and
 optional credential-free warm command over the typed guest-agent protocol. After stage/clone/warm
@@ -365,7 +366,7 @@ vsock connection exists at snapshot time.
 **B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
 canonicalize the output and reject every managed room/jail cleanup tree plus both snapshot/restore
-transaction-index trees; durably index the recovery
+transaction-index trees; exclusively create the per-base recovery
 intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
 `PUT /snapshot/create {Full}`; collect both jail-created outputs into their private host artifact
 paths, preserving a Firecracker-uid-readable/no-group-or-other-access memory inode, sync and validate
