@@ -33,7 +33,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Add a live `restore(req: RestoreRequest) -> Result<Guard, FirecrackerError>` sibling to `boot()` that consumes `restore::plan_restore`.
 - Add `rooms restore <snapshot-dir> [--slot <k>] [--witness] [egress flags] [--json]`.
 - Read `snapshot.json`; verify schema, `Neutral` provenance, Firecracker version, rootfs hash, and requested/original slot before creating the VM.
-- Start a fresh jailed Firecracker process in an inert state: no tap/network, snapshot load, or guest execution. Atomically persist its PID/starttime and `snapshot_lineage` before acquiring the lease; if that liveness write fails, terminate the inert process and do not lease.
+- Start a fresh jailed Firecracker process in an inert state: no tap/network, snapshot load, or guest execution. Atomically persist its PID/starttime, `snapshot_lineage`, and the snapshot's exact derived slot/tap before acquiring the lease; if that recovery-breadcrumb write fails, terminate the inert process and do not lease.
 - Lease the snapshot reservation only after the room has a conclusive liveness/recovery breadcrumb. A busy or foreign slot fails closed with no fallback and tears down the inert process.
 - Reuse jail/guard/staging mechanisms, but preserve restore's distinct order.
 - Bind-mount `snapshot.mem` into the jail so later clones share the inode privately; the small vmstate file may be copied.
@@ -52,7 +52,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - `snapshot.mem` is bind-mounted, not copied.
 - No hygiene ACK means no SSH/workload readiness.
 - Compatibility mismatch loads nothing.
-- A crash before Firecracker liveness is durable holds no lease; every crash after lease acquisition is classifiable as live or orphaned-dead and cannot strand the reservation in an `Unknown` room.
+- A crash before the recovery breadcrumb is durable holds no lease. A crash immediately before or after lease acquisition is classifiable as live or orphaned-dead, and GC has the lineage plus exact slot needed to call `release_lease` idempotently without stranding or freeing the reservation.
 - Restore → teardown → restore again succeeds; the reservation persists and the slot is never walk-claimable.
 - Clean teardown returns the lease to the reservation; incomplete teardown keeps the lease held until GC proves a clean reap, preventing slot/IP reuse over residue.
 - After an incomplete teardown, `rooms gc` uses persisted lineage to return the lease to the reservation after clean reap; it cannot strand an `@lease` token or free the reservation.
@@ -60,7 +60,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 
 ## Test plan
 
-Run `make check`. Unit tests assert ordering, bind-mount behavior, compatibility refusal, inert-process liveness before lease, no lease on liveness-write failure, lease return after clean reap, lease retention after incomplete jail or room cleanup, registry reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice, inject a crash immediately before and after lease acquisition, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, and reservation recovery.
+Run `make check`. Unit tests assert ordering, bind-mount behavior, compatibility refusal, inert-process liveness/lineage/slot before lease, no lease on breadcrumb-write failure, idempotent GC immediately before and after leasing, lease return after clean reap, lease retention after incomplete jail or room cleanup, registry reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice, inject a crash immediately before and after lease acquisition, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, and reservation recovery.
 
 ## Non-goals
 
