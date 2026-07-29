@@ -186,8 +186,9 @@ Before snapshot creation, `rooms snapshot` durably records an indexed transactio
 the complete planned `SnapshotMeta`, artifact paths, and transaction boundaries. After both binary
 artifacts are synced, it durably rewrites the still-live base claim to a snapshot-owned reservation
 under the slot lock, and only then terminates/reaps the base. `snapshot.json` is published last, after
-clean reap; the `snapshot-recover` command resumes an indexed crash window without needing the
-consumed base or recomputing its metadata.
+checked process/jail/room plus egress/TAP cleanup; failures retain the intent and reservation for GC.
+The `snapshot-recover` command resumes an indexed crash window without needing the consumed base or
+recomputing its metadata.
 GC consults the intent index before ordinary dead-room reconciliation: a matching pre-reservation
 transaction fences both the base claim and its jail artifacts until the shared recovery state machine
 collects the outputs and completes the handoff, or leaves the transaction protected and pending.
@@ -363,8 +364,8 @@ canonicalize the output and reject both the room and jail-instance trees; durabl
 intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
 `PUT /snapshot/create {Full}`; collect both jail-created outputs into their owner-only host artifact
 paths and sync them; **durably reserve the slot while the base claim is live** (sync the token before
-rename and the slot directory after); cleanly reap the base; then publish
-`snapshot.json` as the completion marker. A
+rename and the slot directory after); cleanly reap process/jail/room plus egress/TAP state; then
+publish `snapshot.json` as the completion marker. A
 `rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` leases the persistent
 reservation only after writing both room-local and globally indexed restore intent; compat guard
 (FR5); a command output tree must be canonically disjoint from the snapshot artifact tree; stage the
