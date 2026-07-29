@@ -51,7 +51,7 @@ batches:
         runtime: local
         model: opus
         effort: extra
-        touches: [src/firecracker.rs, src/restore.rs, src/slot.rs, src/runner.rs, src/room.rs, src/registry.rs, src/main.rs]
+        touches: [src/firecracker.rs, src/restore.rs, src/rootfs.rs, src/slot.rs, src/runner.rs, src/room.rs, src/registry.rs, src/main.rs]
         status: pending
 
 conflict_notes:

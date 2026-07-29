@@ -29,11 +29,12 @@ PR #96 deliberately stops at `Provisioning`; it warms through SSH and cannot be 
 
 ## Decision
 
-No pre-snapshot SSH. A `base-create` guest must never start `sshd` or load a host private key. Repo staging and an optional credential-free warm command run through the guest agent channel. Warm input is part of the future snapshot contents: authenticated or secret-bearing warm-up is unsupported and must run after restore. Ordinary `rooms run` behavior remains unchanged.
+No pre-snapshot SSH. A `base-create` guest must never start `sshd` or load a host private key. Repo staging and an optional credential-free warm command run through the guest agent channel. Warm input is part of the future snapshot contents: authenticated or secret-bearing warm-up is unsupported and must run after restore. Snapshot bases always use the read-only rootfs plus tmpfs-overlay path; there is no writable-rootfs opt-out. Ordinary `rooms run` behavior remains unchanged.
 
 ## Behavior
 
 - Install a minimal guest provisioning/resume agent and order it before `sshd` in the rootfs.
+- Force `base-create` to boot its validated image as a read-only block device with `init=/sbin/overlay-init`; refuse an image without the overlay entry point. Warm writes live only in the captured tmpfs upper layer and never mutate the shared backing image.
 - Give provisioning a dedicated vsock port and typed framing; do not overload the first-read-then-delete secrets port.
 - Resolve `--repo` on the host. Create a git bundle without embedding host credentials, serve it with the optional warm command, and require phase ACKs after stage, clone, and warm.
 - Execute warm-up with a fixed scrubbed environment and no credential files, forwarded host variables, secret channel, or authenticated network access. Treat the command bytes as snapshot-persistent input and refuse configured credential sources; callers needing credentials warm after restore.
@@ -50,6 +51,7 @@ No pre-snapshot SSH. A `base-create` guest must never start `sshd` or load a hos
 - Repo content is present, while no repository credential was delivered to the guest.
 - Warm-up receives a fixed scrubbed environment and no host credential source; payload deletion is never treated as proof that secret bytes left memory.
 - No `sshd` process, listener, session child, or loaded host private key exists at seal time.
+- The backing rootfs is mounted read-only, its hash/mtime is unchanged by base creation and warm-up, and the guest root remains writable only through the tmpfs overlay.
 - `Neutral` is persisted only after the exact beacon and after its connection closes.
 - The retained agent waits without a live vsock connection and can reconnect after restore.
 - Every failure branch tears down or remains `Provisioning`; none accidentally seals.
@@ -57,7 +59,7 @@ No pre-snapshot SSH. A `base-create` guest must never start `sshd` or load a hos
 
 ## Test plan
 
-Run `make check`. Add protocol tests for framing and ACK order; refusal tests for malformed/late beacon, unexpected processes, and configured credential sources; persistence/cleanup tests; and rootfs-script tests proving base mode suppresses `sshd` and scrubs the warm environment. Validate credential-free bundle transfer, warm command, retained process set, beacon, and durable `Neutral` on the rooms-host before landing.
+Run `make check`. Add protocol tests for framing and ACK order; refusal tests for malformed/late beacon, unexpected processes, configured credential sources, and images without overlay-init; persistence/cleanup tests; and rootfs-script tests proving base mode suppresses `sshd`, scrubs the warm environment, and forces the read-only drive payload. Validate credential-free bundle transfer, warm command, retained process set, beacon, durable `Neutral`, writable overlay root, and unchanged backing-image hash/mtime on the rooms-host before landing.
 
 ## Non-goals
 
