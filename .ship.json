@@ -1,0 +1,12 @@
+{
+  "review": {
+    "panel": [
+      { "name": "codex", "trigger": "mention" },
+      { "name": "claude", "trigger": "mention" },
+      { "name": "cursor", "trigger": "mention" },
+      { "name": "copilot", "trigger": "reviewer-request" }
+    ],
+    "require": ["codex", "claude", "cursor"],
+    "settle_minutes": 15
+  }
+}
