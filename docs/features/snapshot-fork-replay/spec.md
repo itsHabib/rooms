@@ -15,7 +15,7 @@
 >
 > **Reviewers — focus areas:**
 > - **§4 D2 + §7 A** — neutrality *by construction*: the sealed neutral-base boot mode + monotonic `provenance` state. This is the load-bearing security rule; if a base can be tainted after the neutrality check, the design leaks secrets into `snapshot.mem`.
-> - **§4 D7 + §7 B** — the post-resume receiver + the ack gate. A neutral base boots without `--secret`; the guest still needs a live consumer for the reseed/clock/identity nudge *on resume*, or every clone fails closed. The resume-trigger mechanism is the one genuinely open sub-decision (§10 Q2).
+> - **§4 D7 + §7 B** — the post-resume receiver + the ack gate. A neutral base boots without `--secret`; the retained agent reconnects through bounded poll/retry for the reseed/clock/identity nudge *on resume*, or every clone fails closed. Review the retry cadence/deadlines and the no-active-connection snapshot precondition (§10 Q2).
 > - **§4 D3 + §9** — netns-per-clone is the long pole (drags egress-chain install + witness tap-naming). Phase 1 now ships snapshot + restore **with hygiene**; phase 2 adds only netns fan-out.
 > - **§8** — the fork hygiene matrix, especially the **userspace-PRNG** row: the captured minimal resume agent waits without drawing randomness; workload and `sshd` processes start only after hygiene.
 
@@ -280,7 +280,7 @@ RNG state** (codex P1). So v2:
   pause/resume trivially. **"No active vsock connection at snapshot time" is an explicit snapshot
   precondition** (a FC constraint, not just hygiene) — which the quiesce beacon (D2 v4) must close
   *before* the pause, not hold open.
-Two genuinely open sub-decisions remain: **the resume-trigger cadence** (poll interval / deadline
+Two genuinely open sub-decisions remain: **the resume-agent retry cadence** (poll interval / deadline
 tuning — §10 Q2, now bounded to poll-retry), and **the exact per-daemon quiesce/reseed protocol**
 (which services stop cleanly vs need restart — §10 Q6).
 
@@ -472,11 +472,10 @@ Phase 3 is not committed until this passes.
    device armed + `exec`/interactive refused), or as the *default* boot with a `--seal` that trips
    `provenance=tainted` on first secret/workload/exec? Lean: distinct mode, so "neutral" is the
    explicit, auditable path.
-2. **Resume-trigger for the apply agent (D7) — the one real unknown.** How does the captured
-   resume-apply agent re-connect on resume? (a) a poll-retry loop captured mid-wait (simple, robust,
-   the host serves nothing during the neutral phase so it just retries); (b) a resume signal
-   (VMGenID/virtio) it waits on; (c) host-driven — after `Resumed`, host `ssh`-triggers the apply.
-   Resolve with a phase-1 spike; (a) is the current favorite.
+2. **Resume-agent retry tuning (D7).** The mechanism is locked to a bounded poll-retry loop captured
+   between attempts, with a read deadline on each connection. Phase 1 tunes the retry interval,
+   backoff, read deadline, and total ACK timeout. SSH is not a trigger: `sshd` starts only inside the
+   acknowledged hygiene nudge, so relying on it would deadlock restore.
 3. **netns vs `network_overrides`.** `/snapshot/load` accepts `network_overrides` to remap guest NICs
    to differently-named host taps — could that avoid full netns-per-clone, or does the frozen guest
    IP still collide at host routing? Resolve in the phase-2 spike before the slot rework.
@@ -514,7 +513,7 @@ is unsafe regardless of speed.
   `secrets_delivered` event. §5, §7 A.
 - **P1 "add a post-resume receiver for the vsock nudge"** → **D7 (new)**: the neutral base carries
   `/vsock` into the snapshot and the boot-time one-shot becomes a long-lived resume-apply agent
-  captured mid-wait; §3 "Extended", §6, §10 Q2 (the resume-trigger spike).
+  captured between bounded connection attempts; §3 "Extended", §6, §10 Q2 (retry tuning).
 - **P1 "move restore hygiene into phase 1"** → **D7 + §9**: reseed/clock/identity + ack gate now in
   phase 1 (single restore reused >once already duplicates RNG/clock); phase 2 is netns fan-out only.
   New phase-1 intermediate gate checks RNG/clock on a double-restore.
