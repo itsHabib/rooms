@@ -10,9 +10,9 @@
 
 | Bucket | Files | Est. LOC | Weighted |
 |---|---|---|---|
-| Production | `src/firecracker.rs`, `src/main.rs`, `src/runner.rs`, guest resume-agent protocol, existing `src/restore.rs` and `src/slot.rs` integration | ~420 | 420 |
-| Tests | live-flow mechanism, custody ordering, lease round-trip, ACK failure matrix | ~240 | 120 |
-| **Total** | | | **~540** |
+| Production | `src/firecracker.rs`, `src/main.rs`, `src/room.rs`, `src/registry.rs`, `src/runner.rs`, guest resume-agent protocol, existing `src/restore.rs` and `src/slot.rs` integration | ~470 | 470 |
+| Tests | live-flow mechanism, custody ordering, lease/GC round-trip, ACK failure matrix | ~280 | 140 |
+| **Total** | | | **~610** |
 
 Band: **stretch**.
 
@@ -33,15 +33,16 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Add a live `restore(req: RestoreRequest) -> Result<Guard, FirecrackerError>` sibling to `boot()` that consumes `restore::plan_restore`.
 - Add `rooms restore <snapshot-dir> [--slot <k>] [--witness] [egress flags] [--json]`.
 - Read `snapshot.json`; verify schema, `Neutral` provenance, Firecracker version, rootfs hash, and requested/original slot before creating the VM.
-- Lease the snapshot reservation for the new room. A busy or foreign slot fails closed with no fallback.
+- Lease the snapshot reservation for the new room. A busy or foreign slot fails closed with no fallback. Atomically persist `snapshot_lineage` immediately after leasing and before creating guest resources so orphan GC can identify both the snapshot and lessee.
 - Reuse jail/guard/staging mechanisms, but preserve restore's distinct order.
 - Bind-mount `snapshot.mem` into the jail so later clones share the inode privately; the small vmstate file may be copied.
 - Install witness and egress controls before `Resumed`.
 - Execute the landed plan exactly: load snapshot first, resume, then serve the resume nudge and await the guest ACK.
 - The guest nudge reseeds randomness, corrects the clock, assigns the new room/run identity, generates a fresh SSH host key in the overlay, starts `sshd`, and ACKs only after all steps succeed.
 - No active vsock connection is assumed to survive the snapshot. The agent reconnects with bounded poll/retry and read deadlines.
-- Re-probe SSH only after the ACK. Persist additive `snapshot_lineage` before reporting readiness.
+- Re-probe SSH only after the ACK. Preserve the already-persisted additive `snapshot_lineage` through readiness and teardown.
 - Every failure after lease acquisition attempts process/jail teardown. Call `release_lease` only after the reap-clean gate proves the jail and room directory are gone; incomplete cleanup retains the room's lease and recovery breadcrumb so `rooms gc` can finish teardown before returning ownership to the snapshot reservation. Preserve the primary error if cleanup also fails.
+- Extend the registry/reap release descriptor to distinguish an ordinary room claim from a snapshot lease. For a leased orphan, reconstruct `snapshot_id` and lessee from `snapshot_lineage`, delete the tap only after clean reap, then call `release_lease`; never route an `@lease` token through `slot::free`.
 
 ## Acceptance
 
@@ -52,11 +53,12 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Compatibility mismatch loads nothing.
 - Restore → teardown → restore again succeeds; the reservation persists and the slot is never walk-claimable.
 - Clean teardown returns the lease to the reservation; incomplete teardown keeps the lease held until GC proves a clean reap, preventing slot/IP reuse over residue.
+- After an incomplete teardown, `rooms gc` uses persisted lineage to return the lease to the reservation after clean reap; it cannot strand an `@lease` token or free the reservation.
 - Two restores have distinct RNG output, corrected clocks, fresh host keys, and distinct room identity.
 
 ## Test plan
 
-Run `make check`. Unit tests assert ordering, bind-mount behavior, compatibility refusal, lease return after clean reap, lease retention after incomplete jail or room cleanup, GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice, force one compatibility mismatch, and prove distinct RNG, clock, key, identity, and custody-before-resume.
+Run `make check`. Unit tests assert ordering, bind-mount behavior, compatibility refusal, lineage-before-resource creation, lease return after clean reap, lease retention after incomplete jail or room cleanup, registry reconstruction and GC-completed return, and the ACK gate. On the rooms-host: snapshot one sealed base, restore it twice, force one compatibility mismatch and one incomplete-cleanup recovery, and prove distinct RNG, clock, key, identity, custody-before-resume, and reservation recovery.
 
 ## Non-goals
 

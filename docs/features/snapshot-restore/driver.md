@@ -37,7 +37,7 @@ batches:
         runtime: local
         model: opus
         effort: extra
-        touches: [src/firecracker.rs, src/main.rs, src/snapshot.rs, src/slot.rs]
+        touches: [src/config.rs, src/firecracker.rs, src/main.rs, src/snapshot.rs, src/slot.rs]
         status: pending
   - id: 3
     label: after batch 2 — execute restore + hygiene and run the phase gate
@@ -51,7 +51,7 @@ batches:
         runtime: local
         model: opus
         effort: extra
-        touches: [src/firecracker.rs, src/restore.rs, src/slot.rs, src/runner.rs, src/room.rs, src/main.rs]
+        touches: [src/firecracker.rs, src/restore.rs, src/slot.rs, src/runner.rs, src/room.rs, src/registry.rs, src/main.rs]
         status: pending
 
 conflict_notes:
