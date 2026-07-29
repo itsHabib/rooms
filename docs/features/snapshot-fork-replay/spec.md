@@ -364,8 +364,9 @@ vsock connection exists at snapshot time.
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
 canonicalize the output and reject every managed room/jail cleanup tree; durably index the recovery
 intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
-`PUT /snapshot/create {Full}`; collect both jail-created outputs into their owner-only host artifact
-paths and sync them; **durably reserve the slot while the base claim is live** (sync the token before
+`PUT /snapshot/create {Full}`; collect both jail-created outputs into their private host artifact
+paths, preserving a Firecracker-uid-readable/no-group-or-other-access memory inode, and sync them;
+**durably reserve the slot while the base claim is live** (sync the token before
 rename and the slot directory after); cleanly reap process/jail/room plus egress/TAP state; then
 publish `snapshot.json` as the completion marker. A
 `rooms restore <snap> --image <rootfs> (--keep | --command <cmd>) --slot k` leases the persistent

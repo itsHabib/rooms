@@ -39,7 +39,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Lease the snapshot reservation only after the room has a conclusive liveness/recovery breadcrumb. The lease token is authoritative and durable: the shared slot rewrite syncs the token file before rename and the slot directory after rename for both lease acquisition and return. A busy or foreign lease fails closed and pre-lease cleanup must neither delete the shared TAP nor release another room's lease. On success, atomically transition the room to leased ownership and set `RoomMeta.slot` before creating the TAP.
 - Reuse jail/guard/staging mechanisms, but preserve restore's distinct order.
 - Stage the supplied hash-verified rootfs at the snapshot's saved jail path as a read-only block device with the overlay init contract before `snapshot/load`; restore never mutates the backing image.
-- Bind-mount `snapshot.mem` into the jail so later clones share the inode privately; the small vmstate file may be copied.
+- Before load, verify the collected `snapshot.mem` inode is readable by the configured unprivileged Firecracker uid/gid without granting group/other access. Bind-mount that inode into the jail so later clones share it privately; do not rely on root-created `0600` defaults, and never copy the memory file. The small vmstate file may be copied and staged with the jailer's required ownership.
 - Install witness and egress controls before `Resumed`.
 - Execute the landed plan exactly: load snapshot first, resume, then serve the resume nudge and await the guest ACK.
 - The guest nudge reseeds randomness, corrects the clock, assigns the new room/run identity, stages the admitted secrets in guest tmpfs with owner-only permissions, generates a fresh SSH host key in the overlay, starts `sshd`, and ACKs only after every hygiene and secret-delivery step succeeds.
@@ -59,6 +59,7 @@ Start a fresh jailed Firecracker process, lease the frozen slot, install custody
 - Restore requires a supplied rootfs whose hash matches metadata, stages it read-only at the saved jail path, and leaves its hash/mtime unchanged.
 - Custody and snapshot load both precede `Resumed`; no network transmit gap exists.
 - `snapshot.mem` is bind-mounted, not copied.
+- `/snapshot/load` can open the private memory inode as the configured Firecracker uid/gid; host collection or restore staging never leaves it root-only.
 - No hygiene ACK means no SSH/workload readiness.
 - Compatibility mismatch loads nothing.
 - A crash before the recovery breadcrumb is durable holds no lease. A crash immediately before or after lease acquisition is classifiable as live or orphaned-dead; cleanup consults the exact lease token before claiming TAP ownership, so a failed competing restore cannot delete the active restore's TAP.
