@@ -658,6 +658,34 @@ async fn clone_repo_in_guest(
     run_setup_ssh(guest_ip, key_path, &remote, "clone repo in guest").await
 }
 
+/// Warm a base over SSH in its provisioning window: wait for the guest, then
+/// optionally clone `repo` (at `HEAD`) and run the `warm` command.
+///
+/// This is the base's one legitimate interactive use before it is sealed — it
+/// runs while the room is still `provisioning`, so it does not taint. A failure
+/// is surfaced so the caller can tear the half-warmed base down rather than
+/// leave it running.
+pub async fn warm_base(
+    guest_ip: &str,
+    key_path: &Path,
+    config: &RoomsConfig,
+    repo: Option<&str>,
+    warm: Option<&str>,
+) -> Result<(), FirecrackerError> {
+    wait_for_ssh(guest_ip, key_path, config).await?;
+    if let Some(repo) = repo {
+        clone_repo_in_guest(guest_ip, key_path, repo, "HEAD")
+            .await
+            .map_err(|e| FirecrackerError::Internal(format!("base warm-up clone: {e}")))?;
+    }
+    if let Some(cmd) = warm {
+        run_setup_ssh(guest_ip, key_path, cmd, "base warm-up")
+            .await
+            .map_err(|e| FirecrackerError::Internal(format!("base warm-up: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Write `task.md` and `meta.json` into `/workspace/in/` for `cursor-runner.js`.
 async fn stage_cursor_input(
     guest_ip: &str,

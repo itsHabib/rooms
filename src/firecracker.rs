@@ -419,6 +419,12 @@ pub struct BootRequest<'a> {
     /// before the VMM can transmit; [`egress::Plan::Observe`] is the
     /// non-breaking default (no chain, witness stays observe-only).
     pub egress: &'a egress::Plan,
+    /// Boot as a sealed neutral-base candidate (`rooms base-create`): record the
+    /// room at `provenance = Provisioning` (via [`room::RoomMeta::new_base`]) and
+    /// attach the `/vsock` device unconditionally — the resume-apply agent's
+    /// channel must be wired even with no secrets armed. A plain `rooms run`
+    /// boot passes `false`.
+    pub base: bool,
 }
 
 /// Boot a Firecracker microVM with the given kernel + rootfs.
@@ -519,6 +525,7 @@ pub async fn boot(
         req.descriptor,
         child.id(),
         req.slot.cloned(),
+        req.base,
     );
 
     wait_for_socket(
@@ -536,7 +543,10 @@ pub async fn boot(
         rootfs_drive: &rootfs_drive,
         network: req.network,
         boot_args: &boot_args,
-        vsock: req.secrets.is_some(),
+        // A base needs the vsock channel wired for the resume-apply agent even
+        // though its secrets payload is unarmed; a secrets boot needs it to
+        // deliver. Either forces the device on.
+        vsock: req.secrets.is_some() || req.base,
     };
     configure_vm(&socket, &spec, config).await?;
 
@@ -766,11 +776,20 @@ fn write_room_meta(
     descriptor: &room::RoomDescriptor,
     pid: Option<u32>,
     slot: Option<room::Slot>,
+    base: bool,
 ) {
     // Record the pid's start time so liveness can later tell *this* incarnation
     // from a recycled pid (the `rooms kill` identity guard).
     let pid_starttime = pid.and_then(room::starttime_of);
-    let mut meta = room::RoomMeta::new(
+    // A base-create boot enters the provenance ladder at `Provisioning` so its
+    // own warm-up may run without tainting; every other room is a plain
+    // workload record with no provenance. Both constructors share a signature.
+    let build = if base {
+        room::RoomMeta::new_base
+    } else {
+        room::RoomMeta::new
+    };
+    let mut meta = build(
         id.to_owned(),
         descriptor.command.clone(),
         pid,
@@ -1582,6 +1601,62 @@ mod tests {
         reason = "test module"
     )]
 
+    #[test]
+    fn write_room_meta_base_records_provisioning_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let descriptor = crate::room::RoomDescriptor {
+            command: Some("base-create".to_owned()),
+            keep: true,
+        };
+        // base = true routes through RoomMeta::new_base, so the room enters the
+        // provenance ladder at Provisioning (rooms' warm-up may run un-tainting).
+        super::write_room_meta(
+            dir.path(),
+            "01aaaaaaaaaaaaaaaaaaaaaaaa",
+            &descriptor,
+            None,
+            None,
+            true,
+        );
+        let meta = crate::room::read(dir.path())
+            .expect("read room.json")
+            .expect("room.json present");
+        assert_eq!(
+            meta.provenance(),
+            Some(crate::room::Provenance::Provisioning)
+        );
+        assert!(
+            !meta.is_snapshottable(),
+            "a provisioning base is not yet snapshottable — sealing to Neutral comes later"
+        );
+    }
+
+    #[test]
+    fn write_room_meta_non_base_has_no_provenance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let descriptor = crate::room::RoomDescriptor {
+            command: Some("run".to_owned()),
+            keep: false,
+        };
+        // base = false is the plain-workload path: no provenance, never sealable.
+        super::write_room_meta(
+            dir.path(),
+            "01bbbbbbbbbbbbbbbbbbbbbbbb",
+            &descriptor,
+            None,
+            None,
+            false,
+        );
+        let meta = crate::room::read(dir.path())
+            .expect("read room.json")
+            .expect("room.json present");
+        assert_eq!(
+            meta.provenance(),
+            None,
+            "a plain run room has no provenance"
+        );
+    }
+
     #[cfg(unix)]
     mod unix_tests {
         use std::time::Duration;
@@ -2189,6 +2264,7 @@ mod e2e_tests {
             witness: false,
             secrets: None,
             egress: &egress_plan,
+            base: false,
         };
         let mut vm = boot(&req, &config).await.expect("boot should succeed");
 

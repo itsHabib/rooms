@@ -261,6 +261,7 @@ async fn room_boots_on_slot_1_and_reaps_byte_identically() {
         witness: false,
         secrets: None,
         egress: &rooms::egress::Plan::Observe,
+        base: false,
     };
     let vm = match firecracker::boot(&req, &config).await {
         Ok(vm) => vm,
@@ -379,6 +380,7 @@ async fn claim_and_boot(
             witness: false,
             secrets: None,
             egress: &rooms::egress::Plan::Observe,
+            base: false,
         };
         firecracker::boot(&req, config).await
     };
