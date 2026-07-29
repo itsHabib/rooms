@@ -188,6 +188,9 @@ artifacts are synced, it durably rewrites the still-live base claim to a snapsho
 under the slot lock, and only then terminates/reaps the base. `snapshot.json` is published last, after
 clean reap; the `snapshot-recover` command resumes an indexed crash window without needing the
 consumed base or recomputing its metadata.
+GC consults the intent index before ordinary dead-room reconciliation: a matching pre-reservation
+transaction fences both the base claim and its jail artifacts until the shared recovery state machine
+collects the outputs and completes the handoff, or leaves the transaction protected and pending.
 The reservation is persistent: `rooms restore` takes a one-live lease against it and clean teardown
 returns the lease to the reservation, never to the free pool. A global restore tombstone survives
 room deletion until that return is durably synced; incomplete teardown or return retains the
@@ -351,9 +354,9 @@ vsock connection exists at snapshot time.
 **B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
 canonicalize the output and reject both the room and jail-instance trees; durably index the recovery
-intent; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; sync the artifacts; **durably reserve the
-slot while the base claim is live** (sync the token before rename and the slot directory after);
-cleanly reap the base; then publish
+intent; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; collect both jail-created outputs into
+their owner-only host artifact paths and sync them; **durably reserve the slot while the base claim is
+live** (sync the token before rename and the slot directory after); cleanly reap the base; then publish
 `snapshot.json` as the completion marker. `rooms restore <snap> --image <rootfs> --slot k` leases the
 persistent reservation only after writing both room-local and globally indexed restore intent; compat
 guard (FR5); stage the hash-verified rootfs read-only; **bind-mount**
@@ -409,7 +412,7 @@ stale clock, or a secret from the base snapshot.**
 
 | Phase | Goal | High-level tasks | Depends on | Gate |
 |---|---|---|---|---|
-| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: forced RO+overlay rootfs, no secret channel or SSH, credential-free bundle/warm over the guest-agent vsock protocol, terminal beacon before marking neutral (D2 v5) [opus]; (1b) `snapshot` module + `rooms snapshot`: indexed complete intent → pause → Full create → sync artifacts → durable reserve-before-reap → publish `snapshot.json`, with `snapshot-recover` for crash windows (D8 v5) [opus]; (1c) `restore()` sibling + `rooms restore --image`: `/snapshot/load` File backend, **lease and durably return the persistent reservation with a global tombstone**, FR5 rootfs/FC compat guard, **bind-mount (not copy) `snapshot.mem`**, **install witness + egress BEFORE `Resumed`** (FR7), **resume-apply agent + hygiene nudge (reseed / clock / overlay-keyed fresh `sshd` / identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
+| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: forced RO+overlay rootfs, no secret channel or SSH, credential-free bundle/warm over the guest-agent vsock protocol, terminal beacon before marking neutral (D2 v5) [opus]; (1b) `snapshot` module + `rooms snapshot`: indexed complete intent → pause → Full create → collect/sync jailed outputs → durable reserve-before-reap with GC fencing → publish `snapshot.json`, with `snapshot-recover` for crash windows (D8 v5) [opus]; (1c) `restore()` sibling + `rooms restore --image`: `/snapshot/load` File backend, **lease and durably return the persistent reservation with a global tombstone**, FR5 rootfs/FC compat guard, **bind-mount (not copy) `snapshot.mem`**, **install witness + egress BEFORE `Resumed`** (FR7), **resume-apply agent + hygiene nudge (reseed / clock / overlay-keyed fresh `sshd` / identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
 | **2. fork-clones** | N clones from one snapshot, each isolated — the differentiated payoff | netns-per-clone allocator (rework slot layer + `create_slot_tap`, `firecracker.rs:609`) + veth/NAT (`network-for-clones.md`); per-clone hygiene nudge + witness/egress attach; `rooms clone -n N` | phase 1 | **VALIDATION GATE** (killer demo) below |
 | **3. checkpoint-receipts + hardening** (stub) | replay-rescope vocabulary + fleet ergonomics | checkpoint receipt as a first-class artifact (D5); snapshot GC/retention; FC-upgrade library-invalidation ergonomics; UFFD only if density missed | phase 2 + gate | each item needs a demonstrated need first |
 
