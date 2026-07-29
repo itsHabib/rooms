@@ -182,14 +182,18 @@ is the smaller, surer cut).
 
 **D8 — snapshot atomically inherits a persistent slot reservation before the base is reaped. (DECIDED — revised v4/v5.)**
 The frozen guest IP is baked into the snapshot, so the slot must never enter the walk allocator.
-After both binary artifacts are synced, `rooms snapshot` durably records an indexed transaction
-intent, rewrites the still-live base claim to a snapshot-owned reservation under the slot lock, and
-only then terminates/reaps the base. `snapshot.json` is published last, after clean reap; the
-`snapshot-recover` command resumes an indexed crash window without needing the consumed base.
+Before snapshot creation, `rooms snapshot` durably records an indexed transaction intent containing
+the complete planned `SnapshotMeta`, artifact paths, and transaction boundaries. After both binary
+artifacts are synced, it durably rewrites the still-live base claim to a snapshot-owned reservation
+under the slot lock, and only then terminates/reaps the base. `snapshot.json` is published last, after
+clean reap; the `snapshot-recover` command resumes an indexed crash window without needing the
+consumed base or recomputing its metadata.
 The reservation is persistent: `rooms restore` takes a one-live lease against it and clean teardown
-returns the lease to the reservation, never to the free pool. Incomplete teardown retains the lease
-until GC proves clean reap. **N clones** (phase 2) use netns-per-clone (D3); phase 1 intentionally
-allows only one live restore because the frozen IP is identical.
+returns the lease to the reservation, never to the free pool. A global restore tombstone survives
+room deletion until that return is durably synced; incomplete teardown or return retains the
+tombstone and lease until GC proves clean reap and retries the exact return. **N clones** (phase 2)
+use netns-per-clone (D3); phase 1 intentionally allows only one live restore because the frozen IP
+is identical.
 Rejected: naive free-then-reclaim (the race above); the v3 form assumed atomic transfer was heavier
 than a template destroy, but the reservation-token transfer *is* the destroy plus a one-line token
 write — cheaper than accepting permanent restore starvation.
@@ -289,6 +293,10 @@ tuning — §10 Q2, now bounded to poll-retry), and **the exact per-daemon quies
   (`{ from_snapshot, base_room }`), and a non-owning restore slot intent. A restored room leaves
   `slot` unset until the exact snapshot lease succeeds, then atomically records leased ownership.
   `room.json` already versions additively (`room.rs:17`).
+- **Transaction indexes** (owner-only, outside room/jail/artifact trees): `snapshot-intents` embeds the
+  complete planned `SnapshotMeta` before snapshot creation; `restore-intents` retains PID/starttime,
+  lineage, exact slot/tap, and expected lease through room deletion until durable lease return. GC
+  scans both indexes so recovery never depends on an already-consumed room directory.
 - **Slot** (`slot.rs`): a live base claim transfers to a persistent snapshot reservation; each
   restore takes one exact `(snapshot_id, lessee_room_id)` lease and clean teardown returns it to the
   reservation. Reserved/leased tokens are reconcile-exempt and never enter the walk allocator.
@@ -347,7 +355,8 @@ intent; `PATCH /vm {Paused}`; `PUT /snapshot/create {Full}`; sync the artifacts;
 slot while the base claim is live** (sync the token before rename and the slot directory after);
 cleanly reap the base; then publish
 `snapshot.json` as the completion marker. `rooms restore <snap> --image <rootfs> --slot k` leases the
-persistent reservation; compat guard (FR5); stage the hash-verified rootfs read-only; **bind-mount**
+persistent reservation only after writing both room-local and globally indexed restore intent; compat
+guard (FR5); stage the hash-verified rootfs read-only; **bind-mount**
 `snapshot.mem` + stage `vmstate`
 into the jail (never copy the mem file, D6 v4); fresh FC process; **install the witness pcap + egress
 chain BEFORE resume** (FR7 — same fail-closed posture as boot, `firecracker.rs:478-498`);
@@ -400,7 +409,7 @@ stale clock, or a secret from the base snapshot.**
 
 | Phase | Goal | High-level tasks | Depends on | Gate |
 |---|---|---|---|---|
-| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: forced RO+overlay rootfs, no secret channel or SSH, credential-free bundle/warm over the guest-agent vsock protocol, terminal beacon before marking neutral (D2 v5) [opus]; (1b) `snapshot` module + `rooms snapshot`: pause → Full create → sync artifacts → indexed intent → reserve-before-reap → publish `snapshot.json`, with `snapshot-recover` for crash windows (D8 v5) [opus]; (1c) `restore()` sibling + `rooms restore --image`: `/snapshot/load` File backend, **lease and return the persistent reservation**, FR5 rootfs/FC compat guard, **bind-mount (not copy) `snapshot.mem`**, **install witness + egress BEFORE `Resumed`** (FR7), **resume-apply agent + hygiene nudge (reseed / clock / overlay-keyed fresh `sshd` / identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
+| **1. snapshot-restore** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** — warm-base reuse, safe under repeat restore | (1a) sealed neutral-base mode + `provenance` state + `rooms base-create`: forced RO+overlay rootfs, no secret channel or SSH, credential-free bundle/warm over the guest-agent vsock protocol, terminal beacon before marking neutral (D2 v5) [opus]; (1b) `snapshot` module + `rooms snapshot`: indexed complete intent → pause → Full create → sync artifacts → durable reserve-before-reap → publish `snapshot.json`, with `snapshot-recover` for crash windows (D8 v5) [opus]; (1c) `restore()` sibling + `rooms restore --image`: `/snapshot/load` File backend, **lease and durably return the persistent reservation with a global tombstone**, FR5 rootfs/FC compat guard, **bind-mount (not copy) `snapshot.mem`**, **install witness + egress BEFORE `Resumed`** (FR7), **resume-apply agent + hygiene nudge (reseed / clock / overlay-keyed fresh `sshd` / identity) + ack gate**, re-probe SSH [opus] | Firecracker snapshot GA | **intermediate gate** below |
 | **2. fork-clones** | N clones from one snapshot, each isolated — the differentiated payoff | netns-per-clone allocator (rework slot layer + `create_slot_tap`, `firecracker.rs:609`) + veth/NAT (`network-for-clones.md`); per-clone hygiene nudge + witness/egress attach; `rooms clone -n N` | phase 1 | **VALIDATION GATE** (killer demo) below |
 | **3. checkpoint-receipts + hardening** (stub) | replay-rescope vocabulary + fleet ergonomics | checkpoint receipt as a first-class artifact (D5); snapshot GC/retention; FC-upgrade library-invalidation ergonomics; UFFD only if density missed | phase 2 + gate | each item needs a demonstrated need first |
 
@@ -415,12 +424,11 @@ refuses a forced fc_version/rootfs mismatch; (c) the two restores show **distinc
 correct (resynced) clock, and distinct `sshd` host keys** — hygiene fires on every restore, not just
 fork; (d) `snapshot` refuses a non-neutral room; (e) the snapshot memory file, grepped for **any
 warm-up-time secret and the clone's *runtime-generated* host key**, contains **neither** — proving
-quiesce + neutrality cleared them. **Caveat (Fable P2):** the canonical image bakes host keys at
-build (`ssh-keygen -A`, `build-rootfs-alpine.sh:281`), so a snapshot-capable image must **drop
-build-time keygen** (or delete `/etc/ssh/ssh_host_*` during quiesce) and have the resume-apply agent
-generate a fresh key **into the overlay** before starting `sshd` per clone — otherwise the grep
-false-fails on baked-key page-cache residue *and* every clone silently shares the baked key. Grep the
-runtime key, not the baked one; note any file the base ever read leaves page-cache residue.
+quiesce + neutrality cleared them. A snapshot-capable image must **omit build-time host-key
+generation entirely**; deleting `/etc/ssh/ssh_host_*` during quiesce is not an allowed fallback
+because loaded or cached key bytes can remain in `snapshot.mem`. The resume-apply agent generates a
+fresh key **into the overlay** before starting `sshd` per clone. Grep the runtime key and verify the
+base image contained no baked private key.
 
 **VALIDATION GATE (after phase 2) — the killer demo:** boot one base, clone a repo + warm the
 `claude` toolchain, `rooms snapshot`; then `rooms clone <snap> -n 8` and:
