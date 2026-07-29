@@ -364,7 +364,8 @@ vsock connection exists at snapshot time.
 
 **B — snapshot, consume the base, restore one clone WITH hygiene (phase 1).** `rooms snapshot <base>`:
 refuse if `provenance != neutral`; assert **no active vsock connection** (D7 v4 precondition);
-canonicalize the output and reject every managed room/jail cleanup tree; durably index the recovery
+canonicalize the output and reject every managed room/jail cleanup tree plus both snapshot/restore
+transaction-index trees; durably index the recovery
 intent; stage owner-only jail targets writable by the Firecracker uid/gid; `PATCH /vm {Paused}`;
 `PUT /snapshot/create {Full}`; collect both jail-created outputs into their private host artifact
 paths, preserving a Firecracker-uid-readable/no-group-or-other-access memory inode, sync and validate
