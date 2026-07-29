@@ -10,7 +10,7 @@
 
 | Bucket | Files | Est. LOC | Weighted |
 |---|---|---|---|
-| Production | `src/config.rs`, `src/firecracker.rs`, `src/registry.rs`, `src/main.rs`, existing `src/snapshot.rs` and `src/slot.rs` integration | ~430 | 430 |
+| Production | `src/config.rs`, `src/egress.rs`, `src/firecracker.rs`, `src/registry.rs`, `src/main.rs`, existing `src/snapshot.rs` and `src/slot.rs` integration | ~430 | 430 |
 | Tests | mocked API execution, target staging/collection failures, GC fencing/abort, transaction recovery, reservation transfer | ~300 | 150 |
 | **Total** | | | **~580** |
 

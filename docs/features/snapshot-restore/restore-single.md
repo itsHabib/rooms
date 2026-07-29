@@ -10,7 +10,7 @@
 
 | Bucket | Files | Est. LOC | Weighted |
 |---|---|---|---|
-| Production | `src/firecracker.rs`, `src/main.rs`, `src/room.rs`, `src/registry.rs`, `src/rootfs.rs`, `src/runner.rs`, guest resume-agent protocol, existing `src/restore.rs` and `src/slot.rs` integration | ~560 | 560 |
+| Production | `src/egress.rs`, `src/firecracker.rs`, `src/main.rs`, `src/room.rs`, `src/registry.rs`, `src/rootfs.rs`, `src/runner.rs`, guest resume-agent protocol, existing `src/restore.rs` and `src/slot.rs` integration | ~560 | 560 |
 | Tests | live-flow/lifecycle mechanism, custody ordering, resource-cleanup + lease/GC round-trip, ACK failure matrix | ~320 | 160 |
 | **Total** | | | **~720** |
 
