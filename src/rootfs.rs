@@ -93,7 +93,7 @@ fn debugfs(path: &Path, request: &str) -> Result<String, String> {
         .args(["-R", request])
         .arg(path)
         .output()
-        .map_err(|e| format!("inspect snapshot base image with debugfs: {e}"))?;
+        .map_err(|e| debugfs_spawn_error(&e))?;
     if !output.status.success() {
         return Err(format!(
             "inspect snapshot base image {} ({request}): {}",
@@ -102,6 +102,13 @@ fn debugfs(path: &Path, request: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn debugfs_spawn_error(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return "snapshot base admission requires debugfs; install e2fsprogs (for example: apt install e2fsprogs)".to_owned();
+    }
+    format!("inspect snapshot base image with debugfs: {error}")
 }
 
 fn baked_host_private_key(listing: &str) -> Option<&str> {
@@ -147,7 +154,12 @@ pub fn unmount_overlay(mount_point: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::baked_host_private_key;
+    #![allow(
+        clippy::expect_used,
+        reason = "test helper: a missing shell is an immediate test failure"
+    )]
+
+    use super::{baked_host_private_key, debugfs_spawn_error};
 
     #[test]
     fn private_host_keys_are_rejected_but_public_halves_are_not() {
@@ -165,6 +177,14 @@ mod tests {
     }
 
     #[test]
+    fn missing_debugfs_has_actionable_remediation() {
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let message = debugfs_spawn_error(&error);
+        assert!(message.contains("requires debugfs"), "{message}");
+        assert!(message.contains("install e2fsprogs"), "{message}");
+    }
+
+    #[test]
     fn snapshot_rootfs_scripts_encode_the_neutral_base_shape() {
         let build = include_str!("../scripts/build-rootfs-alpine.sh");
         assert!(build.contains("rm -f /etc/ssh/ssh_host_*"));
@@ -178,8 +198,76 @@ mod tests {
 
         let agent = include_str!("../scripts/lib/rooms-provision-agent.sh");
         assert!(agent.contains("env -i HOME=/home/rooms"));
+        assert!(agent.contains("head -c \"$length\""));
+        assert!(!agent.contains("dd bs=1"));
         assert!(agent.contains("ipv6_is_disabled"));
-        assert!(agent.contains("retained_processes_are_safe"));
+        assert!(agent.contains("no_post_warm_processes"));
         assert!(agent.contains("VSOCK-CONNECT:2:5002"));
+    }
+
+    #[cfg(unix)]
+    fn run_agent_shell(body: &str) -> std::process::Output {
+        let agent = format!(
+            "{}/scripts/lib/rooms-provision-agent.sh",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::process::Command::new("/bin/sh")
+            .args(["-c", body])
+            .env("AGENT", agent)
+            .output()
+            .expect("run provisioning-agent shell test")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frame_reader_is_exact_and_preserves_the_next_header() {
+        let output = run_agent_shell(
+            r#"
+            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
+            . "$AGENT"
+            tmp="$(mktemp)"
+            printf 'BUNDLE 6\nabc123WARM 0\n' |
+                {
+                    read_frame BUNDLE "$tmp"
+                    IFS=' ' read -r kind length
+                    [ "$kind" = WARM ] && [ "$length" = 0 ] &&
+                        [ "$(cat "$tmp")" = abc123 ]
+                }
+            status=$?
+            rm -f "$tmp"
+            exit "$status"
+            "#,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_baseline_rejects_a_background_shell_descendant() {
+        let output = run_agent_shell(
+            r#"
+            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
+            . "$AGENT"
+            baseline="$(mktemp)"
+            capture_process_baseline "$baseline"
+            /bin/sh -c 'while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+            child=$!
+            accepted=0
+            no_post_warm_processes "$baseline" || accepted=$?
+            kill "$child" 2>/dev/null || true
+            wait "$child" 2>/dev/null || true
+            rm -f "$baseline"
+            [ "$accepted" -ne 0 ]
+            "#,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

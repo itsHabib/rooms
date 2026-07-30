@@ -5,6 +5,7 @@ set -eu
 PROVISION_DIR=/run/rooms-provision
 BUNDLE="$PROVISION_DIR/repo.bundle"
 WARM="$PROVISION_DIR/warm"
+PROCESS_BASELINE="$PROVISION_DIR/processes.before-warm"
 
 fail() {
     printf 'ERR %s\n' "$*" >&2
@@ -20,7 +21,13 @@ read_frame() {
         ''|*[!0-9]*) fail "invalid $expected length" ;;
     esac
     : >"$destination"
-    [ "$length" -eq 0 ] || dd bs=1 count="$length" of="$destination" 2>/dev/null
+    if [ "$length" -ne 0 ]; then
+        # Alpine's `head` is the BusyBox applet: `-c` reads exactly this many
+        # bytes from the stream without consuming the following frame header.
+        head -c "$length" >"$destination"
+    fi
+    actual="$(wc -c <"$destination")"
+    [ "$actual" -eq "$length" ] || fail "short $expected frame: wanted $length bytes, got $actual"
 }
 
 credentials_absent() {
@@ -69,21 +76,44 @@ no_ssh_surface() {
     return 0
 }
 
-retained_processes_are_safe() {
+process_identity() {
+    proc="$1"
+    pid="${proc##*/}"
+    IFS= read -r stat <"$proc/stat" || return 1
+    rest="${stat##*) }"
+    [ "$rest" != "$stat" ] || return 1
+    set -- $rest
+    [ "$#" -ge 20 ] || return 1
+    shift 19
+    printf '%s:%s\n' "$pid" "$1"
+}
+
+capture_process_baseline() {
+    baseline="$1"
+    : >"$baseline"
     for proc in /proc/[0-9]*; do
         [ -L "$proc/exe" ] || continue
-        IFS= read -r comm <"$proc/comm" || return 1
-        case "$comm" in
-            init|openrc|openrc-run|sh|socat|busybox|rooms-provision*) ;;
-            *) printf 'unexpected retained process: %s\n' "$comm" >&2; return 1 ;;
-        esac
+        process_identity "$proc" >>"$baseline" || true
+    done
+}
+
+no_post_warm_processes() {
+    baseline="$1"
+    for proc in /proc/[0-9]*; do
+        [ -L "$proc/exe" ] || continue
+        identity="$(process_identity "$proc")" || continue
+        grep -Fxq "$identity" "$baseline" && continue
+        IFS= read -r comm <"$proc/comm" || comm=unknown
+        printf 'post-warm process survived: %s (%s)\n' "$comm" "$identity" >&2
+        return 1
     done
 }
 
 emit_beacon() {
-    # This helper has redirected stdio, so it cannot retain the provisioning
-    # stream inherited from the service's socat process.
-    sleep 1
+    # The caller replaces all three stdio descriptors before forking this
+    # helper, so it cannot retain the provisioning stream. The host binds this
+    # listener before boot but accepts only after provisioning EOF; an early
+    # connect queues safely and preserves that structural ordering.
     printf 'quiesced\n' | socat - VSOCK-CONNECT:2:5002
 }
 
@@ -91,6 +121,7 @@ session() {
     IFS= read -r preface || fail "missing protocol preface"
     [ "$preface" = "ROOMS-PROVISION/1" ] || fail "unsupported protocol"
     install -d -m 0700 "$PROVISION_DIR"
+    capture_process_baseline "$PROCESS_BASELINE"
 
     read_frame BUNDLE "$BUNDLE"
     printf 'ACK stage\n'
@@ -105,15 +136,20 @@ session() {
     printf 'ACK warm\n'
 
     rm -f "$BUNDLE" "$WARM"
-    rmdir "$PROVISION_DIR"
     for service in sshd crond syslog acpid; do
         rc-service "$service" stop >/dev/null 2>&1 || true
     done
     ipv6_is_disabled || fail "IPv6 is not provably disabled"
     no_ssh_surface || fail "SSH process or listener survived quiesce"
-    retained_processes_are_safe || fail "unexpected process survived quiesce"
+    no_post_warm_processes "$PROCESS_BASELINE" || fail "warm descendant survived quiesce"
+    rm -f "$PROCESS_BASELINE"
+    rmdir "$PROVISION_DIR"
     emit_beacon </dev/null >/dev/null 2>&1 &
 }
+
+if [ "${ROOMS_AGENT_LIBRARY_ONLY:-0}" = 1 ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 [ "${1:-}" = session ] || fail "usage: rooms-provision-agent session"
 session

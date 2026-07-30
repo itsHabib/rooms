@@ -922,29 +922,35 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
             "base boot did not arm its provisioning gate".to_owned(),
         ));
     };
-    if let Err(e) = delivery.await_quiesced(config.guest_reach_timeout).await {
+    if let Err(e) = delivery
+        .await_quiesced(config.base_provisioning_timeout)
+        .await
+    {
         let _ = vm.shutdown().await;
         return Err(RoomsError::Internal(format!(
             "base provisioning failed: {e}"
         )));
     }
-    if let Err(e) = vm.seal_base() {
-        let _ = vm.shutdown().await;
-        return Err(e.into());
-    }
+    let provenance = match vm.seal_base() {
+        Ok(provenance) => provenance,
+        Err(e) => {
+            let _ = vm.shutdown().await;
+            return Err(e.into());
+        }
+    };
 
     // Hand the base off running: dismiss the guard and forget the VM so neither
     // drop nor kill_on_drop tears it down. `rooms snapshot` freezes it later;
     // `rooms gc` / `rooms kill` reaps it otherwise.
     vm.guard_mut().dismiss();
     std::mem::forget(vm);
-    emit_base_created(&room_id, &claimed, json);
+    emit_base_created(&room_id, &claimed, provenance, json);
     Ok(0)
 }
 
 /// Report a created base — a human line, or a `--json` record carrying the
 /// provisioning provenance so a caller can later gate the seal on it.
-fn emit_base_created(room_id: &str, slot: &room::Slot, json: bool) {
+fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provenance, json: bool) {
     if json {
         // Serialize the provenance from the enum, not a literal, so `room.json`
         // and this record can never drift on a variant rename.
@@ -952,7 +958,7 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, json: bool) {
             "room_id": room_id,
             "slot": slot.index,
             "guest_ip": slot.guest.to_string(),
-            "provenance": room::Provenance::Neutral,
+            "provenance": provenance,
         });
         match serde_json::to_string(&record) {
             Ok(line) => {

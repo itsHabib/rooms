@@ -354,7 +354,7 @@ impl BootedVm {
     }
 
     /// Atomically advance the persisted base from Provisioning to Neutral.
-    pub fn seal_base(&mut self) -> Result<(), FirecrackerError> {
+    pub fn seal_base(&mut self) -> Result<room::Provenance, FirecrackerError> {
         let mut meta = room::read(&self.guard.room_dir)
             .map_err(FirecrackerError::Io)?
             .ok_or_else(|| {
@@ -362,7 +362,10 @@ impl BootedVm {
             })?;
         meta.seal()
             .map_err(|e| FirecrackerError::Internal(e.to_string()))?;
-        room::write_atomic(&self.guard.room_dir, &meta).map_err(FirecrackerError::Io)
+        room::write_atomic(&self.guard.room_dir, &meta).map_err(FirecrackerError::Io)?;
+        meta.provenance().ok_or_else(|| {
+            FirecrackerError::Internal("sealed base lost its persisted provenance".to_owned())
+        })
     }
 
     /// Terminate the firecracker process and remove room state.

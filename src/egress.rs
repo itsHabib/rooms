@@ -283,13 +283,12 @@ pub fn jump_rule(pos: usize, tap: &str, chain: &str) -> Vec<String> {
     ]
 }
 
-/// Tap-keyed host-local drop used by [`Plan::None`].
+/// Tap-keyed host-local drop check/delete used by [`Plan::None`].
 #[must_use]
 pub fn input_drop_rule(op: &str, tap: &str) -> Vec<String> {
     vec![
         op.to_owned(),
         INPUT_CHAIN.to_owned(),
-        "1".to_owned(),
         "-i".to_owned(),
         tap.to_owned(),
         "-j".to_owned(),
@@ -297,13 +296,18 @@ pub fn input_drop_rule(op: &str, tap: &str) -> Vec<String> {
     ]
 }
 
-#[cfg(unix)]
-fn input_drop_args(op: &str, tap: &str) -> Vec<String> {
-    let mut args = input_drop_rule(op, tap);
-    if op != "-I" {
-        args.remove(2);
-    }
-    args
+/// Position-sensitive insertion form: the base's drop goes first in INPUT.
+#[must_use]
+pub fn input_drop_insert_rule(tap: &str) -> Vec<String> {
+    vec![
+        "-I".to_owned(),
+        INPUT_CHAIN.to_owned(),
+        "1".to_owned(),
+        "-i".to_owned(),
+        tap.to_owned(),
+        "-j".to_owned(),
+        "DROP".to_owned(),
+    ]
 }
 
 /// 1-indexed rank (among `-A ROOMS_FWD` rules) of the supernet egress ACCEPT.
@@ -462,7 +466,7 @@ pub fn install(tap: &str, plan: &Plan) -> Result<(), String> {
     }
     run_iptables(&jump_rule(pos, tap, &chain))?;
     if matches!(plan, Plan::None) {
-        run_iptables(&input_drop_args("-I", tap))?;
+        run_iptables(&input_drop_insert_rule(tap))?;
     }
     Ok(())
 }
@@ -481,8 +485,8 @@ pub fn remove(tap: &str) {
     let Some(chain) = chain_for_tap(tap) else {
         return;
     };
-    while iptables_ok(&input_drop_args("-C", tap)) {
-        if run_iptables(&input_drop_args("-D", tap)).is_err() {
+    while iptables_ok(&input_drop_rule("-C", tap)) {
+        if run_iptables(&input_drop_rule("-D", tap)).is_err() {
             break;
         }
     }
@@ -566,8 +570,8 @@ mod tests {
     )]
 
     use super::{
-        chain_for_tap, input_drop_rule, insert_position, jump_rule, out_iface, parse, resolve,
-        room_egress_enforced, subchain_rules, Dest, Plan, Policy,
+        chain_for_tap, input_drop_insert_rule, input_drop_rule, insert_position, jump_rule,
+        out_iface, parse, resolve, room_egress_enforced, subchain_rules, Dest, Plan, Policy,
     };
 
     /// A correctly-wired `ROOMS_FWD` dump — the substrate layout plus a
@@ -594,8 +598,12 @@ mod tests {
     #[test]
     fn none_host_local_drop_is_keyed_on_the_tap() {
         assert_eq!(
-            input_drop_rule("-I", "tap-fc7"),
+            input_drop_insert_rule("tap-fc7"),
             ["-I", "INPUT", "1", "-i", "tap-fc7", "-j", "DROP"]
+        );
+        assert_eq!(
+            input_drop_rule("-D", "tap-fc7"),
+            ["-D", "INPUT", "-i", "tap-fc7", "-j", "DROP"]
         );
     }
 

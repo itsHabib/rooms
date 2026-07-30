@@ -326,6 +326,10 @@ if printf '%s' "$SMOKE" | grep -qiE 'symbol not found|Error relocating'; then
 fi
 log "claude ok in image: $SMOKE"
 
+HEAD_SMOKE="$(printf 'abcNEXT' | chroot "$MNT" /bin/sh -c 'head -c 3')" \
+    || fatal "BusyBox head -c unavailable in snapshot-capable image"
+[[ "$HEAD_SMOKE" == "abc" ]] || fatal "BusyBox head -c did not preserve the exact byte count"
+
 if find "$MNT/etc/ssh" -maxdepth 1 -type f -name 'ssh_host_*' ! -name '*.pub' | grep -q .; then
     fatal "snapshot-capable image contains a baked SSH host private key"
 fi
