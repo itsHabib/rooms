@@ -1,63 +1,73 @@
-**Status**: draft
+**Status**: ready — remaining execution slice after PRs #92 and #96
 **Owner**: @mh
-**Date**: 2026-07-27
-**Model/effort**: opus / extra — the load-bearing security primitive; neutrality-by-construction is what keeps secrets out of `snapshot.mem`.
-**Related**: dossier task `sealed-neutral-base` (id: `tsk_01KYGQWEGWMT8VS080BGG9BZ5Y`), design doc `docs/features/snapshot-fork-replay/spec.md` §4 D2, §5, §7A, §12
+**Date**: 2026-07-29
+**Model/effort**: opus / extra — this is the load-bearing security primitive that keeps secrets and duplicated identity out of `snapshot.mem`.
+**Related**: dossier task `sealed-neutral-base` (id: `tsk_01KYGQWEGWMT8VS080BGG9BZ5Y`), `docs/features/snapshot-fork-replay/spec.md` D2/D7
 
-# Sealed neutral-base mode + authoritative provenance + `rooms base-create` — design spec
+# Finish sealed neutral-base: agent provisioning, verified quiesce, and seal
 
 ## Scope
 
 | Bucket | Files | Est. LOC | Weighted |
 |---|---|---|---|
-| Production source | `src/room.rs` (RoomMeta.provenance + transitions), `src/firecracker` (base-create boot shape), `src/main.rs` (CLI) | ~180 | 180 |
-| Tests | provenance monotonicity, seal enforcement, base-create boot shape | ~140 | 70 |
-| **Total** | | | **~250** |
+| Production | guest provisioning/resume agent, rootfs service wiring, `src/egress.rs`, `src/firecracker.rs`, `src/vsock.rs`, `src/runner.rs`, `src/main.rs` | ~340 | 340 |
+| Tests | provisioning protocol, beacon-gated seal, no-SSH base shape, failure cleanup | ~220 | 110 |
+| **Total** | | | **~450** |
 
-Band: **ideal** per repo's PR sizing convention.
+Band: **stretch**.
+
+## Landed foundation
+
+- PR #92: persisted `Provisioning | Neutral | Tainted` state machine.
+- PR #96: distinct `rooms base-create`, `/vsock` without secrets, no workload launch, warm-failure teardown, and a persisted `Provisioning` candidate.
+
+Do not reimplement these pieces. Start from `origin/main` after PR #96 and finish the transition to `Neutral`.
 
 ## Goal
 
-A Full Firecracker snapshot's memory file is plaintext guest RAM — if a base holds a secret at snapshot time, that secret is baked into every clone. The v1 approach tried to *observe* a `secrets_delivered` lifecycle event, but `RoomMeta` has no such field, lifecycle output is non-authoritative, and a `--keep` room can be tainted over SSH/vsock *after* the check. Neutrality must instead be enforced **by construction**: a distinct sealed boot mode plus an authoritative, monotonic `provenance` field that the snapshot path (task `snapshot-create`) reads to gate freezing.
+PR #96 deliberately stops at `Provisioning`; it warms through SSH and cannot be snapshotted. Replace that provisional path with credential-free agent provisioning, verify the guest is quiet, and persist `Neutral` only after a terminal vsock beacon.
 
-## Behavior / fix
+## Decision
 
-Introduce a sealed neutral-base boot mode and an authoritative provenance marker. **Neutrality is a property of *how the base is created and quiesced*, recorded as durable monotonic state — never an observed lifecycle event.**
+No pre-snapshot SSH. A `base-create` guest must never start `sshd` or load a host private key. Repo staging and an optional credential-free warm command run through the guest agent channel. Warm input is part of the future snapshot contents: authenticated or secret-bearing warm-up is unsupported and must run after restore. The host forces `egress::Policy::None` before the VMM can transmit and retains it through seal and snapshot consumption. For `None`, enforcement covers both forwarded traffic and tap-originated host-local `INPUT`; base boot also disables IPv6 before the guest interface comes up, closing link-local bypass. A warm command therefore cannot ingest secrets from the rooms host, metadata, internal, public, or authenticated endpoints. Snapshot bases always use the read-only rootfs plus tmpfs-overlay path; there is no writable-rootfs opt-out. Ordinary `rooms run` behavior remains unchanged.
 
-- **`rooms base-create --repo <r> [--warm <cmd>]`** — boot a room with:
-  - the vsock **secrets payload unarmed** but `/vsock` **present** (the resume-apply agent in task `restore-single` needs the channel wired, just not loaded),
-  - `exec` / interactive ingress **refused**,
-  - the agent process **not started**.
-  - **repo transfer via the host-side transport bundle**, never a guest-side authed clone — a private-repo credential inside the base would break neutrality by construction (design FR1, §7A; Fable P3). `rooms` drives toolchain-warm over SSH (the last legitimate interactive use).
-- **Quiesce before sealing (design D2 v3/v4 — load-bearing).** After warm-up, seal the base:
-  - a **detached guest-side quiesce script** stops `sshd` + every non-essential daemon, **waits for its own invoking `sshd` ancestor to exit** (`rc-service sshd stop` only stops the *listener* — the per-connection child servicing the stop command lives on, and would be captured live in the snapshot), and asserts the process table is exactly `{init, kworkers, resume-apply agent}`.
-  - the resume-apply agent then flips a **"quiesced" beacon** the host reads over a single vsock connect. `provenance = neutral` is written **only after** that beacon — never on the bare exit of the stop command (Fable P1).
-  - **host keys — deleting a *loaded* key does not sanitize it (codex P2).** The canonical image bakes `ssh_host_*` at build (`build-rootfs-alpine.sh:281`); if warm-up runs `sshd`, it has **already read the private key into process + page-cache pages**, so unlinking `/etc/ssh/ssh_host_*` during quiesce leaves those bytes recoverable in `snapshot.mem` and fails the mem-grep gate. So delete-after-load is **not** an acceptable path. The snapshot-capable base must **never load a baked private host key**: either (a) the snapshot-capable image ships with **no baked host keys** *and* warm-up does not run `sshd` (move warm-up to a non-interactive channel — design §10 Q7, now the strong lean), or (b) if `sshd` must run pre-snapshot, it uses an **ephemeral key generated into a tmpfs/overlay path that quiesce can actually drop before pages are dirtied into the snapshot** — and the mem-grep then targets *that* ephemeral key. The fresh per-clone key is always generated on resume (task `restore-single`). Resolve which in the phase-1 spike; option (a) is cleanest.
-- **`RoomMeta.provenance: provisioning | neutral | tainted`** — additive `room.rs` field (v-bump the persisted schema per the additive-write convention). Three states, because warm-up-over-SSH is itself an interactive session and would otherwise taint the base before it can ever be sealed (codex P1):
-  - a `base-create` room starts in **`provisioning`** — the pre-seal window where **only rooms' own controlled warm-up session** (repo bundle already staged, toolchain-warm over SSH) is legitimate. Warm-up in `provisioning` does **not** taint.
-  - **`provisioning → neutral`** happens **only** on the quiesced beacon (after the detached quiesce script + process-table assertion).
-  - flips to **`tainted`** **irreversibly and monotonically** from *either* state on any secret-arm, workload/agent start, or **any interactive ingress that is not the rooms-controlled warm-up** (e.g. an operator `exec`, a session opened after seal). No path back.
-  - authoritative and persisted — not derived from lifecycle output. The legal ladder is `provisioning → neutral` and `{provisioning, neutral} → tainted`; never `tainted → *` or `neutral → provisioning`.
-- **Decision (design §10 Q1):** distinct `base-create` mode vs. default boot + a `--seal` flag. **Lean distinct mode** — a separate verb keeps the neutral boot shape un-ambiguous and avoids a boot-flag matrix; implement `base-create` as its own mode.
+## Behavior
+
+- Install a minimal guest provisioning/resume agent and order it before `sshd` in the rootfs.
+- Make the snapshot-capable rootfs build omit `/etc/ssh/ssh_host_*` entirely. Before boot, have `base-create` inspect the supplied image and fail closed if it contains any baked SSH host private key or lacks the overlay entry point; deleting a key during quiesce is not an allowed fallback.
+- Force `base-create` to boot that validated image as a read-only block device with `init=/sbin/overlay-init`. Warm writes live only in the captured tmpfs upper layer and never mutate the shared backing image.
+- Give provisioning a dedicated vsock port and typed framing; do not overload the first-read-then-delete secrets port.
+- Resolve `--repo` on the host. Create a git bundle without embedding host credentials, serve it with the optional warm command, and require phase ACKs after stage, clone, and warm.
+- Extend `egress::Policy::None` to install both the existing tap-keyed `FORWARD` drop and a tap-keyed host-local `INPUT` drop. Install both on the base's pool TAP before the VMM can transmit, keep them throughout provisioning, warm-up, quiesce, and the later snapshot, and remove both idempotently during checked teardown. Failure to install either rule prevents boot. The guest receives repo input only through the host-served vsock bundle.
+- Append `ipv6.disable=1` to the snapshot-base kernel command line before boot and verify IPv6 remains disabled before accepting the quiesced beacon. Do not rely on IPv4 `iptables` rules to cover link-local IPv6; failure to prove the disabled state leaves the candidate non-neutral.
+- Execute warm-up with a fixed scrubbed environment and no credential files, forwarded host variables, secret channel, or network access. Treat the command bytes as snapshot-persistent input and refuse configured credential sources; callers needing credentials or network access warm after restore.
+- In base mode, suppress `sshd`, verify there is no listener/session, stop non-essential services, and validate the retained process set structurally.
+- Remove the staged bundle and command payload before sealing as filesystem hygiene only. Unlinking is not memory sanitization and does not justify `Neutral`; neutrality comes from the credential-free input and execution contract.
+- Close every provisioning connection, emit one exact `quiesced` beacon on a separate one-shot endpoint, then enter the snapshot-safe poll/retry wait used by restore. Hold no connection across the snapshot.
+- The host waits with a bounded timeout. Only the exact beacon permits `RoomMeta::seal` followed by atomic `room.json` persistence.
+- A malformed beacon, timeout, agent error, unexpected process, or persistence error leaves the room non-neutral and tears the candidate down.
+- A snapshot-capable base image contains no baked host keys. Restored rooms later generate a fresh overlay key before starting `sshd`.
 
 ## Acceptance
 
-- `rooms base-create` yields a room in `provenance=provisioning`, `/vsock` present, **no agent running**, repo content delivered via the transport bundle (no guest credential present); the rooms-controlled warm-up runs in `provisioning` **without** tainting.
-- `provisioning → neutral` is written **only after** the quiesced beacon — the process table at seal time is `{init, kworkers, resume-apply agent}` with no live `sshd` (listener or session child) and no loaded baked host key.
-- Any non-warm-up interactive ingress, secret-arm, or agent start flips `provenance=tainted` **durably and irreversibly** from either state (a subsequent read never returns `neutral`/`provisioning`).
-- The snapshot path (task `snapshot-create`) reads `provenance` and refuses anything other than `neutral` (a still-`provisioning` or `tainted` room is refused).
-- Unit tests cover: the state ladder (`provisioning→neutral`, `{provisioning,neutral}→tainted`, no illegal transition), the warm-up-does-not-taint exemption vs. a non-warm-up session that does, the `base-create` boot shape (vsock present, agent absent), and that the neutral write is gated on the beacon (not the stop-command exit).
+- `rooms base-create --repo ...` and a credential-free `--warm ...` complete with `provenance=neutral`; secret-bearing or authenticated warm-up is outside the command contract.
+- Repo content is present, while no repository credential was delivered to the guest.
+- Warm-up receives a fixed scrubbed environment and no host credential source; payload deletion is never treated as proof that secret bytes left memory.
+- Neutral provisioning has enforced `Policy::None` across IPv4 `FORWARD` and host-local `INPUT`, with guest IPv6 disabled before interface setup and through seal; a warm command cannot reach the rooms host, metadata, internal, authenticated, or public network endpoints.
+- No `sshd` process, listener, session child, or loaded host private key exists at seal time.
+- The snapshot-capable image build contains no SSH host private key, and `base-create` refuses a supplied image containing one before it can reach `Neutral`.
+- The backing rootfs is mounted read-only, its hash/mtime is unchanged by base creation and warm-up, and the guest root remains writable only through the tmpfs overlay.
+- `Neutral` is persisted only after the exact beacon and after its connection closes.
+- The retained agent waits without a live vsock connection and can reconnect after restore.
+- Every failure branch tears down or remains `Provisioning`; none accidentally seals.
+- Plain `rooms run` remains unchanged.
 
 ## Test plan
 
-Rust unit tests: provenance transition table (assert monotonicity, assert every taint trigger flips it), ingress refusal on a sealed room, `base-create` boot-config shape, beacon-gated neutral write. The real quiesce + beacon + no-live-`sshd` invariant is exercised at the phase intermediate gate on rooms-host (mem-file grep proves the host key + warm-up secret are absent).
-
-## Open sub-decision (carry to implementation)
-
-Design §10 Q6/Q7 — the exact per-daemon quiesce/reseed protocol and whether warm-up should move off SSH entirely so `sshd` never runs. Current favorite: SSH-then-detached-stop-then-beacon. Resolve in the phase-1 spike; don't block this task on it, but structure the seal so the beacon is the gate.
+Run `make check`. Add protocol tests for framing and ACK order; refusal tests for malformed/late beacon, unexpected processes, configured credential sources, images without overlay-init, images containing baked SSH host private keys, failure to install either half of `Policy::None`, and failure to prove IPv6 disabled; persistence/cleanup tests; egress tests for tap-keyed `FORWARD` and host-local `INPUT` install/remove; boot-argument tests for base-only `ipv6.disable=1`; and rootfs-script tests proving the snapshot-capable build omits host keys, base mode suppresses `sshd`, scrubs the warm environment, and forces the read-only drive payload. Validate credential-free bundle transfer, blocked IPv4/IPv6 external and rooms-host-local network access during warm-up, retained process set, beacon, durable `Neutral`, writable overlay root, absent backing-image host keys, and unchanged backing-image hash/mtime on the rooms-host before landing.
 
 ## Non-goals
 
-- snapshot create (task `snapshot-create`).
-- restore + guest hygiene (task `restore-single`).
-- netns fan-out / N clones (phase P2 `fork-clones`).
+- Firecracker snapshot execution (`snapshot-create`).
+- Restore and per-resume hygiene (`restore-single`).
+- N-clone fan-out (`fork-clones`).

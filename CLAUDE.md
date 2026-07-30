@@ -137,7 +137,7 @@ Weights: production source **1.0×**, tests + fixtures **0.5×**, lockfiles/conf
 
 ### Reviewers
 
-Per PR: Copilot, comment `@codex review`, comment `@claude review`. CI green before merge.
+Per PR: Copilot, comment `@codex review`, comment `@claude review`, comment `@cursor review`. Ship-driven runs use `.ship.json` to trigger this panel. CI green before merge.
 
 ## How rooms fits
 
