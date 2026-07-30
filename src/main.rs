@@ -140,12 +140,10 @@ enum Command {
     /// Boot a sealed neutral-base *candidate* and leave it running for a later
     /// `rooms snapshot`.
     ///
-    /// The room comes up with `/vsock` present but its secrets payload unarmed,
-    /// no agent started, and no interactive-exec path (this verb has no
-    /// `--command`): it enters `provenance = provisioning`, where only rooms'
-    /// own warm-up (`--repo` clone + `--warm`) may run without tainting it.
-    /// Sealing it to `neutral` — the quiesce + "quiesced" beacon — is a separate
-    /// step; a still-`provisioning` base is not yet snapshottable.
+    /// The room boots read-only through the overlay init, with IPv6 and all host
+    /// egress blocked. A credential-free guest agent receives a host-created
+    /// repo bundle plus optional warm command, quiesces, and emits the terminal
+    /// beacon before the room is atomically persisted as `neutral`.
     BaseCreate {
         /// Path to the rootfs image (ext4).
         #[arg(long)]
@@ -153,13 +151,12 @@ enum Command {
         /// Git URL cloned into `/workspace/repo` to warm the base (at `HEAD`).
         #[arg(long)]
         repo: Option<String>,
-        /// A warm-up command run in the guest over SSH after the clone (e.g. a
-        /// toolchain fetch). Runs in the provisioning window, so it does not
-        /// taint the base.
+        /// A credential-free warm-up command run by the base agent after clone.
+        /// It receives a fixed scrubbed environment and has no network access.
         #[arg(long, value_parser = non_empty_command)]
         warm: Option<String>,
-        /// Mount the rootfs read-only with a tmpfs overlay (needs an image
-        /// carrying `/sbin/overlay-init`).
+        /// Compatibility flag; snapshot bases always use a read-only rootfs
+        /// with a tmpfs overlay.
         #[arg(long = "readonly-rootfs")]
         readonly_rootfs: bool,
         /// Lower the pool ceiling for this invocation (never raise it). Also
@@ -589,7 +586,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             image,
             repo,
             warm,
-            readonly_rootfs,
+            readonly_rootfs: _,
             max_pool,
             json,
         } => {
@@ -598,7 +595,6 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                     image,
                     repo,
                     warm,
-                    readonly_rootfs,
                     max_pool,
                     json,
                 },
@@ -687,13 +683,10 @@ fn network_config_for(slot: &room::Slot) -> firecracker::NetworkConfig {
 
 async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
-
     // Fail closed on --witness without tcpdump, before anything else: a host that
     // can't witness must never boot a room that would run unwitnessed (only the
     // initial start fails closed; a mid-run capture death is tolerated).
-    if args.witness {
-        witness::ensure_tcpdump_available().map_err(RoomsError::Internal)?;
-    }
+    ensure_witness_available(args.witness)?;
 
     let kernel = args
         .image
@@ -784,6 +777,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         descriptor: &descriptor,
         witness: args.witness,
         secrets: args.secrets.as_ref(),
+        provisioning: None,
         egress: &egress_plan,
         base: false,
     };
@@ -824,19 +818,25 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     outcome
 }
 
+fn ensure_witness_available(requested: bool) -> Result<(), RoomsError> {
+    if !requested {
+        return Ok(());
+    }
+    witness::ensure_tcpdump_available().map_err(RoomsError::Internal)
+}
+
 /// Flags for `rooms base-create` (a flat mirror of the CLI variant).
 struct BaseCreateArgs {
     image: PathBuf,
     repo: Option<String>,
     warm: Option<String>,
-    readonly_rootfs: bool,
     max_pool: Option<u8>,
     json: bool,
 }
 
-/// `rooms base-create`: boot a sealed neutral-base candidate and hand it off
-/// running (see the [`Command::BaseCreate`] docs). The `--json` error record
-/// mirrors `run`.
+/// `rooms base-create`: provision, verify, seal, and hand off a running neutral
+/// base (see the [`Command::BaseCreate`] docs). The `--json` error record mirrors
+/// `run`.
 async fn base_create(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     let json = args.json;
     let result = base_create_inner(args, config).await;
@@ -863,6 +863,8 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
             ))
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
+    rootfs::validate_rootfs(&args.image, config.min_rootfs_bytes).map_err(RoomsError::Rootfs)?;
+    rootfs::validate_snapshot_base_image(&args.image).map_err(RoomsError::Internal)?;
     // A base always wires the vsock device; prove the guest kernel can open one
     // before claiming a slot or booting.
     ensure_kernel_has_vsock(&kernel)?;
@@ -873,7 +875,8 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     let state_base = config.resolved_state_base().ok_or_else(|| {
         RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
     })?;
-    let key = key_path()?;
+    let provisioning =
+        runner::prepare_base_provisioning(args.repo.as_deref(), args.warm.as_deref())?;
 
     let room_id = firecracker::mint_room_id();
     let me = slot::Claimer::current().ok_or_else(|| {
@@ -888,17 +891,18 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
         command: Some("base-create".to_owned()),
         keep: true,
     };
-    let egress_plan = egress::resolve(&egress::Policy::Observe).map_err(RoomsError::Internal)?;
+    let egress_plan = egress::resolve(&egress::Policy::None).map_err(RoomsError::Internal)?;
     let boot_req = firecracker::BootRequest {
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
         slot: Some(&claimed),
         room_id: &room_id,
-        readonly_rootfs: args.readonly_rootfs,
+        readonly_rootfs: true,
         descriptor: &descriptor,
         witness: false,
         secrets: None,
+        provisioning: Some(&provisioning),
         egress: &egress_plan,
         base: true,
     };
@@ -912,17 +916,19 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
         }
     };
 
-    // Warm the base over SSH (still `provisioning`, so this does not taint). On
-    // failure, tear the half-warmed base down rather than hand off a bad base.
-    if let Err(e) = runner::warm_base(
-        &network.guest_ip,
-        &key,
-        config,
-        args.repo.as_deref(),
-        args.warm.as_deref(),
-    )
-    .await
-    {
+    let Some(delivery) = vm.take_provisioning_delivery() else {
+        let _ = vm.shutdown().await;
+        return Err(RoomsError::Internal(
+            "base boot did not arm its provisioning gate".to_owned(),
+        ));
+    };
+    if let Err(e) = delivery.await_quiesced(config.guest_reach_timeout).await {
+        let _ = vm.shutdown().await;
+        return Err(RoomsError::Internal(format!(
+            "base provisioning failed: {e}"
+        )));
+    }
+    if let Err(e) = vm.seal_base() {
         let _ = vm.shutdown().await;
         return Err(e.into());
     }
@@ -946,7 +952,7 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, json: bool) {
             "room_id": room_id,
             "slot": slot.index,
             "guest_ip": slot.guest.to_string(),
-            "provenance": room::Provenance::Provisioning,
+            "provenance": room::Provenance::Neutral,
         });
         match serde_json::to_string(&record) {
             Ok(line) => {
@@ -968,7 +974,7 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, json: bool) {
     )]
     {
         println!(
-            "base created: room {room_id} on slot {} (guest {}); provenance=provisioning — seal, then `rooms snapshot`",
+            "base created: room {room_id} on slot {} (guest {}); provenance=neutral — ready for `rooms snapshot`",
             slot.index, slot.guest
         );
     }

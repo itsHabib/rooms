@@ -24,6 +24,9 @@ use crate::isolation::SUPERNET;
 /// The host `ROOMS_FWD` chain the per-room jump is spliced into.
 const FWD_CHAIN: &str = "ROOMS_FWD";
 
+/// Host-local traffic enters this chain instead of `ROOMS_FWD`.
+const INPUT_CHAIN: &str = "INPUT";
+
 /// Prefix of a pool tap name (`tap-fc<k>`); the `<k>` suffix keys the chain.
 const TAP_PREFIX: &str = "tap-fc";
 
@@ -280,6 +283,29 @@ pub fn jump_rule(pos: usize, tap: &str, chain: &str) -> Vec<String> {
     ]
 }
 
+/// Tap-keyed host-local drop used by [`Plan::None`].
+#[must_use]
+pub fn input_drop_rule(op: &str, tap: &str) -> Vec<String> {
+    vec![
+        op.to_owned(),
+        INPUT_CHAIN.to_owned(),
+        "1".to_owned(),
+        "-i".to_owned(),
+        tap.to_owned(),
+        "-j".to_owned(),
+        "DROP".to_owned(),
+    ]
+}
+
+#[cfg(unix)]
+fn input_drop_args(op: &str, tap: &str) -> Vec<String> {
+    let mut args = input_drop_rule(op, tap);
+    if op != "-I" {
+        args.remove(2);
+    }
+    args
+}
+
 /// 1-indexed rank (among `-A ROOMS_FWD` rules) of the supernet egress ACCEPT.
 ///
 /// Where the tap-keyed jump goes so it sits **above** the permissive ACCEPT and
@@ -434,7 +460,11 @@ pub fn install(tap: &str, plan: &Plan) -> Result<(), String> {
     for rule in subchain_rules(&chain, &out_iface, plan.permitted()) {
         run_iptables(&rule)?;
     }
-    run_iptables(&jump_rule(pos, tap, &chain))
+    run_iptables(&jump_rule(pos, tap, &chain))?;
+    if matches!(plan, Plan::None) {
+        run_iptables(&input_drop_args("-I", tap))?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -451,6 +481,11 @@ pub fn remove(tap: &str) {
     let Some(chain) = chain_for_tap(tap) else {
         return;
     };
+    while iptables_ok(&input_drop_args("-C", tap)) {
+        if run_iptables(&input_drop_args("-D", tap)).is_err() {
+            break;
+        }
+    }
     // Delete the jump while present — a stale install could have left more than
     // one; the bounded loop clears every copy.
     while iptables_ok(&jump_args("-C", tap, &chain)) {
@@ -531,8 +566,8 @@ mod tests {
     )]
 
     use super::{
-        chain_for_tap, insert_position, jump_rule, out_iface, parse, resolve, room_egress_enforced,
-        subchain_rules, Dest, Plan, Policy,
+        chain_for_tap, input_drop_rule, insert_position, jump_rule, out_iface, parse, resolve,
+        room_egress_enforced, subchain_rules, Dest, Plan, Policy,
     };
 
     /// A correctly-wired `ROOMS_FWD` dump — the substrate layout plus a
@@ -555,6 +590,14 @@ mod tests {
         "-A ROOMS_EG_1 -o eth0 -j LOG --log-prefix \"rooms-egress-drop:1 \"\n",
         "-A ROOMS_EG_1 -o eth0 -j DROP",
     );
+
+    #[test]
+    fn none_host_local_drop_is_keyed_on_the_tap() {
+        assert_eq!(
+            input_drop_rule("-I", "tap-fc7"),
+            ["-I", "INPUT", "1", "-i", "tap-fc7", "-j", "DROP"]
+        );
+    }
 
     // --- parse ---
 
