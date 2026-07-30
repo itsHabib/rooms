@@ -95,6 +95,7 @@ async fn firecracker_exits_early_is_caught() {
         descriptor: &descriptor,
         witness: false,
         secrets: None,
+        provisioning: None,
         egress: &rooms::egress::Plan::Observe,
         base: false,
     };
@@ -149,6 +150,7 @@ async fn api_socket_never_appears() {
         descriptor: &descriptor,
         witness: false,
         secrets: None,
+        provisioning: None,
         egress: &rooms::egress::Plan::Observe,
         base: false,
     };
@@ -193,6 +195,7 @@ async fn guest_unreachable() {
         descriptor: &descriptor,
         witness: false,
         secrets: None,
+        provisioning: None,
         egress: &rooms::egress::Plan::Observe,
         base: false,
     };

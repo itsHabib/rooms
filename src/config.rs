@@ -16,6 +16,9 @@ pub struct RoomsConfig {
     pub guest_reach_timeout: Duration,
     /// Poll interval while waiting for guest reachability.
     pub guest_reach_poll_interval: Duration,
+    /// End-to-end bound for neutral-base bundle transfer, clone, warm-up, and
+    /// quiesce. Deliberately independent of the much shorter SSH reach probe.
+    pub base_provisioning_timeout: Duration,
     /// Grace period between SIGTERM and SIGKILL during cleanup.
     pub cleanup_grace: Duration,
     /// Path to the firecracker binary (default: `"firecracker"` on PATH).
@@ -54,6 +57,11 @@ impl Default for RoomsConfig {
             )]
             guest_reach_timeout: Duration::from_secs(120),
             guest_reach_poll_interval: Duration::from_secs(2),
+            #[allow(
+                clippy::duration_suboptimal_units,
+                reason = "from_mins requires Rust 1.83; no MSRV pinned yet"
+            )]
+            base_provisioning_timeout: Duration::from_secs(30 * 60),
             cleanup_grace: Duration::from_secs(5),
             firecracker_binary: PathBuf::from("firecracker"),
             jailer_binary: PathBuf::from("jailer"),
@@ -196,6 +204,13 @@ mod tests {
             crate::slot::DEFAULT_MAX_POOL,
             "with no override the effective cap is the host cap"
         );
+    }
+
+    #[test]
+    fn base_provisioning_has_its_own_generous_deadline() {
+        let c = RoomsConfig::default();
+        assert_eq!(c.base_provisioning_timeout.as_secs(), 30 * 60);
+        assert!(c.base_provisioning_timeout > c.guest_reach_timeout);
     }
 
     #[test]

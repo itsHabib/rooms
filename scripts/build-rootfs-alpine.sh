@@ -3,9 +3,10 @@
 #
 # Produces a small guest image with openssh (key-only login for a non-root
 # `rooms` user, AcceptEnv ANTHROPIC_API_KEY), git, ca-certificates, and the
-# claude-code native musl binary. DNS resolves out of the box and SSH host keys
-# are baked at build time, so the guest reaches sshd within a couple of seconds
-# of boot. The agent runs as the unprivileged `rooms` user (uid 1000) because
+# claude-code native musl binary. DNS resolves out of the box. SSH host keys are
+# generated in the writable overlay when sshd starts; none are baked into the
+# snapshot-capable lower image. The agent runs as the unprivileged `rooms` user
+# (uid 1000) because
 # claude-code refuses --dangerously-skip-permissions as root.
 #
 # Usage:
@@ -188,6 +189,25 @@ start() {
 EOF
 chmod 0755 "$MNT/etc/init.d/rooms-secrets"
 
+log "installing credential-free base provisioning agent"
+install -m 0755 "${SCRIPT_DIR}/lib/rooms-provision-agent.sh" "$MNT/sbin/rooms-provision-agent"
+cat >"$MNT/etc/init.d/rooms-provision" <<'EOF'
+#!/sbin/openrc-run
+description="provision and quiesce a rooms neutral base"
+
+depend() {
+    before sshd
+}
+
+start() {
+    grep -qw 'rooms.base=1' /proc/cmdline || return 0
+    ebegin "Provisioning rooms neutral base"
+    socat VSOCK-CONNECT:2:5001 EXEC:'/sbin/rooms-provision-agent session'
+    eend $?
+}
+EOF
+chmod 0755 "$MNT/etc/init.d/rooms-provision"
+
 log "writing guest config (init, dns, hostname, settings)"
 # ttyS0-only inittab — Firecracker never offers a VT, so the six default gettys
 # would only burn spawns. openrc drives sysinit/boot/default runlevels.
@@ -242,7 +262,7 @@ for env_var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; d
     fi
 done
 
-log "creating ${GUEST_USER} user + enabling services + baking host keys inside chroot"
+log "creating ${GUEST_USER} user + enabling services"
 chroot "$MNT" /bin/sh -s -- "$GUEST_USER" "$GUEST_UID" <<'CHROOT_CONFIG'
 set -e
 GUEST_USER="$1"; GUEST_UID="$2"
@@ -271,14 +291,16 @@ rc-update add hostname boot
 # boot: the vsock secrets fetch — ordered before sshd so by the time the
 # workload channel opens, delivery has already been acked (or never will be).
 rc-update add rooms-secrets boot
+rc-update add rooms-provision boot
 # default: the service rooms actually connects to.
 rc-update add sshd default
 # Never run ifupdown/DHCP — the kernel ip= arg already configured eth0.
 rc-update del networking boot 2>/dev/null || true
 rc-update del hwclock boot 2>/dev/null || true
 rc-update del modules boot 2>/dev/null || true
-# Host keys at build time — first-boot keygen would block on guest entropy.
-ssh-keygen -A
+# The immutable snapshot lower layer must never carry host identity. Alpine's
+# sshd service generates keys in the writable overlay on an ordinary run.
+rm -f /etc/ssh/ssh_host_*
 install -d -m 0711 /var/empty
 # Populate the CA bundle git + claude TLS rely on.
 update-ca-certificates 2>/dev/null || true
@@ -303,6 +325,15 @@ if printf '%s' "$SMOKE" | grep -qiE 'symbol not found|Error relocating'; then
     fatal "glibc symbol leaked into the musl claude binary: $SMOKE"
 fi
 log "claude ok in image: $SMOKE"
+
+HEAD_SMOKE="$(printf 'abcNEXT' | chroot "$MNT" /bin/sh -c 'head -c 3')" \
+    || fatal "BusyBox head -c unavailable in snapshot-capable image"
+[[ "$HEAD_SMOKE" == "abc" ]] || fatal "BusyBox head -c did not preserve the exact byte count"
+
+if find "$MNT/etc/ssh" -maxdepth 1 -type f -name 'ssh_host_*' ! -name '*.pub' | grep -q .; then
+    fatal "snapshot-capable image contains a baked SSH host private key"
+fi
+[[ -x "$MNT/sbin/overlay-init" ]] || fatal "snapshot-capable image lacks /sbin/overlay-init"
 
 if [[ -n "$EXTEND" ]]; then
     EXT_DIR="$(dirname "$EXTEND")"

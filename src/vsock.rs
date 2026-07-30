@@ -15,6 +15,14 @@ use tokio::sync::oneshot;
 /// `<uds_path>_<port>`, so this constant also names the listener suffix.
 pub const SECRETS_PORT: u32 = 5000;
 
+/// Dedicated base-provisioning endpoint. It is intentionally distinct from
+/// the first-read-then-delete secrets endpoint.
+pub const PROVISION_PORT: u32 = 5001;
+
+/// One-shot terminal beacon endpoint. The provisioning connection must be
+/// closed before the guest connects here.
+pub const QUIESCED_PORT: u32 = 5002;
+
 /// The guest's own CID (must be ≥ 3). With the hybrid UDS model there is no
 /// host-wide CID namespace to collide in — isolation comes from the per-jail
 /// socket path — so every room uses the same value.
@@ -27,7 +35,13 @@ pub const UDS_NAME: &str = "v.sock";
 /// `<jail_root>/v.sock_<SECRETS_PORT>`.
 #[must_use]
 pub fn listener_path(jail_root: &Path) -> PathBuf {
-    jail_root.join(format!("{UDS_NAME}_{SECRETS_PORT}"))
+    listener_path_for(jail_root, SECRETS_PORT)
+}
+
+/// Host path for one guest vsock port in a room's jail.
+#[must_use]
+pub fn listener_path_for(jail_root: &Path, port: u32) -> PathBuf {
+    jail_root.join(format!("{UDS_NAME}_{port}"))
 }
 
 /// The encoded secrets blob: `NAME=value\n` per secret, nothing else.
@@ -105,6 +119,206 @@ impl Drop for Delivery {
         self.task.abort();
         let _ = std::fs::remove_file(&self.listen_path);
     }
+}
+
+/// Credential-free input captured in a neutral base.
+#[derive(Clone)]
+#[cfg_attr(
+    not(unix),
+    allow(
+        dead_code,
+        reason = "payload is consumed by the unix-only vsock serving task"
+    )
+)]
+pub struct ProvisioningPayload {
+    bundle: Vec<u8>,
+    warm: Vec<u8>,
+}
+
+impl ProvisioningPayload {
+    /// Build the typed provisioning payload. Empty fields still receive phase
+    /// acknowledgements so the host observes one deterministic state machine.
+    #[must_use]
+    pub fn new(bundle: Vec<u8>, warm: Option<&str>) -> Self {
+        Self {
+            bundle,
+            warm: warm.unwrap_or_default().as_bytes().to_vec(),
+        }
+    }
+}
+
+/// Pending base provisioning and terminal quiesce proof.
+#[derive(Debug)]
+pub struct ProvisioningDelivery {
+    rx: oneshot::Receiver<Result<(), String>>,
+    task: tokio::task::JoinHandle<()>,
+    paths: [PathBuf; 2],
+}
+
+impl ProvisioningDelivery {
+    /// Wait for all phase ACKs, provisioning connection close, and the exact
+    /// one-shot `quiesced` beacon.
+    pub async fn await_quiesced(mut self, timeout: std::time::Duration) -> Result<(), String> {
+        match tokio::time::timeout(timeout, &mut self.rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("provisioning task ended without a result".to_owned()),
+            Err(_) => Err(format!("no quiesced beacon within {}s", timeout.as_secs())),
+        }
+    }
+}
+
+impl Drop for ProvisioningDelivery {
+    fn drop(&mut self) {
+        self.task.abort();
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Bind the dedicated provisioning and quiesced endpoints before boot.
+#[cfg(unix)]
+pub fn serve_provisioning(
+    jail_root: &Path,
+    payload: ProvisioningPayload,
+    owner: Option<(u32, u32)>,
+) -> std::io::Result<ProvisioningDelivery> {
+    let provision_path = listener_path_for(jail_root, PROVISION_PORT);
+    let quiesced_path = listener_path_for(jail_root, QUIESCED_PORT);
+    let _ = std::fs::remove_file(&provision_path);
+    let _ = std::fs::remove_file(&quiesced_path);
+    let provision = tokio::net::UnixListener::bind(&provision_path)?;
+    let quiesced = match tokio::net::UnixListener::bind(&quiesced_path) {
+        Ok(listener) => listener,
+        Err(e) => {
+            let _ = std::fs::remove_file(&provision_path);
+            return Err(e);
+        }
+    };
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::chown(&provision_path, Some(uid), Some(gid))?;
+        std::os::unix::fs::chown(&quiesced_path, Some(uid), Some(gid))?;
+    }
+    let (tx, rx) = oneshot::channel();
+    let paths = [provision_path, quiesced_path];
+    let task_paths = paths.clone();
+    let task = tokio::spawn(async move {
+        let result = serve_provisioning_inner(provision, quiesced, &task_paths, payload).await;
+        let _ = tx.send(result);
+    });
+    Ok(ProvisioningDelivery { rx, task, paths })
+}
+
+#[cfg(not(unix))]
+pub fn serve_provisioning(
+    _jail_root: &Path,
+    _payload: ProvisioningPayload,
+    _owner: Option<(u32, u32)>,
+) -> std::io::Result<ProvisioningDelivery> {
+    Err(std::io::Error::other(
+        "vsock base provisioning requires a unix host",
+    ))
+}
+
+#[cfg(unix)]
+async fn serve_provisioning_inner(
+    provision_listener: tokio::net::UnixListener,
+    quiesced_listener: tokio::net::UnixListener,
+    paths: &[PathBuf; 2],
+    payload: ProvisioningPayload,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let [provision_path, quiesced_path] = paths;
+    let (mut provision, _) = provision_listener
+        .accept()
+        .await
+        .map_err(|e| format!("accept provisioning agent: {e}"))?;
+    drop(provision_listener);
+    std::fs::remove_file(provision_path)
+        .map_err(|e| format!("retire provisioning endpoint: {e}"))?;
+
+    provision
+        .write_all(b"ROOMS-PROVISION/1\n")
+        .await
+        .map_err(|e| format!("write provisioning preface: {e}"))?;
+    write_typed_frame(&mut provision, "BUNDLE", &payload.bundle).await?;
+    write_typed_frame(&mut provision, "WARM", &payload.warm).await?;
+    write_typed_frame(&mut provision, "END", &[]).await?;
+    for phase in ["stage", "clone", "warm"] {
+        let ack = read_bounded_line(&mut provision).await?;
+        if ack != format!("ACK {phase}") {
+            return Err(format!("provisioning {phase} ack malformed: {ack:?}"));
+        }
+    }
+    let mut trailing = [0_u8; 1];
+    let read = provision
+        .read(&mut trailing)
+        .await
+        .map_err(|e| format!("wait for provisioning connection close: {e}"))?;
+    if read != 0 {
+        return Err("provisioning connection carried trailing bytes".to_owned());
+    }
+    drop(provision);
+
+    let (mut beacon, _) = quiesced_listener
+        .accept()
+        .await
+        .map_err(|e| format!("accept quiesced beacon: {e}"))?;
+    drop(quiesced_listener);
+    std::fs::remove_file(quiesced_path).map_err(|e| format!("retire beacon endpoint: {e}"))?;
+    let mut bytes = Vec::new();
+    beacon
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("read quiesced beacon: {e}"))?;
+    if bytes != b"quiesced\n" {
+        return Err(format!(
+            "quiesced beacon malformed: {:?}",
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn write_typed_frame(
+    stream: &mut tokio::net::UnixStream,
+    kind: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let header = format!("{kind} {}\n", bytes.len());
+    stream
+        .write_all(header.as_bytes())
+        .await
+        .map_err(|e| format!("write {kind} header: {e}"))?;
+    stream
+        .write_all(bytes)
+        .await
+        .map_err(|e| format!("write {kind} body: {e}"))
+}
+
+#[cfg(unix)]
+async fn read_bounded_line(stream: &mut tokio::net::UnixStream) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    loop {
+        let byte = stream
+            .read_u8()
+            .await
+            .map_err(|e| format!("read provisioning ack: {e}"))?;
+        if byte == b'\n' {
+            break;
+        }
+        bytes.push(byte);
+        if bytes.len() > 64 {
+            return Err("provisioning ack exceeds 64 bytes".to_owned());
+        }
+    }
+    String::from_utf8(bytes).map_err(|e| format!("provisioning ack is not utf-8: {e}"))
 }
 
 /// Bind `listen_path` and serve `payload` to the first connection ever made.
@@ -245,7 +459,10 @@ mod tests {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{listener_path, serve_one_shot, SecretsPayload, SECRETS_PORT};
+    use super::{
+        listener_path, listener_path_for, serve_one_shot, serve_provisioning, ProvisioningPayload,
+        SecretsPayload, PROVISION_PORT, QUIESCED_PORT, SECRETS_PORT,
+    };
 
     fn payload() -> SecretsPayload {
         SecretsPayload::encode(&[
@@ -270,6 +487,26 @@ mod tests {
         let mut blob = vec![0u8; len];
         guest.read_exact(&mut blob).await.unwrap();
         String::from_utf8(blob).unwrap()
+    }
+
+    async fn read_line(guest: &mut tokio::net::UnixStream) -> String {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = guest.read_u8().await.unwrap();
+            if byte == b'\n' {
+                break;
+            }
+            bytes.push(byte);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    async fn read_typed_frame(guest: &mut tokio::net::UnixStream) -> (String, Vec<u8>) {
+        let header = read_line(guest).await;
+        let (kind, len) = header.split_once(' ').unwrap();
+        let mut bytes = vec![0_u8; len.parse().unwrap()];
+        guest.read_exact(&mut bytes).await.unwrap();
+        (kind.to_owned(), bytes)
     }
 
     #[test]
@@ -360,5 +597,75 @@ mod tests {
             .await
             .expect_err("malformed ack must fail the delivery");
         assert!(err.contains("malformed"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn provisioning_requires_ordered_acks_closed_stream_and_exact_beacon() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ProvisioningPayload::new(b"bundle".to_vec(), Some("echo warm"));
+        let delivery = serve_provisioning(dir.path(), payload, None).unwrap();
+
+        let provision_path = listener_path_for(dir.path(), PROVISION_PORT);
+        let mut guest = tokio::net::UnixStream::connect(provision_path)
+            .await
+            .unwrap();
+        assert_eq!(read_line(&mut guest).await, "ROOMS-PROVISION/1");
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("BUNDLE".to_owned(), b"bundle".to_vec())
+        );
+        guest.write_all(b"ACK stage\nACK clone\n").await.unwrap();
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("WARM".to_owned(), b"echo warm".to_vec())
+        );
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("END".to_owned(), Vec::new())
+        );
+        guest.write_all(b"ACK warm\n").await.unwrap();
+        drop(guest);
+
+        let beacon_path = listener_path_for(dir.path(), QUIESCED_PORT);
+        let mut beacon = tokio::net::UnixStream::connect(beacon_path).await.unwrap();
+        beacon.write_all(b"quiesced\n").await.unwrap();
+        drop(beacon);
+
+        delivery
+            .await_quiesced(Duration::from_secs(5))
+            .await
+            .expect("all phases and exact terminal beacon succeed");
+    }
+
+    #[tokio::test]
+    async fn malformed_quiesced_beacon_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ProvisioningPayload::new(Vec::new(), None);
+        let delivery = serve_provisioning(dir.path(), payload, None).unwrap();
+
+        let provision_path = listener_path_for(dir.path(), PROVISION_PORT);
+        let mut guest = tokio::net::UnixStream::connect(provision_path)
+            .await
+            .unwrap();
+        assert_eq!(read_line(&mut guest).await, "ROOMS-PROVISION/1");
+        assert_eq!(read_typed_frame(&mut guest).await.0, "BUNDLE");
+        assert_eq!(read_typed_frame(&mut guest).await.0, "WARM");
+        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
+        guest
+            .write_all(b"ACK stage\nACK clone\nACK warm\n")
+            .await
+            .unwrap();
+        drop(guest);
+
+        let beacon_path = listener_path_for(dir.path(), QUIESCED_PORT);
+        let mut beacon = tokio::net::UnixStream::connect(beacon_path).await.unwrap();
+        beacon.write_all(b"quiesced-late\n").await.unwrap();
+        drop(beacon);
+
+        let err = delivery
+            .await_quiesced(Duration::from_secs(5))
+            .await
+            .expect_err("only the exact terminal beacon seals");
+        assert!(err.contains("malformed"), "{err}");
     }
 }

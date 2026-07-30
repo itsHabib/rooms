@@ -3,7 +3,7 @@
 //! POC: shells out to the `ssh` client. A native russh/openssh-rs client is
 //! a productionization concern.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 
@@ -658,32 +658,109 @@ async fn clone_repo_in_guest(
     run_setup_ssh(guest_ip, key_path, &remote, "clone repo in guest").await
 }
 
-/// Warm a base over SSH in its provisioning window: wait for the guest, then
-/// optionally clone `repo` (at `HEAD`) and run the `warm` command.
-///
-/// This is the base's one legitimate interactive use before it is sealed — it
-/// runs while the room is still `provisioning`, so it does not taint. A failure
-/// is surfaced so the caller can tear the half-warmed base down rather than
-/// leave it running.
-pub async fn warm_base(
-    guest_ip: &str,
-    key_path: &Path,
-    config: &RoomsConfig,
+/// Resolve the optional repository entirely on the host and build the
+/// credential-free input served to the base agent.
+pub fn prepare_base_provisioning(
     repo: Option<&str>,
     warm: Option<&str>,
-) -> Result<(), FirecrackerError> {
-    wait_for_ssh(guest_ip, key_path, config).await?;
-    if let Some(repo) = repo {
-        clone_repo_in_guest(guest_ip, key_path, repo, "HEAD")
-            .await
-            .map_err(|e| FirecrackerError::Internal(format!("base warm-up clone: {e}")))?;
+) -> Result<crate::vsock::ProvisioningPayload, FirecrackerError> {
+    if let Some(command) = warm {
+        validate_neutral_warm(command)?;
     }
-    if let Some(cmd) = warm {
-        run_setup_ssh(guest_ip, key_path, cmd, "base warm-up")
-            .await
-            .map_err(|e| FirecrackerError::Internal(format!("base warm-up: {e}")))?;
+    let bundle = match repo {
+        Some(repo) => create_repo_bundle(repo)?,
+        None => Vec::new(),
+    };
+    Ok(crate::vsock::ProvisioningPayload::new(bundle, warm))
+}
+
+fn validate_neutral_warm(command: &str) -> Result<(), FirecrackerError> {
+    const CREDENTIAL_MARKERS: [&str; 11] = [
+        "token=",
+        "password=",
+        "secret=",
+        "oauth=",
+        "api_key=",
+        "authorization:",
+        ".netrc",
+        ".ssh/",
+        ".git-credentials",
+        "credential.helper",
+        "gh auth",
+    ];
+    let lower = command.to_ascii_lowercase();
+    if let Some(marker) = CREDENTIAL_MARKERS
+        .iter()
+        .find(|marker| lower.contains(*marker))
+    {
+        return Err(FirecrackerError::Internal(format!(
+            "base warm-up refuses credential source marker {marker:?}; authenticated warm-up runs after restore"
+        )));
     }
     Ok(())
+}
+
+fn create_repo_bundle(repo: &str) -> Result<Vec<u8>, FirecrackerError> {
+    if repo_url_has_userinfo(repo) {
+        return Err(FirecrackerError::Internal(
+            "base --repo URL must not embed credentials".to_owned(),
+        ));
+    }
+
+    let temp = std::env::temp_dir().join(format!("rooms-base-{}", ulid::Ulid::new()));
+    std::fs::create_dir(&temp)?;
+    let cleanup = TempPath(temp.clone());
+    let source = Path::new(repo);
+    let repo_dir = if source.exists() {
+        std::fs::canonicalize(source)?
+    } else {
+        let mirror = temp.join("repo.git");
+        run_git(
+            Path::new("."),
+            &["clone", "--mirror", repo, &mirror.to_string_lossy()],
+            "resolve base repository on host",
+        )?;
+        mirror
+    };
+    let bundle_path = temp.join("repo.bundle");
+    run_git(
+        &repo_dir,
+        &["bundle", "create", &bundle_path.to_string_lossy(), "--all"],
+        "create credential-free repository bundle",
+    )?;
+    let bytes = std::fs::read(&bundle_path)?;
+    drop(cleanup);
+    Ok(bytes)
+}
+
+fn run_git(cwd: &Path, args: &[&str], action: &str) -> Result<(), FirecrackerError> {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(args)
+        .output()
+        .map_err(|e| FirecrackerError::Internal(format!("{action}: {e}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(FirecrackerError::Internal(format!(
+        "{action}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+fn repo_url_has_userinfo(repo: &str) -> bool {
+    repo.split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .is_some_and(|authority| authority.contains('@'))
+}
+
+struct TempPath(PathBuf);
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Write `task.md` and `meta.json` into `/workspace/in/` for `cursor-runner.js`.
@@ -975,8 +1052,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        cursor_command_argv, shell_single_quote, ssh_command, tar_member_is_safe, wait_for_ssh,
-        CursorMeta,
+        cursor_command_argv, repo_url_has_userinfo, shell_single_quote, ssh_command,
+        tar_member_is_safe, validate_neutral_warm, wait_for_ssh, CursorMeta,
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
@@ -991,6 +1068,15 @@ mod tests {
         assert_eq!(shell_single_quote("echo 'hello'"), r"'echo '\''hello'\'''");
         // Closing-paren can't escape the wrapper either.
         assert_eq!(shell_single_quote("echo ) rm -rf /"), "'echo ) rm -rf /'");
+    }
+
+    #[test]
+    fn neutral_warm_refuses_credential_sources() {
+        assert!(validate_neutral_warm("cargo fetch --locked").is_ok());
+        assert!(validate_neutral_warm("curl -H 'Authorization: bearer x' host").is_err());
+        assert!(validate_neutral_warm("cp ~/.netrc /tmp/input").is_err());
+        assert!(repo_url_has_userinfo("https://user:pass@example.com/repo"));
+        assert!(!repo_url_has_userinfo("https://example.com/repo"));
     }
 
     #[test]

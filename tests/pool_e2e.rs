@@ -260,6 +260,7 @@ async fn room_boots_on_slot_1_and_reaps_byte_identically() {
         descriptor: &descriptor,
         witness: false,
         secrets: None,
+        provisioning: None,
         egress: &rooms::egress::Plan::Observe,
         base: false,
     };
@@ -379,6 +380,7 @@ async fn claim_and_boot(
             descriptor: &descriptor,
             witness: false,
             secrets: None,
+            provisioning: None,
             egress: &rooms::egress::Plan::Observe,
             base: false,
         };

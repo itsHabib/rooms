@@ -328,6 +328,8 @@ pub struct BootedVm {
     /// The caller takes it to gate the workload on the guest's ack; dropping
     /// it (a run that never gates) aborts the listener.
     secrets_delivery: Option<crate::vsock::Delivery>,
+    /// Base-only provisioning/quiesce state machine.
+    provisioning_delivery: Option<crate::vsock::ProvisioningDelivery>,
     guard: RoomGuard,
     child: Child,
 }
@@ -344,6 +346,26 @@ impl BootedVm {
     /// the guest's ack before handing over the workload.
     pub fn take_secrets_delivery(&mut self) -> Option<crate::vsock::Delivery> {
         self.secrets_delivery.take()
+    }
+
+    /// Take the base provisioning gate. A base cannot seal without it.
+    pub fn take_provisioning_delivery(&mut self) -> Option<crate::vsock::ProvisioningDelivery> {
+        self.provisioning_delivery.take()
+    }
+
+    /// Atomically advance the persisted base from Provisioning to Neutral.
+    pub fn seal_base(&mut self) -> Result<room::Provenance, FirecrackerError> {
+        let mut meta = room::read(&self.guard.room_dir)
+            .map_err(FirecrackerError::Io)?
+            .ok_or_else(|| {
+                FirecrackerError::Internal("base room.json disappeared before seal".to_owned())
+            })?;
+        meta.seal()
+            .map_err(|e| FirecrackerError::Internal(e.to_string()))?;
+        room::write_atomic(&self.guard.room_dir, &meta).map_err(FirecrackerError::Io)?;
+        meta.provenance().ok_or_else(|| {
+            FirecrackerError::Internal("sealed base lost its persisted provenance".to_owned())
+        })
     }
 
     /// Terminate the firecracker process and remove room state.
@@ -414,6 +436,8 @@ pub struct BootRequest<'a> {
     /// before `InstanceStart`; the caller takes the [`crate::vsock::Delivery`]
     /// from the booted VM to gate the workload on the guest's ack.
     pub secrets: Option<&'a crate::vsock::SecretsPayload>,
+    /// Credential-free base provisioning input, served on dedicated ports.
+    pub provisioning: Option<&'a crate::vsock::ProvisioningPayload>,
     /// The room's egress policy (`rooms run --egress`). An enforcing plan
     /// installs the per-room `ROOMS_EG_<k>` chain right after the tap is up and
     /// before the VMM can transmit; [`egress::Plan::Observe`] is the
@@ -505,6 +529,8 @@ pub async fn boot(
 
     let secrets_delivery =
         bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
+    let provisioning_delivery =
+        bind_provisioning_listener(req.provisioning, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
 
     let launch = build_jailer_launch_plan(&JailerLaunchInput {
         jailer_binary: &jailer_binary,
@@ -526,7 +552,7 @@ pub async fn boot(
         child.id(),
         req.slot.cloned(),
         req.base,
-    );
+    )?;
 
     wait_for_socket(
         &socket,
@@ -536,7 +562,7 @@ pub async fn boot(
     )
     .await?;
 
-    let boot_args = build_boot_args(req.network, req.readonly_rootfs);
+    let boot_args = build_boot_args(req.network, req.readonly_rootfs, req.base);
     let rootfs_drive = rootfs_drive_payload(&launch.rootfs_path_in_jail, req.readonly_rootfs);
     let spec = VmSpec {
         kernel: &launch.kernel_path_in_jail,
@@ -554,9 +580,31 @@ pub async fn boot(
     Ok(BootedVm {
         witness,
         secrets_delivery,
+        provisioning_delivery,
         guard,
         child,
     })
+}
+
+fn bind_provisioning_listener(
+    payload: Option<&crate::vsock::ProvisioningPayload>,
+    chroot_base: &Path,
+    room_id: &str,
+    fc_uid: u32,
+    fc_gid: u32,
+) -> Result<Option<crate::vsock::ProvisioningDelivery>, FirecrackerError> {
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let jail_root = jail_root_dir(chroot_base, room_id);
+    crate::vsock::serve_provisioning(&jail_root, payload.clone(), Some((fc_uid, fc_gid)))
+        .map(Some)
+        .map_err(|e| {
+            FirecrackerError::Internal(format!(
+                "base provisioning: bind listeners in {}: {e}",
+                jail_root.display()
+            ))
+        })
 }
 
 /// Bind the one-shot secrets listener in the room's jail root, before the
@@ -777,7 +825,7 @@ fn write_room_meta(
     pid: Option<u32>,
     slot: Option<room::Slot>,
     base: bool,
-) {
+) -> Result<(), FirecrackerError> {
     // Record the pid's start time so liveness can later tell *this* incarnation
     // from a recycled pid (the `rooms kill` identity guard).
     let pid_starttime = pid.and_then(room::starttime_of);
@@ -801,8 +849,13 @@ fn write_room_meta(
     // so `rooms ls`/`gc`/`kill` can free the tap + slot even for a room that
     // never finished booting.
     meta.slot = slot;
-    if let Err(e) = room::write_atomic(room_dir, &meta) {
-        warn!(error = %e, "failed to write room.json; room will be invisible to `rooms ls`");
+    match room::write_atomic(room_dir, &meta) {
+        Ok(()) => Ok(()),
+        Err(e) if base => Err(FirecrackerError::Io(e)),
+        Err(e) => {
+            warn!(error = %e, "failed to write room.json; room will be invisible to `rooms ls`");
+            Ok(())
+        }
     }
 }
 
@@ -1206,7 +1259,11 @@ async fn open_log_file(
 
 const OVERLAY_INIT: &str = "/sbin/overlay-init";
 
-fn build_boot_args(network: Option<&NetworkConfig>, readonly_rootfs: bool) -> String {
+fn build_boot_args(
+    network: Option<&NetworkConfig>,
+    readonly_rootfs: bool,
+    base_mode: bool,
+) -> String {
     // `init=/sbin/overlay-init` only ships in images built by
     // build-rootfs-alpine.sh; force it (and the read-only drive) only when the
     // caller opts in, so a plain `rooms run --command` against any image still
@@ -1216,6 +1273,9 @@ fn build_boot_args(network: Option<&NetworkConfig>, readonly_rootfs: bool) -> St
         base.push_str(" rootflags=noload");
         base.push_str(" init=");
         base.push_str(OVERLAY_INIT);
+    }
+    if base_mode {
+        base.push_str(" ipv6.disable=1 rooms.base=1");
     }
     let Some(net) = network else {
         return base;
@@ -1617,7 +1677,8 @@ mod tests {
             None,
             None,
             true,
-        );
+        )
+        .expect("write base metadata");
         let meta = crate::room::read(dir.path())
             .expect("read room.json")
             .expect("room.json present");
@@ -1646,7 +1707,8 @@ mod tests {
             None,
             None,
             false,
-        );
+        )
+        .expect("write room metadata");
         let meta = crate::room::read(dir.path())
             .expect("read room.json")
             .expect("room.json present");
@@ -1751,7 +1813,7 @@ mod tests {
 
     #[test]
     fn build_boot_args_overlay_init_only_when_readonly() {
-        let on = build_boot_args(None, true);
+        let on = build_boot_args(None, true, false);
         assert!(
             on.contains("init=/sbin/overlay-init"),
             "readonly boot args must hand off to overlay-init: {on}"
@@ -1765,7 +1827,7 @@ mod tests {
             "no network suffix without config: {on}"
         );
 
-        let off = build_boot_args(None, false);
+        let off = build_boot_args(None, false, false);
         assert!(
             !off.contains("init="),
             "non-readonly boot must not force an init= (any image boots): {off}"
@@ -1777,6 +1839,18 @@ mod tests {
     }
 
     #[test]
+    fn base_boot_disables_ipv6_and_marks_base_mode() {
+        let args = build_boot_args(None, true, true);
+        assert!(args.contains("ipv6.disable=1"), "{args}");
+        assert!(args.contains("rooms.base=1"), "{args}");
+        assert!(args.contains("init=/sbin/overlay-init"), "{args}");
+
+        let ordinary = build_boot_args(None, true, false);
+        assert!(!ordinary.contains("ipv6.disable=1"), "{ordinary}");
+        assert!(!ordinary.contains("rooms.base=1"), "{ordinary}");
+    }
+
+    #[test]
     fn build_boot_args_includes_overlay_init_with_network() {
         let net = NetworkConfig {
             tap_name: "tap-fc0".to_owned(),
@@ -1784,7 +1858,7 @@ mod tests {
             gateway_ip: "172.16.0.1".to_owned(),
             prefix: 24,
         };
-        let args = build_boot_args(Some(&net), true);
+        let args = build_boot_args(Some(&net), true, false);
         assert!(
             args.contains("init=/sbin/overlay-init"),
             "boot args must hand off to overlay-init: {args}"
@@ -1805,7 +1879,7 @@ mod tests {
             gateway_ip: "172.16.0.5".to_owned(),
             prefix: 30,
         };
-        let args = build_boot_args(Some(&net), false);
+        let args = build_boot_args(Some(&net), false, false);
         assert!(
             args.contains("ip=172.16.0.6::172.16.0.5:255.255.255.252::eth0:off"),
             "a /30 slot must interpolate 255.255.255.252: {args}"
@@ -2263,6 +2337,7 @@ mod e2e_tests {
             descriptor: &descriptor,
             witness: false,
             secrets: None,
+            provisioning: None,
             egress: &egress_plan,
             base: false,
         };
