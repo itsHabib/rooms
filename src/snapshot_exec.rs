@@ -20,6 +20,9 @@ use crate::snapshot::{self, FcOp, SnapshotMeta, SnapshotRequest};
 use crate::transport;
 
 pub const SNAPSHOT_INTENTS_DIR: &str = "snapshot-intents";
+/// Reserved sibling index for the restore transaction implemented by the next
+/// snapshot/restore batch. Snapshot outputs must not overlap this future-owned
+/// recovery namespace.
 pub const RESTORE_INTENTS_DIR: &str = "restore-intents";
 pub const SNAPSHOTS_DIR: &str = "snapshots";
 const INTENT_SCHEMA_VERSION: u32 = 1;
@@ -34,6 +37,20 @@ enum Boundary {
     Reserved,
     Reaped,
     Published,
+}
+
+impl Boundary {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::TargetsStaged => "targets_staged",
+            Self::Paused => "paused",
+            Self::Collected => "collected",
+            Self::Reserved => "reserved",
+            Self::Reaped => "reaped",
+            Self::Published => "published",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +127,9 @@ pub async fn create(
     let snapshot_id = ulid::Ulid::new().to_string().to_lowercase();
     let out_dir = resolve_output(config, &state, base_id, &snapshot_id, explicit_out)?;
     prepare_output(&out_dir)?;
+    if out_dir.canonicalize()? != out_dir {
+        anyhow::bail!("snapshot output changed while it was being prepared");
+    }
     let intent = build_intent(config, &base, snapshot_id, out_dir)?;
     ensure_targets_absent(&intent)?;
     create_intent_exclusive(config, &intent)?;
@@ -287,11 +307,11 @@ fn snapshot_ops() -> [FcOp; 2] {
 
 async fn execute_op(socket: &Path, op: &FcOp, config: &RoomsConfig) -> anyhow::Result<()> {
     let (method, endpoint, body) = op_request(op);
-    if method == "PATCH" {
-        transport::api_patch(socket, endpoint, &body, config).await?;
-        return Ok(());
+    match method {
+        "PATCH" => transport::api_patch(socket, endpoint, &body, config).await?,
+        "PUT" => transport::api_put(socket, endpoint, &body, config).await?,
+        unexpected => anyhow::bail!("unsupported Firecracker API method {unexpected}"),
     }
-    transport::api_put(socket, endpoint, &body, config).await?;
     Ok(())
 }
 
@@ -348,10 +368,8 @@ fn reap_base(config: &RoomsConfig, intent: &SnapshotIntent) -> anyhow::Result<()
         .jail_socket(&intent.base_room_id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve socket"))?;
     if let Some(meta) = room::read(&room_dir)? {
-        let Some(pid) = meta.pid else {
-            anyhow::bail!("base has no recorded process id; preserving reservation");
-        };
-        match firecracker::terminate_by_identity(pid, meta.pid_starttime, config.cleanup_grace) {
+        let (pid, starttime) = pinned_process_identity(&meta)?;
+        match firecracker::terminate_by_identity(pid, Some(starttime), config.cleanup_grace) {
             KillSignalOutcome::Signaled | KillSignalOutcome::AlreadyExited => {}
             KillSignalOutcome::Indeterminate => {
                 anyhow::bail!("base process identity became uncertain; preserving reservation")
@@ -478,13 +496,11 @@ fn resolve_output(
             );
         }
     }
-    for managed in managed_cleanup_roots(config, base_id)? {
-        if resolved.starts_with(&managed) {
-            anyhow::bail!(
-                "snapshot output is under managed cleanup tree {}",
-                managed.display()
-            );
-        }
+    if let Some(managed) = managed_cleanup_root(config, state, base_id, &resolved)? {
+        anyhow::bail!(
+            "snapshot output is under managed cleanup tree {}",
+            managed.display()
+        );
     }
     Ok(resolved)
 }
@@ -506,39 +522,60 @@ fn validate_resume_output(
     )
 }
 
-fn managed_cleanup_roots(config: &RoomsConfig, base_id: &str) -> anyhow::Result<Vec<PathBuf>> {
-    let mut ids: Vec<String> = crate::registry::list_rooms(config)?
-        .into_iter()
-        .map(|entry| entry.id)
-        .collect();
-    if !ids.iter().any(|id| id == base_id) {
-        ids.push(base_id.to_owned());
+fn managed_cleanup_root(
+    config: &RoomsConfig,
+    state: &Path,
+    base_id: &str,
+    candidate: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    if let Some(root) = managed_id_root(candidate, &canonical_candidate(state)?) {
+        return Ok(Some(root));
     }
-    let mut roots = Vec::new();
-    for id in ids {
-        if let Some(room) = config.room_dir(&id) {
-            roots.push(canonical_candidate(&room)?);
-        }
-        if let Some(jail) = config.jail_instance_dir(&id) {
-            roots.push(canonical_candidate(&jail)?);
+    let instances = config
+        .chroot_base()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve jailer chroot base"))?
+        .join("firecracker");
+    if let Some(root) = managed_id_root(candidate, &canonical_candidate(&instances)?) {
+        return Ok(Some(root));
+    }
+    for path in [config.room_dir(base_id), config.jail_instance_dir(base_id)] {
+        let path = path.ok_or_else(|| anyhow::anyhow!("cannot resolve managed cleanup root"))?;
+        let path = canonical_candidate(&path)?;
+        if candidate.starts_with(&path) {
+            return Ok(Some(path));
         }
     }
-    Ok(roots)
+    Ok(None)
+}
+
+fn managed_id_root(candidate: &Path, parent: &Path) -> Option<PathBuf> {
+    let relative = candidate.strip_prefix(parent).ok()?;
+    let id = relative.components().next()?.as_os_str().to_str()?;
+    crate::registry::is_valid_room_id(id).then(|| parent.join(id))
 }
 
 fn canonical_candidate(path: &Path) -> anyhow::Result<PathBuf> {
-    if path.exists() {
-        return Ok(path.canonicalize()?);
+    let mut current = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut missing = Vec::new();
+    while !current.exists() {
+        let name = current
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("path has no existing ancestor: {}", path.display()))?;
+        missing.push(name.to_os_string());
+        current = current
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?
+            .to_path_buf();
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
-    std::fs::create_dir_all(parent)?;
-    let parent = parent.canonicalize()?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("path has no leaf: {}", path.display()))?;
-    Ok(parent.join(name))
+    let mut resolved = current.canonicalize()?;
+    for name in missing.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 fn overlaps(left: &Path, right: &Path) -> bool {
@@ -559,6 +596,10 @@ fn prepare_output(path: &Path) -> anyhow::Result<()> {
         }
         return set_dir_private(path);
     }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("snapshot output has no parent"))?;
+    std::fs::create_dir_all(parent)?;
     std::fs::create_dir(path)?;
     set_dir_private(path)
 }
@@ -569,29 +610,45 @@ fn create_intent_exclusive(config: &RoomsConfig, intent: &SnapshotIntent) -> any
     set_dir_private(&dir)?;
     let path = intent_path(config, &intent.base_room_id)?;
     let bytes = serde_json::to_vec_pretty(intent)?;
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    set_create_mode(&mut options);
-    let mut file = options.open(&path).map_err(|error| {
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        intent.base_room_id,
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let mut file = open_private_create_new(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let linked = std::fs::hard_link(&tmp, &path);
+    if let Err(error) = linked {
+        let _ = std::fs::remove_file(&tmp);
         if error.kind() == std::io::ErrorKind::AlreadyExists {
-            return anyhow::anyhow!(
+            anyhow::bail!(
                 "snapshot transaction already pending for base {}",
                 intent.base_room_id
             );
         }
-        anyhow::Error::from(error)
-    })?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
+        return Err(error.into());
+    }
+    sync_dir(&dir)?;
+    std::fs::remove_file(&tmp)?;
     sync_dir(&dir)?;
     Ok(())
 }
 
-struct IntentLock {
+pub(crate) struct IntentLock {
     _file: File,
 }
 
 fn acquire_lock(config: &RoomsConfig, base_id: &str) -> anyhow::Result<IntentLock> {
+    try_acquire_lock(config, base_id)?
+        .ok_or_else(|| anyhow::anyhow!("snapshot transaction for base {base_id} is busy"))
+}
+
+pub(crate) fn try_acquire_lock(
+    config: &RoomsConfig,
+    base_id: &str,
+) -> anyhow::Result<Option<IntentLock>> {
     let dir = intent_dir(config)?;
     std::fs::create_dir_all(&dir)?;
     set_dir_private(&dir)?;
@@ -602,11 +659,16 @@ fn acquire_lock(config: &RoomsConfig, base_id: &str) -> anyhow::Result<IntentLoc
         .truncate(false)
         .open(&path)
         .map_err(anyhow::Error::from)?;
-    file.try_lock()
-        .map_err(|_| anyhow::anyhow!("snapshot transaction for base {base_id} is busy"))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(anyhow::Error::from(error));
+        }
+    }
     file.sync_all()?;
     sync_dir(&dir)?;
-    Ok(IntentLock { _file: file })
+    Ok(Some(IntentLock { _file: file }))
 }
 
 fn advance(
@@ -719,7 +781,7 @@ fn pending_summary(intent: &SnapshotIntent) -> PendingSnapshot {
     PendingSnapshot {
         snapshot_id: intent.snapshot_id.clone(),
         base_room: intent.base_room_id.clone(),
-        boundary: format!("{:?}", intent.boundary).to_lowercase(),
+        boundary: intent.boundary.label().to_owned(),
         next_action: format!(
             "run `rooms snapshot-recover {}` to resume safely",
             intent.snapshot_id
@@ -747,16 +809,26 @@ fn terminate_partial_base(config: &RoomsConfig, intent: &SnapshotIntent) -> anyh
     let Some(meta) = room::read(&room_dir)? else {
         return Ok(());
     };
-    let Some(pid) = meta.pid else {
-        anyhow::bail!("partial snapshot base has no recorded process id");
-    };
-    match firecracker::terminate_by_identity(pid, meta.pid_starttime, config.cleanup_grace) {
+    let (pid, starttime) = pinned_process_identity(&meta)?;
+    match firecracker::terminate_by_identity(pid, Some(starttime), config.cleanup_grace) {
         KillSignalOutcome::Signaled | KillSignalOutcome::AlreadyExited => Ok(()),
         KillSignalOutcome::Indeterminate => {
             anyhow::bail!("partial snapshot base identity is indeterminate")
         }
         KillSignalOutcome::Survived => anyhow::bail!("partial snapshot base survived termination"),
     }
+}
+
+fn pinned_process_identity(meta: &RoomMeta) -> anyhow::Result<(u32, u64)> {
+    let pid = meta
+        .pid
+        .ok_or_else(|| anyhow::anyhow!("base has no recorded process id; refusing to signal"))?;
+    let starttime = meta.pid_starttime.ok_or_else(|| {
+        anyhow::anyhow!(
+            "base process has no pinned start time; refusing to signal a potentially reused pid"
+        )
+    })?;
+    Ok((pid, starttime))
 }
 
 fn any_artifact_nonempty(intent: &SnapshotIntent) -> bool {
@@ -832,6 +904,11 @@ fn remove_partial_outputs(intent: &SnapshotIntent) -> anyhow::Result<()> {
         }
     }
     sync_dir(&intent.out_dir)?;
+    let jail_parent = intent
+        .jail_vmstate
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("snapshot jail target has no parent"))?;
+    sync_dir(jail_parent)?;
     Ok(())
 }
 
@@ -986,8 +1063,9 @@ mod tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing, reason = "test module")]
 
     use super::{
-        acquire_lock, create_intent_exclusive, op_request, overlaps, pending_for_base,
-        resolve_output, sha256_file, snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
+        acquire_lock, canonical_candidate, create_intent_exclusive, op_request, overlaps,
+        pending_for_base, pending_summary, pinned_process_identity, resolve_output, sha256_file,
+        snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::room::{Provenance, RoomMeta, Slot};
@@ -1098,6 +1176,18 @@ mod tests {
     }
 
     #[test]
+    fn boundary_label_matches_the_serialized_contract() {
+        let mut intent = intent(&config(tempfile::tempdir().expect("tempdir").path()));
+        intent.boundary = Boundary::TargetsStaged;
+        assert_eq!(intent.boundary.label(), "targets_staged");
+        assert_eq!(
+            serde_json::to_value(intent.boundary).expect("serialize"),
+            serde_json::json!("targets_staged")
+        );
+        assert_eq!(pending_summary(&intent).boundary, "targets_staged");
+    }
+
+    #[test]
     fn per_base_intent_is_exclusive_and_indexed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = config(dir.path());
@@ -1112,11 +1202,61 @@ mod tests {
     }
 
     #[test]
+    fn partial_initial_write_cannot_poison_the_intent_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let index = config.snapshot_intents_dir().expect("index");
+        std::fs::create_dir_all(&index).expect("create index");
+        std::fs::write(index.join(format!(".{BASE_ID}.crash.tmp")), b"{").expect("partial temp");
+
+        create_intent_exclusive(&config, &intent(&config)).expect("publish complete intent");
+        let pending = pending_for_base(&config, BASE_ID)
+            .expect("read index")
+            .expect("pending");
+        assert_eq!(pending.snapshot_id, SNAPSHOT_ID);
+    }
+
+    #[test]
     fn transaction_lock_rejects_a_concurrent_driver() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = config(dir.path());
         let _first = acquire_lock(&config, BASE_ID).expect("first lock");
         assert!(acquire_lock(&config, BASE_ID).is_err());
+    }
+
+    #[test]
+    fn kill_refuses_while_snapshot_start_holds_the_per_base_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        write_room(&config);
+        let _snapshot_start = acquire_lock(&config, BASE_ID).expect("snapshot lock");
+
+        let killed = crate::registry::kill(&config, BASE_ID).expect("kill report");
+        assert_eq!(killed.exit_code(), 2);
+        assert!(killed.outcomes[0].reason.contains("snapshot transaction"));
+        assert!(
+            config.room_dir(BASE_ID).expect("room").exists(),
+            "kill must not reap between snapshot lock acquisition and intent publication"
+        );
+    }
+
+    #[test]
+    fn destructive_snapshot_paths_require_a_pinned_process_identity() {
+        let mut meta = RoomMeta::new_base(
+            BASE_ID.to_owned(),
+            Some("base".to_owned()),
+            Some(42),
+            None,
+            true,
+            Utc::now(),
+        );
+        let error = pinned_process_identity(&meta).expect_err("unpinned pid must refuse");
+        assert!(error.to_string().contains("pinned start time"));
+        meta.pid_starttime = Some(7);
+        assert_eq!(
+            pinned_process_identity(&meta).expect("pinned identity"),
+            (42, 7)
+        );
     }
 
     #[test]
@@ -1172,6 +1312,18 @@ mod tests {
         )
         .is_err());
         assert!(resolve_output(&config, &state, BASE_ID, SNAPSHOT_ID, Some(&state)).is_err());
+    }
+
+    #[test]
+    fn canonical_resolution_of_a_missing_path_has_no_side_effects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("one/two/snapshot");
+        let resolved = canonical_candidate(&missing).expect("resolve");
+        assert!(resolved.ends_with("one/two/snapshot"));
+        assert!(
+            !dir.path().join("one").exists(),
+            "read-time canonical resolution must not create parent directories"
+        );
     }
 
     #[test]

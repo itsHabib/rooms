@@ -577,7 +577,7 @@ fn iptables_exists(args: &[String]) -> Result<bool, String> {
         return Ok(true);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("Bad rule") || stderr.contains("No chain/target/match") {
+    if iptables_rule_is_absent(&stderr) {
         return Ok(false);
     }
     Err(format!(
@@ -585,6 +585,14 @@ fn iptables_exists(args: &[String]) -> Result<bool, String> {
         args.join(" "),
         stderr.trim()
     ))
+}
+
+#[cfg(any(unix, test))]
+fn iptables_rule_is_absent(stderr: &str) -> bool {
+    stderr.contains("Bad rule")
+        || stderr.contains("No chain/target/match")
+        || stderr.contains("No rule exists at that position")
+        || (stderr.contains("rule in chain") && stderr.contains("not found"))
 }
 
 #[cfg(test)]
@@ -597,8 +605,9 @@ mod tests {
     )]
 
     use super::{
-        chain_for_tap, input_drop_insert_rule, input_drop_rule, insert_position, jump_rule,
-        out_iface, parse, resolve, room_egress_enforced, subchain_rules, Dest, Plan, Policy,
+        chain_for_tap, input_drop_insert_rule, input_drop_rule, insert_position,
+        iptables_rule_is_absent, jump_rule, out_iface, parse, resolve, room_egress_enforced,
+        subchain_rules, Dest, Plan, Policy,
     };
 
     /// A correctly-wired `ROOMS_FWD` dump — the substrate layout plus a
@@ -631,6 +640,26 @@ mod tests {
         assert_eq!(
             input_drop_rule("-D", "tap-fc7"),
             ["-D", "INPUT", "-i", "tap-fc7", "-j", "DROP"]
+        );
+    }
+
+    #[test]
+    fn missing_rule_probe_accepts_legacy_and_nft_wording() {
+        assert!(iptables_rule_is_absent(
+            "iptables: Bad rule (does a matching rule exist in that chain?)."
+        ));
+        assert!(iptables_rule_is_absent(
+            "iptables: No chain/target/match by that name."
+        ));
+        assert!(iptables_rule_is_absent(
+            "iptables-nft: No rule exists at that position."
+        ));
+        assert!(iptables_rule_is_absent(
+            "iptables v1.8.10 (nf_tables): rule in chain INPUT not found"
+        ));
+        assert!(
+            !iptables_rule_is_absent("iptables: Permission denied (you must be root)"),
+            "inspection failures must remain errors"
         );
     }
 

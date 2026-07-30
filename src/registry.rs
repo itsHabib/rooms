@@ -498,18 +498,22 @@ pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError>
     config
         .resolved_state_base()
         .ok_or(RegistryError::HomeUnset)?;
+    let Some(_snapshot_lock) =
+        snapshot_exec::try_acquire_lock(config, id).map_err(|error| snapshot_error(&error))?
+    else {
+        let entry = find_entry(config, id).unwrap_or_else(|| unknown_entry(id));
+        return Ok(KillReport {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            outcomes: vec![kill_outcome(
+                &entry,
+                KillDisposition::Refused,
+                "snapshot transaction is starting or active; refusing concurrent kill",
+            )],
+        });
+    };
     let entry = find_entry(config, id);
     if let Some(pending) = pending_snapshot(config, id)? {
-        let entry = entry.unwrap_or_else(|| RoomEntry {
-            id: id.to_owned(),
-            state: RoomState::Unknown,
-            label: None,
-            pid: None,
-            pid_starttime: None,
-            started_at: None,
-            keep: false,
-            slot: None,
-        });
+        let entry = entry.unwrap_or_else(|| unknown_entry(id));
         return Ok(KillReport {
             schema_version: REGISTRY_SCHEMA_VERSION,
             outcomes: vec![kill_outcome(
@@ -530,6 +534,19 @@ pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError>
         schema_version: REGISTRY_SCHEMA_VERSION,
         outcomes,
     })
+}
+
+fn unknown_entry(id: &str) -> RoomEntry {
+    RoomEntry {
+        id: id.to_owned(),
+        state: RoomState::Unknown,
+        label: None,
+        pid: None,
+        pid_starttime: None,
+        started_at: None,
+        keep: false,
+        slot: None,
+    }
 }
 
 /// Build the entry for a single room id, or `None` if no such room dir exists.
