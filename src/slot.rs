@@ -228,6 +228,28 @@ pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Free
     }
 }
 
+/// Whether an index still holds the exact ordinary claim for `room_id`.
+///
+/// Snapshot recovery uses this read-under-lock proof before its terminal abort:
+/// a reservation or reassigned claim must never be cleaned up as the dead base.
+pub fn claimed_by(state: &Path, slot_index: u8, room_id: &str) -> Result<bool, SlotError> {
+    ensure_pool_index(slot_index)?;
+    let path = state.join(SLOTS_DIR).join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(SlotError::Io(error)),
+    };
+    Ok(matches!(
+        parse_token(&contents),
+        SlotToken::Claimed {
+            room_id: owner,
+            ..
+        } if owner == room_id
+    ))
+}
+
 /// The on-disk body of a reservation the walk allocator skips (the file exists,
 /// so `O_EXCL` create loses) and [`reconcile`] leaves held (not a `Claimed`
 /// token, so it is never judged by claimer liveness).
@@ -246,11 +268,34 @@ fn lease_token(snapshot_id: &str, lessee_room_id: &str) -> String {
 /// the free-lock across the read+verify+rewrite critical section.
 fn rewrite_slot_atomic(dir: &Path, index: u8, body: &str) -> Result<(), SlotError> {
     let tmp = dir.join(format!(".{index}.tmp"));
-    std::fs::write(&tmp, body.as_bytes())?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)?;
+    file.write_all(body.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     // rename replaces the target on both unix and Windows (MOVEFILE_REPLACE_
     // EXISTING); the `.tmp` name is never a canonical index, so a crash between
     // write and rename leaves a stray reconcile ignores.
     std::fs::rename(&tmp, dir.join(index.to_string()))?;
+    sync_dir(dir)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<(), SlotError> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps durable slot-transition call sites identical across cfg targets"
+)]
+const fn sync_dir(_path: &Path) -> Result<(), SlotError> {
     Ok(())
 }
 
@@ -300,6 +345,7 @@ pub fn reserve(
         parse_token(&contents),
         SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id
     ) {
+        sync_dir(&dir)?;
         return Ok(Reserved::AlreadyReserved);
     }
     // Only a claim whose first line is the base may be transferred — a
@@ -348,7 +394,10 @@ pub fn lease(
         SlotToken::Leased {
             snapshot_id: owner,
             lessee,
-        } if owner == snapshot_id && lessee == lessee_room_id => Ok(derive(slot_index)),
+        } if owner == snapshot_id && lessee == lessee_room_id => {
+            sync_dir(&dir)?;
+            Ok(derive(slot_index))
+        }
         // Our snapshot's reservation is leased by another room — the one live
         // lease the frozen IP allows is taken.
         SlotToken::Leased {
@@ -409,6 +458,7 @@ pub fn release_lease(
             Ok(Released::Returned)
         }
         SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id => {
+            sync_dir(&dir)?;
             Ok(Released::AlreadyReturned)
         }
         _ => Ok(Released::NotOurLease),
@@ -703,8 +753,9 @@ mod tests {
     )]
 
     use super::{
-        claim, classify_claimer_stat, free, lease, parse_token, reconcile, release_lease, reserve,
-        Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken, MAX_SLOT, SLOTS_DIR,
+        claim, claimed_by, classify_claimer_stat, free, lease, parse_token, reconcile,
+        release_lease, reserve, Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken,
+        MAX_SLOT, SLOTS_DIR,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -874,6 +925,21 @@ mod tests {
         assert_eq!(
             free(dir.path(), 1, &room_id(1)).unwrap(),
             Freed::AlreadyFree
+        );
+    }
+
+    #[test]
+    fn claimed_by_distinguishes_exact_claim_from_reservation_and_stranger() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = room_id(1);
+        let snapshot = room_id(100);
+        base_claim(dir.path(), 3, &base);
+        assert!(claimed_by(dir.path(), 3, &base).unwrap());
+        assert!(!claimed_by(dir.path(), 3, &room_id(2)).unwrap());
+        reserve(dir.path(), 3, &snapshot, &base).unwrap();
+        assert!(
+            !claimed_by(dir.path(), 3, &base).unwrap(),
+            "a reservation is not an abortable ordinary claim"
         );
     }
 

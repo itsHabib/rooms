@@ -18,6 +18,7 @@ use crate::error::RegistryError;
 use crate::firecracker::{self, KillSignalOutcome};
 use crate::room::{self, Liveness, RoomMeta};
 use crate::slot;
+use crate::snapshot_exec::{self, PendingSnapshot};
 
 /// Schema version for `ls --json` stdout (mirrors `doctor`/`diff`).
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -248,7 +249,8 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
     // still backed by a room dir is left for the reap loop below to free through
     // the room's own teardown. Skip the sweep on a dry-run and on a targeted
     // (`--only`) gc — both are scoped to a single room, not a pool-wide sweep.
-    if !opts.dry_run && opts.only.is_none() {
+    let pending = snapshot_exec::pending_all(config).map_err(|error| snapshot_error(&error))?;
+    if !opts.dry_run && opts.only.is_none() && pending.is_empty() {
         reconcile_leaked_slots(config);
     }
     let mut rooms = list_rooms(config)?;
@@ -267,6 +269,23 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
             }
         }
     }
+    for intent in pending {
+        let in_scope = opts
+            .only
+            .as_ref()
+            .is_none_or(|only| only == &intent.base_room);
+        if in_scope && !rooms.iter().any(|entry| entry.id == intent.base_room) {
+            outcomes.push(GcOutcome {
+                id: intent.base_room,
+                state: RoomState::Unknown,
+                reaped: false,
+                reason: format!(
+                    "protected pending snapshot {}; run `rooms snapshot-recover {}`",
+                    intent.snapshot_id, intent.snapshot_id
+                ),
+            });
+        }
+    }
     Ok(GcReport {
         schema_version: REGISTRY_SCHEMA_VERSION,
         dry_run: opts.dry_run,
@@ -282,6 +301,16 @@ fn reap_entry(
     entry: &RoomEntry,
     dry_run: bool,
 ) -> Result<GcOutcome, RegistryError> {
+    if let Some(pending) = pending_snapshot(config, &entry.id)? {
+        return Ok(outcome(
+            entry,
+            false,
+            &format!(
+                "protected pending snapshot {}; run `rooms snapshot-recover {}`",
+                pending.snapshot_id, pending.snapshot_id
+            ),
+        ));
+    }
     if !entry.state.is_reapable() {
         return Ok(skip_outcome(entry));
     }
@@ -469,7 +498,31 @@ pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError>
     config
         .resolved_state_base()
         .ok_or(RegistryError::HomeUnset)?;
-    let outcomes = match find_entry(config, id) {
+    let entry = find_entry(config, id);
+    if let Some(pending) = pending_snapshot(config, id)? {
+        let entry = entry.unwrap_or_else(|| RoomEntry {
+            id: id.to_owned(),
+            state: RoomState::Unknown,
+            label: None,
+            pid: None,
+            pid_starttime: None,
+            started_at: None,
+            keep: false,
+            slot: None,
+        });
+        return Ok(KillReport {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            outcomes: vec![kill_outcome(
+                &entry,
+                KillDisposition::Refused,
+                &format!(
+                    "snapshot transaction {} is pending; run `rooms snapshot-recover {}`",
+                    pending.snapshot_id, pending.snapshot_id
+                ),
+            )],
+        });
+    }
+    let outcomes = match entry {
         Some(entry) => vec![kill_entry(config, &entry)?],
         None => Vec::new(),
     };
@@ -507,6 +560,19 @@ fn kill_entry(config: &RoomsConfig, entry: &RoomEntry) -> Result<KillOutcome, Re
         )),
         RoomState::Running | RoomState::Kept => kill_live(config, entry),
     }
+}
+
+fn pending_snapshot(
+    config: &RoomsConfig,
+    room_id: &str,
+) -> Result<Option<PendingSnapshot>, RegistryError> {
+    snapshot_exec::pending_for_base(config, room_id).map_err(|error| snapshot_error(&error))
+}
+
+fn snapshot_error(error: &anyhow::Error) -> RegistryError {
+    RegistryError::Io(std::io::Error::other(format!(
+        "snapshot intent index: {error}"
+    )))
 }
 
 /// Terminate a confirmed-alive room (identity-guarded), then reap it.

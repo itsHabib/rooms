@@ -97,6 +97,30 @@ impl RoomsConfig {
         Some(self.resolved_state_base()?.join(crate::slot::SLOTS_DIR))
     }
 
+    /// Durable per-base snapshot transaction index.
+    pub fn snapshot_intents_dir(&self) -> Option<PathBuf> {
+        Some(
+            self.resolved_state_base()?
+                .join(crate::snapshot_exec::SNAPSHOT_INTENTS_DIR),
+        )
+    }
+
+    /// Durable restore transaction index (kept disjoint from snapshot output).
+    pub fn restore_intents_dir(&self) -> Option<PathBuf> {
+        Some(
+            self.resolved_state_base()?
+                .join(crate::snapshot_exec::RESTORE_INTENTS_DIR),
+        )
+    }
+
+    /// Default completed snapshot artifact root.
+    pub fn snapshots_dir(&self) -> Option<PathBuf> {
+        Some(
+            self.resolved_state_base()?
+                .join(crate::snapshot_exec::SNAPSHOTS_DIR),
+        )
+    }
+
     /// The pool ceiling for one invocation. The host cap ([`Self::max_pool`]) is
     /// the source of truth; a per-invocation `flag` (`--max-pool` /
     /// `ROOMS_MAX_POOL`) can only lower it, never raise it. The result is
@@ -170,6 +194,15 @@ mod tests {
         assert_eq!(c.resolved_state_base(), Some(PathBuf::from("/s")));
         assert_eq!(c.room_dir(id), Some(PathBuf::from(format!("/s/{id}"))));
         assert_eq!(c.chroot_base(), Some(PathBuf::from("/s/jailer")));
+        assert_eq!(
+            c.snapshot_intents_dir(),
+            Some(PathBuf::from("/s/snapshot-intents"))
+        );
+        assert_eq!(
+            c.restore_intents_dir(),
+            Some(PathBuf::from("/s/restore-intents"))
+        );
+        assert_eq!(c.snapshots_dir(), Some(PathBuf::from("/s/snapshots")));
     }
 
     #[test]

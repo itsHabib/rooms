@@ -93,8 +93,9 @@ pub enum FirecrackerError {
     JailPrepareFailed { reason: String },
     #[error("firecracker api socket did not appear within {timeout_ms} ms")]
     ApiSocketNeverAppeared { timeout_ms: u64 },
-    #[error("firecracker api PUT {endpoint} failed (curl exit {curl_exit_code}): {body}")]
+    #[error("firecracker api {method} {endpoint} failed (curl exit {curl_exit_code}): {body}")]
     ApiCallFailed {
+        method: String,
         endpoint: String,
         /// `curl(1)` process exit code, not the guest HTTP status. With
         /// `--fail-with-body`, any HTTP response >= 400 yields curl exit 22;

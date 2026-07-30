@@ -921,7 +921,7 @@ fn build_jailer_launch_plan(input: &JailerLaunchInput<'_>) -> JailerLaunchPlan {
 }
 
 #[cfg(unix)]
-fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
+pub fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
     use std::process::Command;
 
     let output = Command::new("getent")
@@ -941,7 +941,7 @@ fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
 }
 
 #[cfg(not(unix))]
-fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
+pub fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
     Err(FirecrackerError::FirecrackerUserMissing {
         user: FIRECRACKER_USER.to_owned(),
     })
@@ -1650,6 +1650,77 @@ fn release_tap(tap_name: Option<&str>) {
 /// already removed.
 pub fn delete_tap(tap: &str) {
     release_tap(Some(tap));
+}
+
+/// Reap a snapshotted base after its slot claim has already become a durable
+/// reservation. Unlike ordinary reap, this never frees the slot.
+///
+/// The checked network cleanup is part of the publish gate: any egress or TAP
+/// residue keeps the snapshot intent for recovery.
+pub fn reap_reserved_base(
+    room_dir: &Path,
+    jail_instance_dir: &Path,
+    socket: &Path,
+    tap: &str,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    let mut guard = RoomGuard::for_orphan(
+        room_dir.to_path_buf(),
+        socket.to_path_buf(),
+        jail_instance_dir.to_path_buf(),
+        config,
+    );
+    guard.cleanup();
+    guard.dismiss();
+    if jail_instance_dir.exists() || room_dir.exists() {
+        return Err(FirecrackerError::Internal(
+            "snapshot base directories survived reap".to_owned(),
+        ));
+    }
+    egress::remove_checked(tap).map_err(FirecrackerError::Internal)?;
+    delete_tap_checked(tap)
+}
+
+#[cfg(unix)]
+fn delete_tap_checked(tap: &str) -> Result<(), FirecrackerError> {
+    let probe = std::process::Command::new("ip")
+        .args(["link", "show", "dev", tap])
+        .output()
+        .map_err(FirecrackerError::Io)?;
+    if !probe.status.success() {
+        let stderr = String::from_utf8_lossy(&probe.stderr);
+        if stderr.contains("does not exist") || stderr.contains("Cannot find device") {
+            return Ok(());
+        }
+        return Err(FirecrackerError::Internal(format!(
+            "inspect TAP {tap}: {}",
+            stderr.trim()
+        )));
+    }
+    let delete = std::process::Command::new("ip")
+        .args(["tuntap", "del", "dev", tap, "mode", "tap"])
+        .output()
+        .map_err(FirecrackerError::Io)?;
+    if delete.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&delete.stderr);
+    if stderr.contains("does not exist") || stderr.contains("Cannot find device") {
+        return Ok(());
+    }
+    Err(FirecrackerError::Internal(format!(
+        "delete TAP {tap}: {}",
+        stderr.trim()
+    )))
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps the checked cleanup contract identical across cfg targets"
+)]
+fn delete_tap_checked(_tap: &str) -> Result<(), FirecrackerError> {
+    Ok(())
 }
 
 #[cfg(test)]
