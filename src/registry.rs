@@ -301,6 +301,22 @@ fn reap_entry(
     entry: &RoomEntry,
     dry_run: bool,
 ) -> Result<GcOutcome, RegistryError> {
+    // Take the base's snapshot lock before reading the intent index, and hold it
+    // across the teardown. `snapshot create` claims this lock before it plans,
+    // and planning hashes the whole rootfs long before the intent reaches disk —
+    // so `pending_snapshot` alone reports "nothing pending" for that entire
+    // window and gc would reap the base out from under a live transaction,
+    // leaving an intent that names a room whose slot claim is already gone.
+    // `kill` takes the same guard for the same reason.
+    let Some(_snapshot_lock) = snapshot_exec::try_acquire_lock(config, &entry.id)
+        .map_err(|error| snapshot_error(&error))?
+    else {
+        return Ok(outcome(
+            entry,
+            false,
+            "snapshot transaction is starting or active; refusing concurrent reap",
+        ));
+    };
     if let Some(pending) = pending_snapshot(config, &entry.id)? {
         return Ok(outcome(
             entry,
@@ -682,6 +698,7 @@ mod tests {
     use crate::config::RoomsConfig;
     use crate::error::RegistryError;
     use crate::room::{self, Liveness, RoomMeta};
+    use crate::snapshot_exec;
     use chrono::Utc;
     use std::path::{Path, PathBuf};
 
@@ -1099,6 +1116,37 @@ mod tests {
         let report = kill(&config, VALID_ID).unwrap();
         assert!(report.outcomes.is_empty());
         assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn gc_refuses_to_reap_a_base_whose_snapshot_is_still_planning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        // A pid that cannot exist → Dead → OrphanedDead → reapable, so nothing
+        // but the snapshot lock stands between this room and a reap.
+        let id = make_room(&config, Some(4_194_305u32), false, true);
+        // Stand in for `snapshot create` between acquiring the lock and writing
+        // its intent: the lock is held, the intent index is still empty. This is
+        // the window in which the rootfs hash runs, and it is measured in
+        // seconds, not microseconds.
+        let _planning = snapshot_exec::try_acquire_lock(&config, &id)
+            .unwrap()
+            .expect("the base lock is free before the stand-in transaction takes it");
+
+        let report = gc(&config, &GcOptions::default()).unwrap();
+
+        assert!(
+            report.outcomes.iter().all(|o| !o.reaped),
+            "gc reaped a base while a snapshot transaction held its lock"
+        );
+        assert!(
+            config.room_dir(&id).unwrap().exists(),
+            "room dir must survive a reap refused for a planning snapshot"
+        );
+        assert!(
+            config.jail_instance_dir(&id).unwrap().exists(),
+            "jail dir must survive a reap refused for a planning snapshot"
+        );
     }
 
     #[test]
