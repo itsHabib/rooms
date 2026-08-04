@@ -143,6 +143,8 @@ pub async fn create(
     }
     let snapshot_id = ulid::Ulid::new().to_string().to_lowercase();
     let out_dir = resolve_output(config, &state, base_id, &snapshot_id, explicit_out)?;
+    let _out_lock = acquire_output_lock(config, &out_dir)?;
+    ensure_output_unclaimed(config, &out_dir, base_id)?;
     prepare_output(&out_dir)?;
     if out_dir.canonicalize()? != out_dir {
         anyhow::bail!("snapshot output changed while it was being prepared");
@@ -690,10 +692,51 @@ pub(crate) fn try_acquire_lock(
     config: &RoomsConfig,
     base_id: &str,
 ) -> anyhow::Result<Option<IntentLock>> {
+    try_lock_named(config, base_id)
+}
+
+/// Serializes the output claim across bases. Per-base locks do not: two bases
+/// pointed at one explicit `--out` would each observe it empty and publish
+/// intents naming identical artifact paths.
+fn acquire_output_lock(config: &RoomsConfig, out_dir: &Path) -> anyhow::Result<IntentLock> {
+    let mut hasher = Sha256::new();
+    hasher.update(out_dir.as_os_str().as_encoded_bytes());
+    let key = format!("out-{:x}", hasher.finalize());
+    try_lock_named(config, &key)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "snapshot output {} is busy in another transaction",
+            out_dir.display()
+        )
+    })
+}
+
+/// Refuses an output directory another live transaction already owns. The
+/// intent index is the durable claim; the output lock only serializes the
+/// window between this check and publication.
+fn ensure_output_unclaimed(
+    config: &RoomsConfig,
+    out_dir: &Path,
+    base_id: &str,
+) -> anyhow::Result<()> {
+    let conflict = read_intents(config)?
+        .into_iter()
+        .find(|intent| intent.out_dir == out_dir && intent.base_room_id != base_id);
+    let Some(intent) = conflict else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "snapshot output {} is already claimed by transaction {} for base {}",
+        out_dir.display(),
+        intent.snapshot_id,
+        intent.base_room_id
+    )
+}
+
+fn try_lock_named(config: &RoomsConfig, name: &str) -> anyhow::Result<Option<IntentLock>> {
     let dir = intent_dir(config)?;
     std::fs::create_dir_all(&dir)?;
     set_dir_private(&dir)?;
-    let path = dir.join(format!("{base_id}.lock"));
+    let path = dir.join(format!("{name}.lock"));
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -1125,10 +1168,10 @@ mod tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing, reason = "test module")]
 
     use super::{
-        acquire_lock, canonical_candidate, create_intent_exclusive, create_output_tree, op_request,
-        overlaps, pending_for_base, pending_summary, pinned_process_identity, read_intents,
-        record_abort, resolve_output, sha256_file, snapshot_ops, Boundary, SnapshotIntent,
-        INTENT_SCHEMA_VERSION,
+        acquire_lock, canonical_candidate, create_intent_exclusive, create_output_tree,
+        ensure_output_unclaimed, op_request, overlaps, pending_for_base, pending_summary,
+        pinned_process_identity, read_intents, record_abort, resolve_output, sha256_file,
+        snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::room::{Provenance, RoomMeta, Slot};
@@ -1283,6 +1326,23 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&value).expect("serialize")).expect("write");
         let stored = read_intents(&config).expect("read");
         assert!(!stored[0].aborted, "a pre-existing intent must still load");
+    }
+
+    #[test]
+    fn a_second_base_cannot_claim_a_live_transactions_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let intent = intent(&config);
+        create_intent_exclusive(&config, &intent).expect("index");
+        ensure_output_unclaimed(&config, &intent.out_dir, BASE_ID)
+            .expect("own transaction resumes");
+        let error = ensure_output_unclaimed(&config, &intent.out_dir, "0000000000000000000000000b")
+            .expect_err("a second base must not share an output directory");
+        assert!(
+            error.to_string().contains("already claimed"),
+            "two bases sharing one --out publish intents naming identical artifact \
+             paths, so the copies overwrite each other: {error}"
+        );
     }
 
     #[test]

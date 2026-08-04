@@ -6,6 +6,7 @@ discovered. Per-issue depth in the linked PR; this file is just the index.
 
 ## Open
 
+- 2026-08-04 — `SnapshotMeta.base_repo_sha` is always `None`: `build_intent` passes `base_repo_sha: None` unconditionally, even though `base-create --repo` resolves a concrete repository HEAD to build the transport bundle. Snapshot metadata therefore cannot name the repository state baked into the guest, which is exactly what a checkpoint receipt (TDD §4 D5) has to carry to let a consumer re-run from an identical starting world. Thread the resolved HEAD through base provisioning into the room metadata, then into the snapshot plan. ([#99](https://github.com/itsHabib/rooms/pull/99))
 - 2026-08-02 — `gc`'s pool-wide slot sweep reads the intent index outside the per-base snapshot lock: `gc()` gates `reconcile_leaked_slots` on `pending_all(config).is_empty()`, which reports empty for the whole window in which `snapshot create` holds the lock but has not yet written its intent. `reap_entry` now takes that lock per room, but the sweep still decides from the unlocked read, so a base whose liveness token reads dead mid-transaction could have its slot reclaimed underneath a live snapshot. Either take the lock around the sweep or have it skip any base whose lock is held. ([#99](https://github.com/itsHabib/rooms/pull/99))
 
 Surfaced 2026-05-29 by the first end-to-end dogfood (a `claude -p` session run inside a rooms microVM that produced [#34](https://github.com/itsHabib/rooms/pull/34)). The SSH-user and `seed_entropy` seams are now resolved (see Closed); these remain:
