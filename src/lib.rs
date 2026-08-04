@@ -17,6 +17,7 @@ pub mod rootfs;
 pub mod runner;
 pub mod slot;
 pub mod snapshot;
+pub mod snapshot_exec;
 pub mod transport;
 pub mod vsock;
 pub mod witness;

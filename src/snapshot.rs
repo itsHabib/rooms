@@ -7,6 +7,7 @@
 //! host with a live Firecracker; here we produce a [`SnapshotPlan`] the runner
 //! carries out, so every correctness-critical choice is unit-testable without a VM.
 
+use std::io::Write as _;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
@@ -213,8 +214,46 @@ pub fn write_meta_atomic(path: &Path, meta: &SnapshotMeta) -> std::io::Result<()
         ));
     };
     let tmp = dir.join(".snapshot.json.tmp");
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, path)
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)?;
+    set_private_file(&tmp)?;
+    file.write_all(&json)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)?;
+    sync_dir(dir)
+}
+
+#[cfg(unix)]
+fn set_private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps private metadata call sites identical across cfg targets"
+)]
+const fn set_private_file(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps durable-write call sites identical across cfg targets"
+)]
+const fn sync_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

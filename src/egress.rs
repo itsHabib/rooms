@@ -482,27 +482,42 @@ pub fn install(_tap: &str, _plan: &Plan) -> Result<(), String> {
 /// live sibling's chain, and a tap that never enforced is a clean no-op.
 #[cfg(unix)]
 pub fn remove(tap: &str) {
+    if let Err(error) = remove_checked(tap) {
+        tracing::warn!(tap, %error, "egress cleanup incomplete");
+    }
+}
+
+/// Remove a room's egress state and report any residual cleanup failure.
+///
+/// Snapshot publication uses this checked form because a frozen slot cannot be
+/// advertised while its old base still owns a host firewall path.
+#[cfg(unix)]
+pub fn remove_checked(tap: &str) -> Result<(), String> {
     let Some(chain) = chain_for_tap(tap) else {
-        return;
+        return Ok(());
     };
-    while iptables_ok(&input_drop_rule("-C", tap)) {
-        if run_iptables(&input_drop_rule("-D", tap)).is_err() {
-            break;
-        }
+    while iptables_exists(&input_drop_rule("-C", tap))? {
+        run_iptables(&input_drop_rule("-D", tap))?;
     }
     // Delete the jump while present — a stale install could have left more than
     // one; the bounded loop clears every copy.
-    while iptables_ok(&jump_args("-C", tap, &chain)) {
-        if run_iptables(&jump_args("-D", tap, &chain)).is_err() {
-            break;
-        }
+    while iptables_exists(&jump_args("-C", tap, &chain))? {
+        run_iptables(&jump_args("-D", tap, &chain))?;
     }
-    let _ = run_iptables(&["-F".to_owned(), chain.clone()]);
-    let _ = run_iptables(&["-X".to_owned(), chain]);
+    if iptables_exists(&["-S".to_owned(), chain.clone()])? {
+        run_iptables(&["-F".to_owned(), chain.clone()])?;
+        run_iptables(&["-X".to_owned(), chain])?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 pub const fn remove(_tap: &str) {}
+
+#[cfg(not(unix))]
+pub const fn remove_checked(_tap: &str) -> Result<(), String> {
+    Ok(())
+}
 
 /// The `iptables <op>` argument list for the tap-keyed jump — `-C` to test its
 /// presence, `-D` to delete it.
@@ -551,13 +566,33 @@ fn run_iptables(args: &[String]) -> Result<(), String> {
     ))
 }
 
-/// True when `iptables <args>` exits zero (used for the `-C` existence probe).
+/// Checked existence probe: absence is false, inability to inspect is an error.
 #[cfg(unix)]
-fn iptables_ok(args: &[String]) -> bool {
-    std::process::Command::new("iptables")
+fn iptables_exists(args: &[String]) -> Result<bool, String> {
+    let output = std::process::Command::new("iptables")
         .args(args)
         .output()
-        .is_ok_and(|o| o.status.success())
+        .map_err(|error| format!("iptables {}: {error}", args.join(" ")))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if iptables_rule_is_absent(&stderr) {
+        return Ok(false);
+    }
+    Err(format!(
+        "iptables {} probe failed: {}",
+        args.join(" "),
+        stderr.trim()
+    ))
+}
+
+#[cfg(any(unix, test))]
+fn iptables_rule_is_absent(stderr: &str) -> bool {
+    stderr.contains("Bad rule")
+        || stderr.contains("No chain/target/match")
+        || stderr.contains("No rule exists at that position")
+        || (stderr.contains("rule in chain") && stderr.contains("not found"))
 }
 
 #[cfg(test)]
@@ -570,8 +605,9 @@ mod tests {
     )]
 
     use super::{
-        chain_for_tap, input_drop_insert_rule, input_drop_rule, insert_position, jump_rule,
-        out_iface, parse, resolve, room_egress_enforced, subchain_rules, Dest, Plan, Policy,
+        chain_for_tap, input_drop_insert_rule, input_drop_rule, insert_position,
+        iptables_rule_is_absent, jump_rule, out_iface, parse, resolve, room_egress_enforced,
+        subchain_rules, Dest, Plan, Policy,
     };
 
     /// A correctly-wired `ROOMS_FWD` dump — the substrate layout plus a
@@ -604,6 +640,26 @@ mod tests {
         assert_eq!(
             input_drop_rule("-D", "tap-fc7"),
             ["-D", "INPUT", "-i", "tap-fc7", "-j", "DROP"]
+        );
+    }
+
+    #[test]
+    fn missing_rule_probe_accepts_legacy_and_nft_wording() {
+        assert!(iptables_rule_is_absent(
+            "iptables: Bad rule (does a matching rule exist in that chain?)."
+        ));
+        assert!(iptables_rule_is_absent(
+            "iptables: No chain/target/match by that name."
+        ));
+        assert!(iptables_rule_is_absent(
+            "iptables-nft: No rule exists at that position."
+        ));
+        assert!(iptables_rule_is_absent(
+            "iptables v1.8.10 (nf_tables): rule in chain INPUT not found"
+        ));
+        assert!(
+            !iptables_rule_is_absent("iptables: Permission denied (you must be root)"),
+            "inspection failures must remain errors"
         );
     }
 

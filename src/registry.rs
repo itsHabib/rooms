@@ -18,6 +18,7 @@ use crate::error::RegistryError;
 use crate::firecracker::{self, KillSignalOutcome};
 use crate::room::{self, Liveness, RoomMeta};
 use crate::slot;
+use crate::snapshot_exec::{self, PendingSnapshot};
 
 /// Schema version for `ls --json` stdout (mirrors `doctor`/`diff`).
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -248,7 +249,8 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
     // still backed by a room dir is left for the reap loop below to free through
     // the room's own teardown. Skip the sweep on a dry-run and on a targeted
     // (`--only`) gc — both are scoped to a single room, not a pool-wide sweep.
-    if !opts.dry_run && opts.only.is_none() {
+    let pending = snapshot_exec::pending_all(config).map_err(|error| snapshot_error(&error))?;
+    if !opts.dry_run && opts.only.is_none() && pending.is_empty() {
         reconcile_leaked_slots(config);
     }
     let mut rooms = list_rooms(config)?;
@@ -267,6 +269,23 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
             }
         }
     }
+    for intent in pending {
+        let in_scope = opts
+            .only
+            .as_ref()
+            .is_none_or(|only| only == &intent.base_room);
+        if in_scope && !rooms.iter().any(|entry| entry.id == intent.base_room) {
+            outcomes.push(GcOutcome {
+                id: intent.base_room,
+                state: RoomState::Unknown,
+                reaped: false,
+                reason: format!(
+                    "protected pending snapshot {}; run `rooms snapshot-recover {}`",
+                    intent.snapshot_id, intent.snapshot_id
+                ),
+            });
+        }
+    }
     Ok(GcReport {
         schema_version: REGISTRY_SCHEMA_VERSION,
         dry_run: opts.dry_run,
@@ -282,6 +301,32 @@ fn reap_entry(
     entry: &RoomEntry,
     dry_run: bool,
 ) -> Result<GcOutcome, RegistryError> {
+    // Take the base's snapshot lock before reading the intent index, and hold it
+    // across the teardown. `snapshot create` claims this lock before it plans,
+    // and planning hashes the whole rootfs long before the intent reaches disk —
+    // so `pending_snapshot` alone reports "nothing pending" for that entire
+    // window and gc would reap the base out from under a live transaction,
+    // leaving an intent that names a room whose slot claim is already gone.
+    // `kill` takes the same guard for the same reason.
+    let Some(_snapshot_lock) = snapshot_exec::try_acquire_lock(config, &entry.id)
+        .map_err(|error| snapshot_error(&error))?
+    else {
+        return Ok(outcome(
+            entry,
+            false,
+            "snapshot transaction is starting or active; refusing concurrent reap",
+        ));
+    };
+    if let Some(pending) = pending_snapshot(config, &entry.id)? {
+        return Ok(outcome(
+            entry,
+            false,
+            &format!(
+                "protected pending snapshot {}; run `rooms snapshot-recover {}`",
+                pending.snapshot_id, pending.snapshot_id
+            ),
+        ));
+    }
     if !entry.state.is_reapable() {
         return Ok(skip_outcome(entry));
     }
@@ -469,7 +514,35 @@ pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError>
     config
         .resolved_state_base()
         .ok_or(RegistryError::HomeUnset)?;
-    let outcomes = match find_entry(config, id) {
+    let Some(_snapshot_lock) =
+        snapshot_exec::try_acquire_lock(config, id).map_err(|error| snapshot_error(&error))?
+    else {
+        let entry = find_entry(config, id).unwrap_or_else(|| unknown_entry(id));
+        return Ok(KillReport {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            outcomes: vec![kill_outcome(
+                &entry,
+                KillDisposition::Refused,
+                "snapshot transaction is starting or active; refusing concurrent kill",
+            )],
+        });
+    };
+    let entry = find_entry(config, id);
+    if let Some(pending) = pending_snapshot(config, id)? {
+        let entry = entry.unwrap_or_else(|| unknown_entry(id));
+        return Ok(KillReport {
+            schema_version: REGISTRY_SCHEMA_VERSION,
+            outcomes: vec![kill_outcome(
+                &entry,
+                KillDisposition::Refused,
+                &format!(
+                    "snapshot transaction {} is pending; run `rooms snapshot-recover {}`",
+                    pending.snapshot_id, pending.snapshot_id
+                ),
+            )],
+        });
+    }
+    let outcomes = match entry {
         Some(entry) => vec![kill_entry(config, &entry)?],
         None => Vec::new(),
     };
@@ -477,6 +550,19 @@ pub fn kill(config: &RoomsConfig, id: &str) -> Result<KillReport, RegistryError>
         schema_version: REGISTRY_SCHEMA_VERSION,
         outcomes,
     })
+}
+
+fn unknown_entry(id: &str) -> RoomEntry {
+    RoomEntry {
+        id: id.to_owned(),
+        state: RoomState::Unknown,
+        label: None,
+        pid: None,
+        pid_starttime: None,
+        started_at: None,
+        keep: false,
+        slot: None,
+    }
 }
 
 /// Build the entry for a single room id, or `None` if no such room dir exists.
@@ -507,6 +593,19 @@ fn kill_entry(config: &RoomsConfig, entry: &RoomEntry) -> Result<KillOutcome, Re
         )),
         RoomState::Running | RoomState::Kept => kill_live(config, entry),
     }
+}
+
+fn pending_snapshot(
+    config: &RoomsConfig,
+    room_id: &str,
+) -> Result<Option<PendingSnapshot>, RegistryError> {
+    snapshot_exec::pending_for_base(config, room_id).map_err(|error| snapshot_error(&error))
+}
+
+fn snapshot_error(error: &anyhow::Error) -> RegistryError {
+    RegistryError::Io(std::io::Error::other(format!(
+        "snapshot intent index: {error}"
+    )))
 }
 
 /// Terminate a confirmed-alive room (identity-guarded), then reap it.
@@ -599,6 +698,7 @@ mod tests {
     use crate::config::RoomsConfig;
     use crate::error::RegistryError;
     use crate::room::{self, Liveness, RoomMeta};
+    use crate::snapshot_exec;
     use chrono::Utc;
     use std::path::{Path, PathBuf};
 
@@ -1016,6 +1116,37 @@ mod tests {
         let report = kill(&config, VALID_ID).unwrap();
         assert!(report.outcomes.is_empty());
         assert_eq!(report.exit_code(), 0);
+    }
+
+    #[test]
+    fn gc_refuses_to_reap_a_base_whose_snapshot_is_still_planning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        // A pid that cannot exist → Dead → OrphanedDead → reapable, so nothing
+        // but the snapshot lock stands between this room and a reap.
+        let id = make_room(&config, Some(4_194_305u32), false, true);
+        // Stand in for `snapshot create` between acquiring the lock and writing
+        // its intent: the lock is held, the intent index is still empty. This is
+        // the window in which the rootfs hash runs, and it is measured in
+        // seconds, not microseconds.
+        let _planning = snapshot_exec::try_acquire_lock(&config, &id)
+            .unwrap()
+            .expect("the base lock is free before the stand-in transaction takes it");
+
+        let report = gc(&config, &GcOptions::default()).unwrap();
+
+        assert!(
+            report.outcomes.iter().all(|o| !o.reaped),
+            "gc reaped a base while a snapshot transaction held its lock"
+        );
+        assert!(
+            config.room_dir(&id).unwrap().exists(),
+            "room dir must survive a reap refused for a planning snapshot"
+        );
+        assert!(
+            config.jail_instance_dir(&id).unwrap().exists(),
+            "jail dir must survive a reap refused for a planning snapshot"
+        );
     }
 
     #[test]

@@ -17,16 +17,36 @@ pub async fn api_put(
     body: &serde_json::Value,
     config: &RoomsConfig,
 ) -> Result<(), FirecrackerError> {
+    api_request(socket, "PUT", endpoint, body, config).await
+}
+
+/// Issue a PATCH to the Firecracker API socket with a configurable timeout.
+pub async fn api_patch(
+    socket: &Path,
+    endpoint: &str,
+    body: &serde_json::Value,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    api_request(socket, "PATCH", endpoint, body, config).await
+}
+
+async fn api_request(
+    socket: &Path,
+    method: &str,
+    endpoint: &str,
+    body: &serde_json::Value,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
     let timeout = config.timeout_for_endpoint(endpoint);
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     let body_str = serde_json::to_string(body).map_err(TransportError::Serialize)?;
 
-    debug!(endpoint, body = %body_str, timeout_ms, "PUT");
+    debug!(method, endpoint, body = %body_str, timeout_ms, "Firecracker API");
     let output = Command::new("curl")
         .arg("--unix-socket")
         .arg(socket)
         .arg("-X")
-        .arg("PUT")
+        .arg(method)
         .arg(format!("http://localhost{endpoint}"))
         .arg("-H")
         .arg("Content-Type: application/json")
@@ -53,6 +73,7 @@ pub async fn api_put(
         let stdout = String::from_utf8_lossy(&output.stdout);
         let curl_exit_code = output.status.code().unwrap_or(-1);
         return Err(FirecrackerError::ApiCallFailed {
+            method: method.to_owned(),
             endpoint: endpoint.to_owned(),
             curl_exit_code,
             body: format!("stderr={stderr}, stdout={stdout}"),

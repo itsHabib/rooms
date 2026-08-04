@@ -13,7 +13,7 @@ use rooms::{
     config::RoomsConfig,
     doctor, egress,
     error::{RoomsError, SlotError},
-    firecracker, registry, room, rootfs, runner, slot, vsock, witness,
+    firecracker, registry, room, rootfs, runner, slot, snapshot_exec, vsock, witness,
 };
 use tracing::{info, warn};
 
@@ -165,6 +165,25 @@ enum Command {
         max_pool: Option<u8>,
         /// Emit a machine-readable record (`room_id`, `slot`, `provenance`) on
         /// stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Freeze a sealed neutral base into a recoverable Full snapshot.
+    Snapshot {
+        /// Running sealed-neutral base room id.
+        id: String,
+        /// Completed artifact directory (defaults under the rooms state base).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Emit a machine-readable completion record.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume an indexed snapshot transaction, or list all pending transactions.
+    SnapshotRecover {
+        /// Snapshot id to resume. Omit to list pending transactions.
+        id: Option<String>,
+        /// Emit a machine-readable report.
         #[arg(long)]
         json: bool,
     },
@@ -602,6 +621,12 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             )
             .await
         }
+        Command::Snapshot { id, out, json } => {
+            snapshot_cmd(&id, out.as_deref(), json, &config).await
+        }
+        Command::SnapshotRecover { id, json } => {
+            snapshot_recover_cmd(id.as_deref(), json, &config).await
+        }
         Command::Collect { from } => collect_artifacts(from).await,
         Command::Doctor { image, json } => run_doctor_cmd(image.as_deref(), json, &config),
         Command::Diff { from, json } => diff_changeset(&from, json).await,
@@ -609,6 +634,91 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Gc { dry_run, id } => gc_cmd(dry_run, id, &config),
         Command::Kill { id, json } => kill_cmd(&id, json, &config),
     }
+}
+
+async fn snapshot_cmd(
+    id: &str,
+    out: Option<&Path>,
+    json: bool,
+    config: &RoomsConfig,
+) -> Result<u8, RoomsError> {
+    let result = snapshot_exec::create(config, id, out)
+        .await
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    render_snapshot_result(&result, json)?;
+    Ok(0)
+}
+
+async fn snapshot_recover_cmd(
+    id: Option<&str>,
+    json: bool,
+    config: &RoomsConfig,
+) -> Result<u8, RoomsError> {
+    let report = snapshot_exec::recover(config, id)
+        .await
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    if json {
+        let line = serde_json::to_string_pretty(&report)
+            .map_err(|error| RoomsError::Internal(error.to_string()))?;
+        #[allow(
+            clippy::print_stdout,
+            reason = "snapshot-recover --json stdout is the documented machine contract"
+        )]
+        {
+            println!("{line}");
+        }
+        return Ok(0);
+    }
+    if let Some(completed) = &report.completed {
+        render_snapshot_result(completed, false)?;
+        return Ok(0);
+    }
+    #[allow(
+        clippy::print_stdout,
+        reason = "snapshot-recover human pending roster is the command output"
+    )]
+    {
+        for pending in report.pending {
+            println!(
+                "{}  base={}  boundary={}  {}",
+                pending.snapshot_id, pending.base_room, pending.boundary, pending.next_action
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn render_snapshot_result(
+    result: &snapshot_exec::SnapshotResult,
+    json: bool,
+) -> Result<(), RoomsError> {
+    if json {
+        let line = serde_json::to_string(result)
+            .map_err(|error| RoomsError::Internal(error.to_string()))?;
+        #[allow(
+            clippy::print_stdout,
+            reason = "snapshot --json stdout is the documented machine contract"
+        )]
+        {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    #[allow(
+        clippy::print_stdout,
+        reason = "snapshot human completion summary is the command output"
+    )]
+    {
+        println!(
+            "snapshot {} created at {} from base {} on slot {} (provenance={:?})",
+            result.snapshot_id,
+            result.directory.display(),
+            result.base_room,
+            result.slot,
+            result.provenance
+        );
+    }
+    Ok(())
 }
 
 fn run_doctor_cmd(
@@ -2706,6 +2816,31 @@ mod tests {
             Cli::try_parse_from(["rooms", "kill"]).is_err(),
             "kill requires an id"
         );
+    }
+
+    #[test]
+    fn snapshot_verbs_parse_output_json_and_optional_recovery_id() {
+        let id = "01abcdefghijklmnopqrstuvwx";
+        let create =
+            Cli::try_parse_from(["rooms", "snapshot", id, "--out", "/tmp/snapshot", "--json"])
+                .expect("snapshot parses");
+        match create.command {
+            Command::Snapshot { id: got, out, json } => {
+                assert_eq!(got, id);
+                assert_eq!(out, Some(PathBuf::from("/tmp/snapshot")));
+                assert!(json);
+            }
+            other => panic!("expected Snapshot, got {other:?}"),
+        }
+        let list = Cli::try_parse_from(["rooms", "snapshot-recover", "--json"])
+            .expect("recovery list parses");
+        match list.command {
+            Command::SnapshotRecover { id, json } => {
+                assert!(id.is_none());
+                assert!(json);
+            }
+            other => panic!("expected SnapshotRecover, got {other:?}"),
+        }
     }
 
     #[test]
