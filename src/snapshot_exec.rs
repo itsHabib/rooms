@@ -65,6 +65,12 @@ struct SnapshotIntent {
     jail_vmstate: PathBuf,
     jail_mem: PathBuf,
     boundary: Boundary,
+    /// Recorded before the abort releases the slot claim. A crash between the
+    /// release and the index removal leaves a transaction whose exact claim can
+    /// never be re-proved; this marks the terminal path as already entered so
+    /// recovery can finish it instead of refusing forever.
+    #[serde(default)]
+    aborted: bool,
 }
 
 /// Completed snapshot command output.
@@ -111,6 +117,17 @@ pub async fn create(
         .find(|intent| intent.base_room_id == base_id)
     {
         validate_resume_output(&intent, explicit_out)?;
+        // Re-driving here would re-issue the Firecracker create against a VM
+        // that already wrote its artifacts, or resume a transaction whose base
+        // is already reaped. `recover` owns both terminal paths.
+        if intent.aborted || (intent.boundary == Boundary::Paused && any_artifact_nonempty(&intent))
+        {
+            anyhow::bail!(
+                "snapshot transaction {} for base {base_id} needs recovery; run `rooms snapshot-recover {}`",
+                intent.snapshot_id,
+                intent.snapshot_id
+            );
+        }
         return drive(config, intent).await;
     }
     let room_dir = config
@@ -227,6 +244,7 @@ fn build_intent(
         jail_vmstate: jail_root.join(snapshot::SNAPSHOT_VMSTATE_FILE),
         jail_mem: jail_root.join(snapshot::SNAPSHOT_MEM_FILE),
         boundary: Boundary::Pending,
+        aborted: false,
     })
 }
 
@@ -596,12 +614,35 @@ fn prepare_output(path: &Path) -> anyhow::Result<()> {
         }
         return set_dir_private(path);
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("snapshot output has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    std::fs::create_dir(path)?;
-    set_dir_private(path)
+    create_output_tree(path)
+}
+
+/// Create every missing ancestor of the output directory, then the directory
+/// itself, syncing each new entry into its parent. The intent is published
+/// durably straight after this, so an unsynced tree could be lost by a crash
+/// that keeps the intent — leaving recovery pointing at an absent output.
+fn create_output_tree(path: &Path) -> anyhow::Result<()> {
+    let mut missing = Vec::new();
+    let mut current = path.to_path_buf();
+    while !current.exists() {
+        missing.push(current.clone());
+        current = current
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("snapshot output has no existing ancestor"))?
+            .to_path_buf();
+    }
+    for dir in missing.iter().rev() {
+        std::fs::create_dir(dir)?;
+    }
+    set_dir_private(path)?;
+    for dir in &missing {
+        let parent = dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("snapshot output ancestor has no parent"))?;
+        sync_dir(parent)?;
+    }
+    sync_dir(path)?;
+    Ok(())
 }
 
 fn create_intent_exclusive(config: &RoomsConfig, intent: &SnapshotIntent) -> anyhow::Result<()> {
@@ -854,7 +895,11 @@ fn abort_dead_partial(config: &RoomsConfig, intent: &SnapshotIntent) -> anyhow::
         .meta
         .slot_index
         .ok_or_else(|| anyhow::anyhow!("snapshot plan lost its slot"))?;
-    if !slot::claimed_by(&state, index, &intent.base_room_id)? {
+    // A recorded abort has already ordered the release of this exact claim, so
+    // the claim guard can never be re-satisfied. Refusing here would strand the
+    // intent forever, and a stranded intent also holds off GC's pool-wide
+    // leaked-claim sweep. Resume the terminal path instead.
+    if !intent.aborted && !slot::claimed_by(&state, index, &intent.base_room_id)? {
         anyhow::bail!("refusing abort: slot {index} no longer holds the exact base claim");
     }
     remove_partial_outputs(intent)?;
@@ -874,12 +919,29 @@ fn abort_reap(config: &RoomsConfig, intent: &SnapshotIntent, index: u8) -> anyho
         .ok_or_else(|| anyhow::anyhow!("cannot resolve socket"))?;
     let tap = format!("tap-fc{index}");
     firecracker::reap_reserved_base(&room_dir, &jail_dir, &socket, &tap, config)?;
+    let resumed = intent.aborted;
+    record_abort(config, intent)?;
     match slot::free(&state_base(config)?, index, &intent.base_room_id)? {
         Freed::Removed | Freed::AlreadyFree => Ok(()),
+        // The release is exact-claim guarded, so it never touches a new owner.
+        // On a resumed abort a reassigned slot means an earlier attempt already
+        // released this claim; clearing the index is what still has to happen.
+        Freed::AlreadyReassigned if resumed => Ok(()),
         Freed::AlreadyReassigned => {
             anyhow::bail!("slot {index} changed owner during partial-snapshot abort")
         }
     }
+}
+
+/// Persist the abort marker before the claim is released, so a crash inside the
+/// release leaves a transaction recovery can still finish.
+fn record_abort(config: &RoomsConfig, intent: &SnapshotIntent) -> anyhow::Result<()> {
+    if intent.aborted {
+        return Ok(());
+    }
+    let mut aborted = intent.clone();
+    aborted.aborted = true;
+    write_intent_atomic(config, &aborted)
 }
 
 fn remove_partial_outputs(intent: &SnapshotIntent) -> anyhow::Result<()> {
@@ -1063,9 +1125,10 @@ mod tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing, reason = "test module")]
 
     use super::{
-        acquire_lock, canonical_candidate, create_intent_exclusive, op_request, overlaps,
-        pending_for_base, pending_summary, pinned_process_identity, resolve_output, sha256_file,
-        snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
+        acquire_lock, canonical_candidate, create_intent_exclusive, create_output_tree, op_request,
+        overlaps, pending_for_base, pending_summary, pinned_process_identity, read_intents,
+        record_abort, resolve_output, sha256_file, snapshot_ops, Boundary, SnapshotIntent,
+        INTENT_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::room::{Provenance, RoomMeta, Slot};
@@ -1114,6 +1177,7 @@ mod tests {
             jail_vmstate: jail.join(crate::snapshot::SNAPSHOT_VMSTATE_FILE),
             jail_mem: jail.join(crate::snapshot::SNAPSHOT_MEM_FILE),
             boundary: Boundary::Pending,
+            aborted: false,
         }
     }
 
@@ -1185,6 +1249,72 @@ mod tests {
             serde_json::json!("targets_staged")
         );
         assert_eq!(pending_summary(&intent).boundary, "targets_staged");
+    }
+
+    #[test]
+    fn the_abort_marker_is_durable_before_the_claim_is_released() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let intent = intent(&config);
+        create_intent_exclusive(&config, &intent).expect("index");
+        record_abort(&config, &intent).expect("record abort");
+        let stored = read_intents(&config).expect("read");
+        assert!(
+            stored[0].aborted,
+            "the abort must be durable before slot::free, or a crash inside the \
+             release strands an intent whose exact claim can never be re-proved"
+        );
+    }
+
+    #[test]
+    fn an_intent_written_before_the_abort_marker_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let intent = intent(&config);
+        create_intent_exclusive(&config, &intent).expect("index");
+        let path = super::intent_path(&config, BASE_ID).expect("path");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("parse");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("aborted")
+            .expect("field present");
+        std::fs::write(&path, serde_json::to_vec(&value).expect("serialize")).expect("write");
+        let stored = read_intents(&config).expect("read");
+        assert!(!stored[0].aborted, "a pre-existing intent must still load");
+    }
+
+    #[test]
+    fn the_output_tree_is_created_before_the_intent_is_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("nested").join("deeper").join(SNAPSHOT_ID);
+        create_output_tree(&out).expect("create tree");
+        assert!(out.is_dir(), "the output directory must exist");
+        assert!(
+            out.parent().expect("parent").is_dir(),
+            "missing ancestors must be created, not assumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_redirects_an_ambiguous_paused_transaction_to_recover() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let mut intent = intent(&config);
+        intent.boundary = Boundary::Paused;
+        create_intent_exclusive(&config, &intent).expect("index");
+        let jail = intent.jail_vmstate.parent().expect("jail parent");
+        std::fs::create_dir_all(jail).expect("create jail");
+        std::fs::write(&intent.jail_vmstate, b"vmstate").expect("write artifact");
+        let error = super::create(&config, BASE_ID, None)
+            .await
+            .expect_err("an ambiguous paused transaction must not be re-driven");
+        assert!(
+            error.to_string().contains("snapshot-recover"),
+            "re-issuing the create against a VM that already wrote its artifacts \
+             fails confusingly; name the recovery verb instead: {error}"
+        );
     }
 
     #[test]
