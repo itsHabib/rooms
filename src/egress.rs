@@ -593,6 +593,12 @@ fn iptables_rule_is_absent(stderr: &str) -> bool {
         || stderr.contains("No chain/target/match")
         || stderr.contains("No rule exists at that position")
         || (stderr.contains("rule in chain") && stderr.contains("not found"))
+        // A `-C` probe for a jump to a per-room subchain that was never
+        // installed (an Observe-plan room — no egress enforcement) reports the
+        // missing target chain, not a missing rule. Treat it as absent: a jump
+        // to a non-existent chain trivially does not exist, and the cleanup
+        // goal (no residual rule) is already met.
+        || (stderr.contains("Chain") && stderr.contains("does not exist"))
 }
 
 #[cfg(test)]
@@ -656,6 +662,13 @@ mod tests {
         ));
         assert!(iptables_rule_is_absent(
             "iptables v1.8.10 (nf_tables): rule in chain INPUT not found"
+        ));
+        // A `-C` probe for a jump whose target subchain was never installed
+        // (an Observe-plan / non-egress restore) reports the missing chain, not
+        // a missing rule. That must read as absent — otherwise checked teardown
+        // errors and a restore lease is never returned.
+        assert!(iptables_rule_is_absent(
+            "iptables v1.8.10 (nf_tables): Chain 'ROOMS_EG_1' does not exist"
         ));
         assert!(
             !iptables_rule_is_absent("iptables: Permission denied (you must be root)"),

@@ -17,6 +17,14 @@ fail() {
     exit 1
 }
 
+# Stream a progress step to the host over the protocol stream (stdout). A
+# snapshot-resumed guest's serial console is detached, so this is the host's
+# only visibility into hygiene; the host logs each STEP and gates on the
+# terminal ACK.
+step() {
+    printf 'STEP %s\n' "$*"
+}
+
 read_frame() {
     expected="$1"
     destination="$2"
@@ -27,7 +35,11 @@ read_frame() {
     esac
     : >"$destination"
     if [ "$length" -ne 0 ]; then
-        head -c "$length" >"$destination"
+        # dd bs=1 count=N reads EXACTLY N bytes — one read(2) per byte, so it
+        # never consumes into the next frame's header. `head -c N` on a socket
+        # over-reads (a single large read() grabs the following frame bytes and
+        # discards them), which silently desyncs the stream.
+        dd bs=1 count="$length" >"$destination" 2>/dev/null
     fi
     actual="$(wc -c <"$destination")"
     [ "$actual" -eq "$length" ] || fail "short $expected frame: wanted $length bytes, got $actual"
@@ -49,6 +61,22 @@ fresh_ssh_host_keys() {
     ssh-keygen -A >/dev/null 2>&1 || fail "ssh-keygen -A failed"
 }
 
+# Step the clock from an epoch, tolerating busybox/coreutils date differences.
+step_clock() {
+    epoch="$1"
+    date -u -s "@$epoch" >/dev/null 2>&1 && return 0
+    stamp="$(date -u -d "@$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" || return 1
+    date -u -s "$stamp" >/dev/null 2>&1
+}
+
+# Start sshd directly rather than through openrc: a snapshot-resumed openrc
+# supervisor can stall, and the daemon is all we need for the SSH re-probe.
+start_sshd() {
+    /usr/sbin/sshd 2>/dev/null && return 0
+    rc-service sshd restart >/dev/null 2>&1 && return 0
+    rc-service sshd start >/dev/null 2>&1
+}
+
 session() {
     printf 'ROOMS-RESUME/1\n'
     IFS=' ' read -r kind room_id || fail "missing IDENTITY line"
@@ -59,7 +87,10 @@ session() {
         ''|*[!0-9]*) fail "invalid CLOCK epoch" ;;
     esac
 
-    install -d -m 0700 "$RESUME_DIR"
+    # 0755 so an unprivileged workload can read its own room identity below;
+    # the transient entropy/secrets frames are removed right after use, and
+    # real secrets live in the 0700 SECRETS_DIR.
+    install -d -m 0755 "$RESUME_DIR"
     read_frame ENTROPY "$RESUME_DIR/.entropy"
     read_frame SECRETS "$RESUME_DIR/.secrets"
     IFS=' ' read -r end end_length || fail "missing END frame"
@@ -68,25 +99,34 @@ session() {
     # Reseed first: everything after (host keys) must draw post-divergence.
     cat "$RESUME_DIR/.entropy" >/dev/urandom || fail "cannot reseed /dev/urandom"
     rm -f "$RESUME_DIR/.entropy"
-    date -u -s "@$epoch" >/dev/null 2>&1 || fail "cannot step clock"
+    step reseeded
+    step_clock "$epoch" || fail "cannot step clock"
+    step clock
     printf '%s\n' "$room_id" >"$RESUME_DIR/identity"
+    chmod 0644 "$RESUME_DIR/identity"
     stage_secrets "$RESUME_DIR/.secrets"
+    step identity
     fresh_ssh_host_keys
-    rc-service sshd restart >/dev/null 2>&1 \
-        || rc-service sshd start >/dev/null 2>&1 \
-        || fail "cannot start sshd"
+    step hostkeys
+    start_sshd || fail "cannot start sshd"
+    step sshd
 
     printf 'ACK resume\n'
 }
 
 loop() {
-    while :; do
-        # -T bounds a wedged session; a refused connect (no listener — the
-        # ordinary base case) exits socat immediately and the loop idles.
-        socat -T 60 VSOCK-CONNECT:2:5003 EXEC:'/sbin/rooms-resume-agent session' \
-            >/dev/null 2>&1 || true
-        sleep 2
-    done
+    # A SINGLE long-lived socat that retries the connect internally
+    # (retry/interval), rather than a shell loop respawning socat+sleep every
+    # iteration. That matters for the base: the quiesce gate refuses any
+    # non-baseline process to survive, and a respawning loop churns fresh
+    # socat/sleep pids the gate would flag. This one process is captured in the
+    # baseline and forks its EXEC child only on a successful connect — which
+    # only happens post-restore, after quiesce. `-T 120` bounds a wedged
+    # session; `forever` + `interval=2` polls until the host listener appears.
+    exec socat -T 120 \
+        VSOCK-CONNECT:2:5003,forever,interval=2,retry=1000000 \
+        EXEC:'/sbin/rooms-resume-agent session' \
+        >/dev/null 2>&1
 }
 
 case "${1:-}" in

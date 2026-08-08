@@ -440,11 +440,13 @@ async fn serve_resume_inner(
         .map_err(|e| format!("accept resume agent: {e}"))?;
     drop(listener);
     std::fs::remove_file(listen_path).map_err(|e| format!("retire resume endpoint: {e}"))?;
+    tracing::debug!("resume: agent connected");
 
     let preface = read_bounded_line(&mut stream).await?;
     if preface != "ROOMS-RESUME/1" {
         return Err(format!("resume preface malformed: {preface:?}"));
     }
+    tracing::debug!("resume: preface ok, sending nudge frames");
     stream
         .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
         .await
@@ -456,11 +458,24 @@ async fn serve_resume_inner(
     write_typed_frame(&mut stream, "ENTROPY", &payload.entropy).await?;
     write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0).await?;
     write_typed_frame(&mut stream, "END", &[]).await?;
-    let ack = read_bounded_line(&mut stream).await?;
-    if ack != "ACK resume" {
-        return Err(format!("resume ack malformed: {ack:?}"));
+    tracing::debug!("resume: frames sent, awaiting hygiene steps + ack");
+    // The guest streams `STEP <name>` progress lines as it applies each
+    // hygiene action, then the terminal `ACK resume`. Logging the steps gives
+    // host-side visibility a snapshot-resumed guest's detached serial can't.
+    // Bounded so a chatty/looping peer can't stream forever.
+    for _ in 0..64 {
+        let line = read_bounded_line(&mut stream).await?;
+        if line == "ACK resume" {
+            tracing::debug!("resume: ack received");
+            return Ok(());
+        }
+        if let Some(step) = line.strip_prefix("STEP ") {
+            tracing::debug!(step, "resume: guest hygiene step");
+            continue;
+        }
+        return Err(format!("resume protocol: unexpected line {line:?}"));
     }
-    Ok(())
+    Err("resume protocol: too many lines without an ack".to_owned())
 }
 
 /// Bind `listen_path` and serve `payload` to the first connection ever made.
@@ -602,8 +617,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
-        listener_path, listener_path_for, serve_one_shot, serve_provisioning, ProvisioningPayload,
-        SecretsPayload, PROVISION_PORT, QUIESCED_PORT, SECRETS_PORT,
+        listener_path, listener_path_for, serve_one_shot, serve_provisioning, serve_resume,
+        ProvisioningPayload, ResumePayload, SecretsPayload, PROVISION_PORT, QUIESCED_PORT,
+        RESUME_PORT, SECRETS_PORT,
     };
 
     fn payload() -> SecretsPayload {
@@ -649,6 +665,74 @@ mod tests {
         let mut bytes = vec![0_u8; len.parse().unwrap()];
         guest.read_exact(&mut bytes).await.unwrap();
         (kind.to_owned(), bytes)
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_streams_frames_then_gates_on_the_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload {
+            room_id: "01resumeroomidresumeroomid".to_owned(),
+            epoch_secs: 1_700_000_000,
+            entropy: vec![7_u8; 64],
+            secrets: SecretsPayload::encode(&[("GH_TOKEN".to_owned(), "t-9".to_owned())]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        // The guest speaks first: preface, then reads identity/clock/frames.
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        assert_eq!(
+            read_line(&mut guest).await,
+            "IDENTITY 01resumeroomidresumeroomid"
+        );
+        assert_eq!(read_line(&mut guest).await, "CLOCK 1700000000");
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("ENTROPY".to_owned(), vec![7_u8; 64])
+        );
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("SECRETS".to_owned(), b"GH_TOKEN=t-9\n".to_vec())
+        );
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("END".to_owned(), Vec::new())
+        );
+        // Progress steps are logged and tolerated; only ACK resume completes it.
+        guest
+            .write_all(b"STEP reseeded\nSTEP sshd\nACK resume\n")
+            .await
+            .unwrap();
+        drop(guest);
+
+        delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect("a well-formed hygiene handshake acks");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_without_ack_is_a_delivery_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload {
+            room_id: "01resumeroomidresumeroomid".to_owned(),
+            epoch_secs: 1,
+            entropy: vec![0_u8; 64],
+            secrets: SecretsPayload::encode(&[]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        // Read the nudge but never ack — hygiene "failed" in-guest.
+        let _ = read_line(&mut guest).await;
+        let err = delivery
+            .await_acked(Duration::from_millis(300))
+            .await
+            .expect_err("no ack must fail the delivery");
+        assert!(err.contains("no resume ack"), "got: {err}");
+        drop(guest);
     }
 
     #[test]

@@ -1057,7 +1057,20 @@ pub(crate) fn firecracker_version(config: &RoomsConfig) -> anyhow::Result<String
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    // First line only: newer firecrackers append a timestamped exit-log line
+    // to --version stdout, which would poison the pinned compat key with a
+    // value that never matches (observed on v1.15.0).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    if version.is_empty() {
+        anyhow::bail!("firecracker --version produced no output");
+    }
+    Ok(version)
 }
 
 pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
