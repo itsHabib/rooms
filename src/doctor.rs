@@ -238,8 +238,24 @@ fn check_kvm() -> CheckResult {
     }
 }
 
+/// The effective Firecracker floor for this host. On aarch64 the jailer needs
+/// v1.15 — older jailers panic when the outer hypervisor omits cpu cache
+/// geometry from sysfs (the reason this port bumped the pin) — so a host that
+/// installed, say, v1.13 would otherwise pass `doctor` and only fail at boot
+/// with an opaque jailer panic. Take the stricter of the config floor and the
+/// arch floor.
+fn effective_min_fc_version(config: &RoomsConfig) -> (u32, u32) {
+    let arch_floor = if HOST_ARCH == "aarch64" {
+        (1, 15)
+    } else {
+        (0, 0)
+    };
+    config.min_firecracker_version.max(arch_floor)
+}
+
 fn check_firecracker_version(config: &RoomsConfig) -> CheckResult {
     let name = "firecracker".to_owned();
+    let min = effective_min_fc_version(config);
     let output = Command::new(&config.firecracker_binary)
         .arg("--version")
         .output();
@@ -248,24 +264,17 @@ fn check_firecracker_version(config: &RoomsConfig) -> CheckResult {
         Ok(out) if out.status.success() => {
             let version_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
             match parse_firecracker_version(&version_str) {
-                Some((major, minor))
-                    if version_meets_min(major, minor, config.min_firecracker_version) =>
-                {
-                    CheckResult {
-                        name,
-                        ok: true,
-                        message: format!(
-                            "firecracker {major}.{minor} (>= {}.{})",
-                            config.min_firecracker_version.0, config.min_firecracker_version.1
-                        ),
-                    }
-                }
+                Some((major, minor)) if version_meets_min(major, minor, min) => CheckResult {
+                    name,
+                    ok: true,
+                    message: format!("firecracker {major}.{minor} (>= {}.{})", min.0, min.1),
+                },
                 Some((major, minor)) => CheckResult {
                     name,
                     ok: false,
                     message: format!(
                         "firecracker {major}.{minor} is below minimum {}.{}",
-                        config.min_firecracker_version.0, config.min_firecracker_version.1
+                        min.0, min.1
                     ),
                 },
                 None => CheckResult {
@@ -911,15 +920,23 @@ fn check_nested_virt() -> CheckResult {
     let name = "nested_virt".to_owned();
 
     // aarch64 has no kvm_intel/kvm_amd nested knob and kvm-ok is x86-only;
-    // KVM availability is itself the signal — the outer hypervisor either
-    // exposes virtualization to this VM or /dev/kvm does not exist.
+    // usable KVM is itself the signal — the outer hypervisor either exposes
+    // virtualization to this VM or it doesn't. Gate on r/w openability, not mere
+    // existence, so a permission-denied /dev/kvm can't report `kvm` ❌ and
+    // `nested_virt` ✅ in the same run.
     if HOST_ARCH == "aarch64" {
-        let present = Path::new("/dev/kvm").exists();
+        let usable = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .is_ok();
         return CheckResult {
             name,
-            ok: present,
-            message: if present {
-                "nested virtualization available (/dev/kvm present on aarch64)".to_owned()
+            ok: usable,
+            message: if usable {
+                "nested virtualization available (/dev/kvm r/w on aarch64)".to_owned()
+            } else if Path::new("/dev/kvm").exists() {
+                "/dev/kvm present but not r/w-accessible; see the kvm check".to_owned()
             } else {
                 "/dev/kvm absent; enable nested virtualization on the outer VM".to_owned()
             },
@@ -1194,6 +1211,26 @@ mod tests {
         assert!(version_meets_min(1, 7, (1, 7)));
         assert!(version_meets_min(2, 0, (1, 7)));
         assert!(!version_meets_min(1, 6, (1, 7)));
+    }
+
+    #[test]
+    fn aarch64_raises_the_firecracker_floor_to_1_15() {
+        // The config default floor is (1, 7); the effective floor never drops
+        // below it, and on aarch64 it rises to (1, 15) — where the jailer stops
+        // panicking on a hypervisor that omits cpu cache geometry.
+        let config = RoomsConfig::default();
+        let effective = super::effective_min_fc_version(&config);
+        if super::HOST_ARCH == "aarch64" {
+            assert_eq!(effective, (1, 15));
+        } else {
+            assert_eq!(effective, config.min_firecracker_version);
+        }
+        // A stricter config floor always wins over the arch floor.
+        let strict = RoomsConfig {
+            min_firecracker_version: (2, 0),
+            ..RoomsConfig::default()
+        };
+        assert_eq!(super::effective_min_fc_version(&strict), (2, 0));
     }
 
     #[test]

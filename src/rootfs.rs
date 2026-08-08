@@ -169,10 +169,64 @@ pub fn unmount_overlay(mount_point: &Path) {
 mod tests {
     #![allow(
         clippy::expect_used,
+        clippy::indexing_slicing,
         reason = "test helper: a missing shell is an immediate test failure"
     )]
 
-    use super::{baked_host_private_key, debugfs_spawn_error};
+    use super::{baked_host_private_key, debugfs_spawn_error, validate_kernel};
+    use crate::error::RootfsError;
+
+    fn write_kernel(bytes: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(bytes).expect("write");
+        f.flush().expect("flush");
+        f
+    }
+
+    #[test]
+    fn validate_kernel_accepts_elf_and_arm64_image_rejects_others() {
+        // x86_64 uncompressed vmlinux: ELF magic at offset 0.
+        let mut elf = vec![0_u8; 64];
+        elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        let f = write_kernel(&elf);
+        assert!(validate_kernel(f.path()).is_ok(), "ELF vmlinux must pass");
+
+        // aarch64 Linux boot Image: "ARMd" magic at byte offset 56.
+        let mut image = vec![0_u8; 64];
+        image[56..60].copy_from_slice(b"ARM\x64");
+        let f = write_kernel(&image);
+        assert!(validate_kernel(f.path()).is_ok(), "ARM64 Image must pass");
+
+        // Neither magic → KernelBadFormat.
+        let f = write_kernel(&[0_u8; 64]);
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "a buffer that is neither ELF nor ARM64 Image must be rejected"
+        );
+
+        // Too short to carry the offset-56 magic → KernelBadFormat, not a panic.
+        let f = write_kernel(&[0x7F, b'E']);
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "a sub-header file must be rejected as bad format"
+        );
+    }
+
+    #[test]
+    fn validate_kernel_missing_file_is_not_found() {
+        let missing = std::path::Path::new("/nonexistent/rooms/vmlinux.bin");
+        assert!(matches!(
+            validate_kernel(missing),
+            Err(RootfsError::KernelNotFound { .. })
+        ));
+    }
 
     #[test]
     fn private_host_keys_are_rejected_but_public_halves_are_not() {
