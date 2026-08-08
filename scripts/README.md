@@ -2,6 +2,23 @@
 
 Host-side helpers for the `rooms` Firecracker substrate.
 
+## Host architectures
+
+Everything here is arch-aware for `x86_64` and `aarch64` (`uname -m` picks the
+artifact set; both sets are pinned in `checksums.txt`). On Apple Silicon
+(M3 or later, macOS 15+) the rooms-host runs as a Lima VM with nested
+virtualization — see `scripts/lima-rooms-host.yaml`:
+
+```sh
+limactl create --name rooms-host scripts/lima-rooms-host.yaml
+limactl start rooms-host
+limactl shell rooms-host   # then run setup-rooms-host.sh as usual
+```
+
+Note the aarch64 guest kernel is a Linux ARM64 boot `Image`, not an ELF
+vmlinux — the validation in `setup-rooms-host.sh`, `test-rootfs-alpine.sh`,
+and `rooms doctor` accepts both formats.
+
 ## Agent rootfs (Alpine) — current
 
 Build the agent guest image on Alpine (musl/busybox/openrc) with the claude-code native musl binary, paired with a Firecracker-tuned virtio-rng kernel. Boots to sshd in ~2 s; ~276 MB. The script is the source of truth; built images are **not** committed (see `images/.gitignore`).

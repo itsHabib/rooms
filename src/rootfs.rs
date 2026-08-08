@@ -44,7 +44,9 @@ pub fn validate_rootfs(path: &Path, min_bytes: u64) -> Result<(), RootfsError> {
     Ok(())
 }
 
-/// Validate that `path` exists and has a valid ELF header.
+/// Validate that `path` exists and is a bootable Firecracker guest kernel:
+/// an uncompressed ELF vmlinux (`x86_64`) or a Linux ARM64 boot `Image`
+/// (`aarch64`; magic `ARM\x64` at byte offset 56).
 pub fn validate_kernel(path: &Path) -> Result<(), RootfsError> {
     if !path.exists() {
         return Err(RootfsError::KernelNotFound {
@@ -52,11 +54,22 @@ pub fn validate_kernel(path: &Path) -> Result<(), RootfsError> {
         });
     }
 
-    let mut header = [0_u8; 4];
+    let mut header = [0_u8; 60];
     let mut file = std::fs::File::open(path)?;
-    file.read_exact(&mut header)?;
-    if header != [0x7F, b'E', b'L', b'F'] {
-        return Err(RootfsError::KernelNotElf {
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(RootfsError::KernelBadFormat {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    let elf = header[..4] == [0x7F, b'E', b'L', b'F'];
+    let arm64_image = header[56..60] == *b"ARM\x64";
+    if !elf && !arm64_image {
+        return Err(RootfsError::KernelBadFormat {
             path: path.to_path_buf(),
         });
     }

@@ -1,0 +1,25 @@
+# Lima config for the macOS rooms-host: an Ubuntu 24.04 ARM64 VM with nested
+# virtualization enabled so Firecracker gets /dev/kvm inside the guest.
+# Requires: Apple Silicon M3+, macOS 15+, Lima >= 1.0 with the vz backend.
+#
+#   limactl create --name rooms-host scripts/lima-rooms-host.yaml
+#   limactl start rooms-host
+#   limactl shell rooms-host -- ls -l /dev/kvm
+
+vmType: vz
+nestedVirtualization: true
+
+images:
+  - location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+
+cpus: 6
+memory: 8GiB
+disk: 60GiB
+
+mounts:
+  - location: "~/dev/rooms"
+    writable: true
+
+ssh:
+  forwardAgent: false

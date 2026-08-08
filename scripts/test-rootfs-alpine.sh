@@ -56,7 +56,14 @@ ROOTFS="$(readlink -f "$ROOTFS")"
 KERNEL="$(dirname "$ROOTFS")/vmlinux.bin"
 [[ -f "$KERNEL" ]] || fatal "kernel not found at $KERNEL (run scripts/setup-rooms-host.sh)"
 KERNEL="$(readlink -f "$KERNEL")"
-file "$KERNEL" | grep -q 'ELF 64-bit' || fatal "kernel $KERNEL is not an uncompressed ELF vmlinux"
+# ELF vmlinux on x86_64; Linux ARM64 boot Image (magic "ARMd" at offset 56)
+# on aarch64.
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    [[ "$(dd if="$KERNEL" bs=1 skip=56 count=4 2>/dev/null)" == "ARMd" ]] \
+        || fatal "kernel $KERNEL is not an uncompressed ARM64 boot Image"
+else
+    file "$KERNEL" | grep -q 'ELF 64-bit' || fatal "kernel $KERNEL is not an uncompressed ELF vmlinux"
+fi
 
 ip link show "$TAP" >/dev/null 2>&1 || fatal "TAP $TAP not found; run: sudo bash scripts/setup-tap.sh"
 

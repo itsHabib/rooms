@@ -14,18 +14,25 @@ use crate::rootfs::{kernel_sibling, validate_kernel, validate_rootfs};
 /// Embedded checksum pins (same source as `scripts/checksums.txt`).
 const CHECKSUMS_TXT: &str = include_str!("../scripts/checksums.txt");
 
+/// Host architecture as it appears in arch-qualified artifact names
+/// (`x86_64` / `aarch64`); doctor runs on the host, so the binary's own
+/// target arch is the host arch.
+const HOST_ARCH: &str = std::env::consts::ARCH;
+
 /// Artifact names in `checksums.txt` checked against on-disk installs.
 ///
-/// `bionic.rootfs.ext4` is deliberately absent: its pin is verified at
+/// The bionic rootfs is deliberately absent: its pin is verified at
 /// download time by `setup-rooms-host.sh`, and the provisioning runbook then
 /// replaces the default rootfs path with a locally built agent image — so a
 /// resting-state drift check against the bionic digest would warn on every
 /// correctly provisioned host.
-const DRIFT_ARTIFACTS: &[&str] = &[
-    "firecracker-v1.10.1-x86_64",
-    "jailer-v1.10.1-x86_64",
-    "vmlinux-6.1.155.bin",
-];
+fn drift_artifacts() -> [String; 3] {
+    [
+        format!("firecracker-v1.15.0-{HOST_ARCH}"),
+        format!("jailer-v1.15.0-{HOST_ARCH}"),
+        format!("vmlinux-6.1.155-{HOST_ARCH}.bin"),
+    ]
+}
 
 /// Schema version for `--json` output (ED-4: forward-compatible).
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
@@ -903,6 +910,22 @@ fn parse_tap_index(line: &str) -> Option<u8> {
 fn check_nested_virt() -> CheckResult {
     let name = "nested_virt".to_owned();
 
+    // aarch64 has no kvm_intel/kvm_amd nested knob and kvm-ok is x86-only;
+    // KVM availability is itself the signal — the outer hypervisor either
+    // exposes virtualization to this VM or /dev/kvm does not exist.
+    if HOST_ARCH == "aarch64" {
+        let present = Path::new("/dev/kvm").exists();
+        return CheckResult {
+            name,
+            ok: present,
+            message: if present {
+                "nested virtualization available (/dev/kvm present on aarch64)".to_owned()
+            } else {
+                "/dev/kvm absent; enable nested virtualization on the outer VM".to_owned()
+            },
+        };
+    }
+
     // Try kvm-ok first. Trust the exit status — the string match was a
     // double-positive that would have flipped "nested virtualisation not
     // enabled" stderr into a "ok" result.
@@ -1002,15 +1025,19 @@ fn drift_target_path(
     config: &RoomsConfig,
     image: Option<&Path>,
 ) -> Option<PathBuf> {
-    match artifact {
-        "firecracker-v1.10.1-x86_64" => resolve_in_path(&config.firecracker_binary),
-        // jailer installs alongside firecracker (setup-rooms-host.sh) and is a
-        // security-boundary binary, so cover its pin too. It is not in
-        // RoomsConfig, so resolve the conventional name on PATH.
-        "jailer-v1.10.1-x86_64" => resolve_in_path(Path::new("jailer")),
-        "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
-        _ => None,
+    if artifact == format!("firecracker-v1.15.0-{HOST_ARCH}") {
+        return resolve_in_path(&config.firecracker_binary);
     }
+    // jailer installs alongside firecracker (setup-rooms-host.sh) and is a
+    // security-boundary binary, so cover its pin too. It is not in
+    // RoomsConfig, so resolve the conventional name on PATH.
+    if artifact == format!("jailer-v1.15.0-{HOST_ARCH}") {
+        return resolve_in_path(Path::new("jailer"));
+    }
+    if artifact == format!("vmlinux-6.1.155-{HOST_ARCH}.bin") {
+        return resolve_kernel_path(image);
+    }
+    None
 }
 
 /// Resolve a binary to a concrete path. Absolute or directory-qualified paths
@@ -1044,14 +1071,14 @@ where
     let mut warnings = Vec::new();
     let mut checked = 0u32;
 
-    for artifact in DRIFT_ARTIFACTS {
-        let Some(expected) = pins.get(*artifact) else {
+    for artifact in &drift_artifacts() {
+        let Some(expected) = pins.get(artifact.as_str()) else {
             warnings.push(format!(
                 "no checksum pin for {artifact} in embedded checksums"
             ));
             continue;
         };
-        let Some(path) = resolve_target(artifact, config, image) else {
+        let Some(path) = resolve_target(artifact.as_str(), config, image) else {
             continue;
         };
         if !path.exists() {
@@ -1222,12 +1249,13 @@ mod tests {
         // image, so a resting-state drift check would warn on every correctly
         // provisioned host. Doctor must not resolve it as a drift target.
         let config = RoomsConfig::default();
+        let bionic = format!("bionic.rootfs-{}.ext4", super::HOST_ARCH);
         assert!(
-            !super::DRIFT_ARTIFACTS.contains(&"bionic.rootfs.ext4"),
+            !super::drift_artifacts().contains(&bionic),
             "bionic must not be drift-checked at rest"
         );
         assert_eq!(
-            drift_target_path("bionic.rootfs.ext4", &config, None),
+            drift_target_path(&bionic, &config, None),
             None,
             "bionic must not resolve to any on-disk drift target"
         );

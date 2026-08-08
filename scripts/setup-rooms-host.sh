@@ -15,21 +15,23 @@ CHECKSUMS="${SCRIPT_DIR}/checksums.txt"
 
 # --- config ---
 
-FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.10.1}"
+# v1.15.0 minimum for aarch64 hosts: older jailers panic when the outer
+# hypervisor (e.g. Apple vz) omits cpu cache geometry from sysfs.
+FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.15.0}"
 RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
 IMAGES_DIR="${IMAGES_DIR:-$HOME/rooms/images}"
 ARCH="$(uname -m)"
 
-# Firecracker CI guest kernel (x86_64, uncompressed vmlinux) with virtio-rng
+# Firecracker CI guest kernel (uncompressed vmlinux, per-arch) with virtio-rng
 # built in, so the guest CRNG seeds from the /entropy device with no host-side
 # workaround. Pinned; bump deliberately (CI_VERSION tracks the firecracker
 # release minor, e.g. v1.15.x -> v1.15).
 FC_KERNEL_CI_VERSION="${FC_KERNEL_CI_VERSION:-v1.15}"
 FC_KERNEL_VERSION="${FC_KERNEL_VERSION:-6.1.155}"
-FC_KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_KERNEL_CI_VERSION}/x86_64/vmlinux-${FC_KERNEL_VERSION}"
+FC_KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FC_KERNEL_CI_VERSION}/${ARCH}/vmlinux-${FC_KERNEL_VERSION}"
 # Quickstart bionic rootfs — a throwaway image to boot Firecracker once before
 # building a real agent rootfs with scripts/build-rootfs-alpine.sh.
-QUICKSTART_ROOTFS_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4"
+QUICKSTART_ROOTFS_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${ARCH}/rootfs/bionic.rootfs.ext4"
 
 # --- helpers ---
 
@@ -44,6 +46,17 @@ require_cmd() {
 lookup_checksum() {
     local artifact="$1"
     awk -v name="$artifact" '{ sub(/\r$/, "", $2) } $1 ~ /^[0-9a-f]{64}$/ && $2 == name { print $1; exit }' "$CHECKSUMS"
+}
+
+# Firecracker guest kernels are ELF vmlinux on x86_64 but Linux ARM64 boot
+# Images on aarch64 (magic "ARM\x64" at byte offset 56) — validate per arch.
+is_guest_kernel() {
+    local f="$1"
+    if [[ "$ARCH" == "aarch64" ]]; then
+        [[ "$(dd if="$f" bs=1 skip=56 count=4 2>/dev/null)" == "ARMd" ]]
+        return
+    fi
+    file "$f" | grep -q 'ELF 64-bit'
 }
 
 verify_sha256() {
@@ -62,8 +75,8 @@ verify_sha256() {
 
 log "preflight checks"
 
-if [[ "$ARCH" != "x86_64" ]]; then
-    fatal "this script targets x86_64; detected $ARCH"
+if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
+    fatal "this script targets x86_64 or aarch64; detected $ARCH"
 fi
 
 if [[ "$EUID" -eq 0 ]]; then
@@ -81,8 +94,10 @@ require_cmd sha256sum
 log "verifying /dev/kvm (nested virt)"
 if [[ ! -e /dev/kvm ]]; then
     fatal "/dev/kvm not found — nested virtualization is OFF.
-    On the Windows host, with the VM shut down:
+    Hyper-V host (Windows), with the VM shut down:
       Set-VMProcessor -VMName rooms-host -ExposeVirtualizationExtensions \$true
+    Lima host (macOS, M3+): set nestedVirtualization: true in the instance yaml
+    (see scripts/lima-rooms-host.yaml) and recreate the instance.
     Then power the VM back on and re-run this script."
 fi
 
@@ -120,12 +135,12 @@ if command -v firecracker >/dev/null 2>&1; then
 else
     log "installing Firecracker $FIRECRACKER_VERSION"
     tmp="$(mktemp -d)"
-    url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
+    url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz"
     curl -fSL "$url" -o "$tmp/fc.tgz"
-    verify_sha256 "$tmp/fc.tgz" "firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
+    verify_sha256 "$tmp/fc.tgz" "firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz"
     tar -C "$tmp" -xzf "$tmp/fc.tgz"
-    sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/firecracker
-    sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-x86_64/jailer-${FIRECRACKER_VERSION}-x86_64 /usr/local/bin/jailer
+    sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH} /usr/local/bin/firecracker
+    sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH} /usr/local/bin/jailer
     rm -rf "$tmp"
     log "Firecracker installed: $(firecracker --version)"
 fi
@@ -141,10 +156,10 @@ if [[ ! -f "$KERNEL_FILE" ]]; then
     # versioned kernel (a later run would otherwise skip the download and adopt
     # the partial file).
     curl -fSL "$FC_KERNEL_URL" -o "$KERNEL_FILE.tmp"
-    verify_sha256 "$KERNEL_FILE.tmp" "vmlinux-${FC_KERNEL_VERSION}.bin"
-    if ! file "$KERNEL_FILE.tmp" | grep -q 'ELF 64-bit'; then
+    verify_sha256 "$KERNEL_FILE.tmp" "vmlinux-${FC_KERNEL_VERSION}-${ARCH}.bin"
+    if ! is_guest_kernel "$KERNEL_FILE.tmp"; then
         rm -f "$KERNEL_FILE.tmp"
-        fatal "downloaded kernel is not an uncompressed ELF vmlinux: $FC_KERNEL_URL"
+        fatal "downloaded kernel is not an uncompressed vmlinux/Image: $FC_KERNEL_URL"
     fi
     mv "$KERNEL_FILE.tmp" "$KERNEL_FILE"
 else
@@ -153,8 +168,8 @@ fi
 # Validate the kernel (cached or freshly downloaded) before adopting it, and
 # always point vmlinux.bin at it so a host that still has the old bionic
 # vmlinux.bin picks up the virtio-rng kernel instead of silently keeping it.
-file "$KERNEL_FILE" | grep -q 'ELF 64-bit' \
-    || fatal "cached kernel is not an uncompressed ELF vmlinux: $KERNEL_FILE"
+is_guest_kernel "$KERNEL_FILE" \
+    || fatal "cached kernel is not an uncompressed vmlinux/Image: $KERNEL_FILE"
 cp -f "$KERNEL_FILE" "$IMAGES_DIR/vmlinux.bin"
 
 if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
@@ -162,7 +177,7 @@ if [[ -f "$IMAGES_DIR/rootfs.ext4" ]]; then
 else
     log "downloading quickstart rootfs (throwaway POC image; build-rootfs-alpine.sh replaces it)"
     curl -fSL "$QUICKSTART_ROOTFS_URL" -o "$IMAGES_DIR/rootfs.ext4.tmp"
-    verify_sha256 "$IMAGES_DIR/rootfs.ext4.tmp" "bionic.rootfs.ext4"
+    verify_sha256 "$IMAGES_DIR/rootfs.ext4.tmp" "bionic.rootfs-${ARCH}.ext4"
     mv "$IMAGES_DIR/rootfs.ext4.tmp" "$IMAGES_DIR/rootfs.ext4"
 fi
 
