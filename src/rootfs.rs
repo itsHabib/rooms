@@ -205,7 +205,14 @@ mod tests {
         assert!(agent.contains("VSOCK-CONNECT:2:5002"));
     }
 
-    #[cfg(unix)]
+    // The provisioning agent runs on the Linux rooms-host and inside the Alpine
+    // guest, so these tests exercise it against the host's own /bin/sh and
+    // coreutils. That is only a faithful stand-in on Linux: the script reads
+    // procfs, and its frame reader relies on `head -c` consuming exactly the
+    // requested bytes — true of BusyBox and GNU head, false of BSD head, which
+    // buffers ahead and swallows the following frame header. Gate to Linux
+    // rather than weaken the script for a platform it never runs on.
+    #[cfg(target_os = "linux")]
     fn run_agent_shell(body: &str) -> std::process::Output {
         let agent = format!(
             "{}/scripts/lib/rooms-provision-agent.sh",
@@ -218,7 +225,7 @@ mod tests {
             .expect("run provisioning-agent shell test")
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn frame_reader_is_exact_and_preserves_the_next_header() {
         let output = run_agent_shell(
@@ -245,7 +252,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn process_baseline_rejects_a_background_shell_descendant() {
         let output = run_agent_shell(
