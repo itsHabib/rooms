@@ -71,10 +71,12 @@ step_clock() {
 
 # Start sshd directly rather than through openrc: a snapshot-resumed openrc
 # supervisor can stall, and the daemon is all we need for the SSH re-probe.
+# sshd was stopped at quiesce, so the openrc fallbacks try `start` before
+# `restart` (restart on a stopped service is the confusing-log case).
 start_sshd() {
     /usr/sbin/sshd 2>/dev/null && return 0
-    rc-service sshd restart >/dev/null 2>&1 && return 0
-    rc-service sshd start >/dev/null 2>&1
+    rc-service sshd start >/dev/null 2>&1 && return 0
+    rc-service sshd restart >/dev/null 2>&1
 }
 
 session() {

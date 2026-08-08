@@ -1769,7 +1769,11 @@ pub async fn spawn_restore(
     check_kvm()?;
     let firecracker_binary = resolve_firecracker_binary(config)?;
     let jailer_binary = resolve_jailer_binary(config)?;
-    let (fc_uid, fc_gid) = lookup_firecracker_ids()?;
+    // spawn_blocking to match boot(): getent is fast on a local passwd db but
+    // can stall on a slow NSS backend (LDAP), which must not block the runtime.
+    let (fc_uid, fc_gid) = tokio::task::spawn_blocking(lookup_firecracker_ids)
+        .await
+        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))??;
 
     let per_room_dir = config
         .room_dir(req.room_id)
@@ -1847,6 +1851,32 @@ fn stage_restore_jail(
     fc_uid: u32,
     fc_gid: u32,
 ) -> Result<(), FirecrackerError> {
+    // Any failure after the jail tree exists rolls the whole staging back —
+    // unmount the rootfs bind (a stranded mount would otherwise accumulate
+    // invisibly, since the room dir has no room.json yet and gc only reaps
+    // OrphanedDead rooms) and remove the instance dir, matching the boot
+    // path's stage_jail_sync rollback.
+    let result =
+        stage_restore_jail_inner(jail_root, rootfs, host_vmstate, host_mem, fc_uid, fc_gid);
+    if result.is_err() {
+        unmount_quiet(&jail_root.join(JAIL_ROOTFS));
+        unmount_quiet(&jail_root.join(crate::snapshot::SNAPSHOT_MEM_FILE));
+        if let Some(instance_dir) = jail_root.parent() {
+            let _ = std::fs::remove_dir_all(instance_dir);
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn stage_restore_jail_inner(
+    jail_root: &Path,
+    rootfs: &Path,
+    host_vmstate: &Path,
+    host_mem: &Path,
+    fc_uid: u32,
+    fc_gid: u32,
+) -> Result<(), FirecrackerError> {
     let prep = |reason: String| FirecrackerError::JailPrepareFailed { reason };
     std::fs::create_dir_all(jail_root)
         .map_err(|e| prep(format!("create jail root {}: {e}", jail_root.display())))?;
@@ -1862,35 +1892,22 @@ fn stage_restore_jail(
             .map_err(|e| prep(format!("rootfs path {}: {e}", rootfs.display())))?,
         &jail_rootfs,
     )?;
-    if let Err(e) = remount_readonly(&jail_rootfs) {
-        unmount_quiet(&jail_rootfs);
-        return Err(e);
-    }
+    remount_readonly(&jail_rootfs)?;
 
     // vmstate: small, copied, owned by the jailed uid — no shared inode needed.
     let jail_vmstate = jail_root.join(crate::snapshot::SNAPSHOT_VMSTATE_FILE);
-    if let Err(e) = copy_owned_private(host_vmstate, &jail_vmstate, fc_uid, fc_gid) {
-        unmount_quiet(&jail_rootfs);
-        return Err(prep(format!("stage vmstate: {e}")));
-    }
+    copy_owned_private(host_vmstate, &jail_vmstate, fc_uid, fc_gid)
+        .map_err(|e| prep(format!("stage vmstate: {e}")))?;
 
     // The memory file must already be private to the firecracker uid/gid —
     // host collection staged it that way — and is bind-mounted, never copied.
-    if let Err(reason) = ensure_owned_private(host_mem, fc_uid) {
-        unmount_quiet(&jail_rootfs);
-        return Err(prep(reason));
-    }
+    ensure_owned_private(host_mem, fc_uid).map_err(prep)?;
     let jail_mem = jail_root.join(crate::snapshot::SNAPSHOT_MEM_FILE);
     if !jail_mem.exists() {
-        if let Err(e) = std::fs::File::create(&jail_mem) {
-            unmount_quiet(&jail_rootfs);
-            return Err(prep(format!("create mem mount target: {e}")));
-        }
+        std::fs::File::create(&jail_mem)
+            .map_err(|e| prep(format!("create mem mount target: {e}")))?;
     }
-    if let Err(e) = bind_mount(host_mem, &jail_mem) {
-        unmount_quiet(&jail_rootfs);
-        return Err(e);
-    }
+    bind_mount(host_mem, &jail_mem)?;
     Ok(())
 }
 

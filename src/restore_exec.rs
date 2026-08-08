@@ -310,6 +310,10 @@ fn record_slot_on_room(
 /// full teardown finish (which returns the lease only after the reap-clean
 /// gate). The intent tombstone survives any incomplete step for GC.
 fn abort_launch(config: &RoomsConfig, mut launch: RestoreLaunch, intent: &RestoreIntent) {
+    // cleanup() runs the guard teardown once (kill child, unmount jail, remove
+    // dirs, delete the leased tap); into_booted then moves that already-cleaned
+    // guard into a BootedVm we immediately dismiss so its Drop does NOT re-run
+    // cleanup. finish_teardown below is the lease-returning reap-clean gate.
     launch.guard_mut().cleanup();
     let mut booted = launch.into_booted(None);
     booted.guard_mut().dismiss();
