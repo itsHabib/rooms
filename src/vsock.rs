@@ -23,6 +23,13 @@ pub const PROVISION_PORT: u32 = 5001;
 /// closed before the guest connects here.
 pub const QUIESCED_PORT: u32 = 5002;
 
+/// Post-restore hygiene-nudge endpoint.
+///
+/// The in-guest resume agent polls this port with bounded connect retries (no
+/// connection is held across a snapshot); the host binds the listener only in
+/// a restored room's jail, so in an ordinary base the poll fails fast.
+pub const RESUME_PORT: u32 = 5003;
+
 /// The guest's own CID (must be ≥ 3). With the hybrid UDS model there is no
 /// host-wide CID namespace to collide in — isolation comes from the per-jail
 /// socket path — so every room uses the same value.
@@ -319,6 +326,141 @@ async fn read_bounded_line(stream: &mut tokio::net::UnixStream) -> Result<String
         }
     }
     String::from_utf8(bytes).map_err(|e| format!("provisioning ack is not utf-8: {e}"))
+}
+
+/// The per-restore hygiene nudge served to the resumed guest's agent.
+///
+/// Carries the new room/run identity, the host clock, fresh entropy, and the
+/// admitted secrets (empty when none were requested — the guest still walks
+/// one deterministic protocol either way).
+pub struct ResumePayload {
+    /// The restored room's id — the guest's new identity.
+    pub room_id: String,
+    /// Host wall-clock seconds since the epoch, to step the resumed guest's
+    /// stale clock.
+    pub epoch_secs: i64,
+    /// Fresh host randomness the guest mixes into its CRNG so two restores of
+    /// one snapshot diverge immediately.
+    pub entropy: Vec<u8>,
+    /// Encoded `NAME=value\n` secrets blob (empty = no secrets). Reuses the
+    /// [`SecretsPayload`] wire shape; overwritten on drop with it.
+    pub secrets: SecretsPayload,
+}
+
+/// Pending post-restore hygiene handshake.
+///
+/// The restore flow awaits the guest's terminal ack through
+/// [`ResumeDelivery::await_acked`]; readiness (SSH probe, workload) is gated
+/// on it. Dropping the handle aborts the serving task and the listener.
+#[derive(Debug)]
+pub struct ResumeDelivery {
+    rx: oneshot::Receiver<Result<(), String>>,
+    task: tokio::task::JoinHandle<()>,
+    listen_path: PathBuf,
+}
+
+impl ResumeDelivery {
+    /// Wait for the guest's `ACK resume`, bounded by `timeout`. `Ok(())` means
+    /// every hygiene step (reseed, clock, identity, secrets staging, fresh
+    /// sshd host key) succeeded in-guest — the only signal that may unblock
+    /// readiness.
+    pub async fn await_acked(mut self, timeout: std::time::Duration) -> Result<(), String> {
+        match tokio::time::timeout(timeout, &mut self.rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("resume nudge task ended without a result".to_owned()),
+            Err(_) => Err(format!(
+                "no resume ack within {}s (image predates the resume agent, or hygiene failed in-guest)",
+                timeout.as_secs()
+            )),
+        }
+    }
+}
+
+impl Drop for ResumeDelivery {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.listen_path);
+    }
+}
+
+/// Bind the resume-nudge endpoint in a restored room's jail root, before the
+/// VM resumes — the polling guest agent can never race a listener that
+/// outbinds it.
+#[cfg(unix)]
+pub fn serve_resume(
+    jail_root: &Path,
+    payload: ResumePayload,
+    owner: Option<(u32, u32)>,
+) -> std::io::Result<ResumeDelivery> {
+    let listen_path = listener_path_for(jail_root, RESUME_PORT);
+    let _ = std::fs::remove_file(&listen_path);
+    let listener = tokio::net::UnixListener::bind(&listen_path)?;
+    if let Some((uid, gid)) = owner {
+        std::os::unix::fs::chown(&listen_path, Some(uid), Some(gid))?;
+    }
+    let (tx, rx) = oneshot::channel();
+    let path = listen_path.clone();
+    let task = tokio::spawn(async move {
+        let result = serve_resume_inner(listener, &path, payload).await;
+        let _ = tx.send(result);
+    });
+    Ok(ResumeDelivery {
+        rx,
+        task,
+        listen_path,
+    })
+}
+
+#[cfg(not(unix))]
+pub fn serve_resume(
+    _jail_root: &Path,
+    _payload: ResumePayload,
+    _owner: Option<(u32, u32)>,
+) -> std::io::Result<ResumeDelivery> {
+    Err(std::io::Error::other(
+        "vsock resume nudge requires a unix host",
+    ))
+}
+
+/// Serve the nudge to the first agent connection: preface in, identity /
+/// clock / entropy / secrets frames out, then require the exact terminal ack.
+/// The endpoint retires on accept, like the secrets one-shot — the nudge
+/// carries secrets, so a second reader must find nothing.
+#[cfg(unix)]
+async fn serve_resume_inner(
+    listener: tokio::net::UnixListener,
+    listen_path: &Path,
+    payload: ResumePayload,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .map_err(|e| format!("accept resume agent: {e}"))?;
+    drop(listener);
+    std::fs::remove_file(listen_path).map_err(|e| format!("retire resume endpoint: {e}"))?;
+
+    let preface = read_bounded_line(&mut stream).await?;
+    if preface != "ROOMS-RESUME/1" {
+        return Err(format!("resume preface malformed: {preface:?}"));
+    }
+    stream
+        .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
+        .await
+        .map_err(|e| format!("write identity: {e}"))?;
+    stream
+        .write_all(format!("CLOCK {}\n", payload.epoch_secs).as_bytes())
+        .await
+        .map_err(|e| format!("write clock: {e}"))?;
+    write_typed_frame(&mut stream, "ENTROPY", &payload.entropy).await?;
+    write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0).await?;
+    write_typed_frame(&mut stream, "END", &[]).await?;
+    let ack = read_bounded_line(&mut stream).await?;
+    if ack != "ACK resume" {
+        return Err(format!("resume ack malformed: {ack:?}"));
+    }
+    Ok(())
 }
 
 /// Bind `listen_path` and serve `payload` to the first connection ever made.

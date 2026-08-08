@@ -208,6 +208,22 @@ start() {
 EOF
 chmod 0755 "$MNT/etc/init.d/rooms-provision"
 
+log "installing post-restore resume agent (hygiene nudge poll loop)"
+install -m 0755 "${SCRIPT_DIR}/lib/rooms-resume-agent.sh" "$MNT/sbin/rooms-resume-agent"
+cat >"$MNT/etc/init.d/rooms-resume" <<'EOF'
+#!/sbin/openrc-run
+description="poll for the post-restore hygiene nudge"
+command="/sbin/rooms-resume-agent"
+command_args="loop"
+command_background="yes"
+pidfile="/run/rooms-resume.pid"
+
+depend() {
+    before rooms-provision
+}
+EOF
+chmod 0755 "$MNT/etc/init.d/rooms-resume"
+
 log "writing guest config (init, dns, hostname, settings)"
 # ttyS0-only inittab — Firecracker never offers a VT, so the six default gettys
 # would only burn spawns. openrc drives sysinit/boot/default runlevels.
@@ -291,6 +307,7 @@ rc-update add hostname boot
 # boot: the vsock secrets fetch — ordered before sshd so by the time the
 # workload channel opens, delivery has already been acked (or never will be).
 rc-update add rooms-secrets boot
+rc-update add rooms-resume boot
 rc-update add rooms-provision boot
 # default: the service rooms actually connects to.
 rc-update add sshd default

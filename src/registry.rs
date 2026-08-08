@@ -286,6 +286,40 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
             });
         }
     }
+    // Restore-intent tombstones: finish the teardown + lease return for every
+    // conclusively dead restore. Runs after the room loop so a dead restored
+    // room's dirs are already reaped through its own room.json; the tombstone
+    // then completes what an ordinary reap cannot — returning the exact lease.
+    if opts.dry_run {
+        for pending in
+            crate::restore_exec::pending_all(config).map_err(|error| snapshot_error(&error))?
+        {
+            let in_scope = opts
+                .only
+                .as_ref()
+                .is_none_or(|only| only == &pending.room_id);
+            if in_scope {
+                outcomes.push(GcOutcome {
+                    id: pending.room_id,
+                    state: RoomState::Unknown,
+                    reaped: false,
+                    reason: format!(
+                        "pending restore of snapshot {} at boundary {}",
+                        pending.snapshot_id, pending.boundary
+                    ),
+                });
+            }
+        }
+    } else {
+        for reconciled in crate::restore_exec::gc_reconcile(config, opts.only.as_deref()) {
+            outcomes.push(GcOutcome {
+                id: reconciled.room_id,
+                state: RoomState::Unknown,
+                reaped: reconciled.reaped,
+                reason: reconciled.reason,
+            });
+        }
+    }
     Ok(GcReport {
         schema_version: REGISTRY_SCHEMA_VERSION,
         dry_run: opts.dry_run,

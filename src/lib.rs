@@ -12,6 +12,7 @@ pub mod lifecycle;
 pub mod preflight;
 pub mod registry;
 pub mod restore;
+pub mod restore_exec;
 pub mod room;
 pub mod rootfs;
 pub mod runner;

@@ -1131,7 +1131,10 @@ fn stage_jail_sync(
 #[cfg(unix)]
 fn teardown_jail_sync(instance_dir: &Path) -> bool {
     let jail_root = instance_dir.join("root");
-    for name in [JAIL_KERNEL, JAIL_ROOTFS] {
+    // snapshot.mem is a restore room's bind-mounted shared memory inode; in a
+    // boot room's jail it's at most a plain file, where the unmount fails
+    // harmlessly ("not mounted") and dir removal proceeds.
+    for name in [JAIL_KERNEL, JAIL_ROOTFS, crate::snapshot::SNAPSHOT_MEM_FILE] {
         let target = jail_root.join(name);
         if target.exists() {
             if let Err(e) = unmount_settled(&target) {
@@ -1650,6 +1653,342 @@ fn release_tap(tap_name: Option<&str>) {
 /// already removed.
 pub fn delete_tap(tap: &str) {
     release_tap(Some(tap));
+}
+
+/// Inputs to [`spawn_restore`].
+///
+/// No kernel and no boot config: the vmstate carries the machine, so the jail
+/// stages only the backing rootfs (read-only, at the snapshot's saved drive
+/// path), the copied vmstate, and the bind-mounted memory file.
+pub struct RestoreSpawnRequest<'a> {
+    /// The pre-minted restored room id.
+    pub room_id: &'a str,
+    /// Hash-verified backing rootfs (the same image the snapshot pinned).
+    pub rootfs: &'a Path,
+    /// Collected `snapshot.vmstate` on the host (copied into the jail).
+    pub host_vmstate: &'a Path,
+    /// Collected `snapshot.mem` on the host (bind-mounted into the jail —
+    /// never copied, so later clones share the one private inode).
+    pub host_mem: &'a Path,
+    pub descriptor: &'a room::RoomDescriptor,
+    /// The snapshot being restored — recorded as the room's lineage.
+    pub snapshot_id: &'a str,
+}
+
+/// A spawned-but-inert restore process.
+///
+/// The jailer is staged and running behind the launch barrier, with no
+/// network, no API activity, and no lease. The restore transaction releases
+/// the barrier only after the child's pid/starttime are durably recorded,
+/// then walks the ordered steps (lease → tap → custody → load → resume).
+pub struct RestoreLaunch {
+    child: Child,
+    barrier: Option<tokio::process::ChildStdin>,
+    guard: RoomGuard,
+    socket: PathBuf,
+    log_path: PathBuf,
+}
+
+impl RestoreLaunch {
+    /// The jailer child's pid (firecracker after its exec), if still running.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    /// Host path of the jailed Firecracker API socket.
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    /// Release the launch barrier: the launcher shell reads one line from its
+    /// inherited stdin and only then execs the jailer. Called strictly after
+    /// the pid/starttime breadcrumbs are durable. A parent crash before this
+    /// closes the pipe with no data, and the launcher exits without exec.
+    pub async fn release_barrier(&mut self) -> Result<(), FirecrackerError> {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = self.barrier.take().ok_or_else(|| {
+            FirecrackerError::Internal("restore barrier already released".to_owned())
+        })?;
+        stdin
+            .write_all(b"go\n")
+            .await
+            .map_err(FirecrackerError::Io)?;
+        stdin.flush().await.map_err(FirecrackerError::Io)?;
+        drop(stdin);
+        Ok(())
+    }
+
+    /// Wait for the jailed Firecracker's API socket to accept connections.
+    pub async fn wait_api(&mut self, timeout: Duration) -> Result<(), FirecrackerError> {
+        let socket = self.socket.clone();
+        let log_path = self.log_path.clone();
+        wait_for_socket(&socket, timeout, &mut self.child, Some(&log_path)).await
+    }
+
+    /// Create the leased slot's tap and record tap ownership on the guard.
+    ///
+    /// Deliberately does NOT bind a [`SlotRelease`]: a restore holds a lease,
+    /// not an ordinary claim, and the lease is returned explicitly by the
+    /// restore teardown after the reap-clean gate — never routed through
+    /// `slot::free`.
+    pub fn attach_leased_slot(&mut self, slot: &room::Slot) -> Result<(), FirecrackerError> {
+        self.guard.set_tap(slot.tap.clone());
+        self.guard.set_tap_owned(true);
+        create_slot_tap(slot)?;
+        Ok(())
+    }
+
+    pub fn guard_mut(&mut self) -> &mut RoomGuard {
+        &mut self.guard
+    }
+
+    /// Hand the launched process over as a [`BootedVm`] once it is resumed and
+    /// acked, so the workload / teardown paths are shared with `boot`.
+    #[must_use]
+    pub fn into_booted(self, witness: Option<Capture>) -> BootedVm {
+        BootedVm {
+            witness,
+            secrets_delivery: None,
+            provisioning_delivery: None,
+            guard: self.guard,
+            child: self.child,
+        }
+    }
+}
+
+/// Stage a restore jail and spawn its jailer behind the launch barrier.
+///
+/// On return the child exists but has NOT exec'd the jailer: it blocks on the
+/// barrier read. Nothing network-visible or slot-visible has happened.
+pub async fn spawn_restore(
+    req: &RestoreSpawnRequest<'_>,
+    config: &RoomsConfig,
+) -> Result<RestoreLaunch, FirecrackerError> {
+    ensure_root()?;
+    check_kvm()?;
+    let firecracker_binary = resolve_firecracker_binary(config)?;
+    let jailer_binary = resolve_jailer_binary(config)?;
+    let (fc_uid, fc_gid) = lookup_firecracker_ids()?;
+
+    let per_room_dir = config
+        .room_dir(req.room_id)
+        .ok_or(FirecrackerError::HomeUnset)?;
+    prepare_room_dir(&per_room_dir).await?;
+
+    let chroot_base = jailer_chroot_base(config)?;
+    let jail_root = jail_root_dir(&chroot_base, req.room_id);
+    let instance_dir = jail_instance_dir(&chroot_base, req.room_id);
+    stage_restore_jail(
+        &jail_root,
+        req.rootfs,
+        req.host_vmstate,
+        req.host_mem,
+        fc_uid,
+        fc_gid,
+    )?;
+
+    let socket = jail_root.join(JAIL_API_SOCK);
+    let log_path = per_room_dir.join("firecracker.log");
+    let mut guard = RoomGuard::new(per_room_dir.clone(), socket.clone(), config);
+    guard.set_jail_instance_dir(instance_dir);
+
+    let layout = JailLayout {
+        instance_dir: jail_instance_dir(&chroot_base, req.room_id),
+        host_socket: socket.clone(),
+    };
+    let launch = build_jailer_launch_plan(&JailerLaunchInput {
+        jailer_binary: &jailer_binary,
+        firecracker_binary: &firecracker_binary,
+        chroot_base: &chroot_base,
+        room_id: req.room_id,
+        fc_uid,
+        fc_gid,
+        layout: &layout,
+    });
+    let log_handles = open_log_file(&log_path).await?;
+    let mut child = spawn_barriered_jailer(&launch, log_handles)?;
+    let barrier = child.stdin.take();
+    guard.set_child(&child);
+
+    // room.json before the barrier release: pid + lineage recorded while the
+    // child is still inert. The slot stays unset until the lease succeeds.
+    let pid = child.id();
+    let pid_starttime = pid.and_then(room::starttime_of);
+    let mut meta = room::RoomMeta::new(
+        req.room_id.to_owned(),
+        req.descriptor.command.clone(),
+        pid,
+        pid_starttime,
+        req.descriptor.keep,
+        Utc::now(),
+    );
+    meta.snapshot_lineage = Some(req.snapshot_id.to_owned());
+    room::write_atomic(&per_room_dir, &meta).map_err(FirecrackerError::Io)?;
+
+    Ok(RestoreLaunch {
+        child,
+        barrier,
+        guard,
+        socket,
+        log_path,
+    })
+}
+
+/// Stage the restore jail root: rootfs bind-mounted read-only at the
+/// snapshot's saved drive path, vmstate copied with jailer ownership, and the
+/// memory file bind-mounted (shared inode, never copied).
+#[cfg(unix)]
+fn stage_restore_jail(
+    jail_root: &Path,
+    rootfs: &Path,
+    host_vmstate: &Path,
+    host_mem: &Path,
+    fc_uid: u32,
+    fc_gid: u32,
+) -> Result<(), FirecrackerError> {
+    let prep = |reason: String| FirecrackerError::JailPrepareFailed { reason };
+    std::fs::create_dir_all(jail_root)
+        .map_err(|e| prep(format!("create jail root {}: {e}", jail_root.display())))?;
+
+    let jail_rootfs = jail_root.join(JAIL_ROOTFS);
+    if !jail_rootfs.exists() {
+        std::fs::File::create(&jail_rootfs)
+            .map_err(|e| prep(format!("create rootfs mount target: {e}")))?;
+    }
+    bind_mount(
+        &rootfs
+            .canonicalize()
+            .map_err(|e| prep(format!("rootfs path {}: {e}", rootfs.display())))?,
+        &jail_rootfs,
+    )?;
+    if let Err(e) = remount_readonly(&jail_rootfs) {
+        unmount_quiet(&jail_rootfs);
+        return Err(e);
+    }
+
+    // vmstate: small, copied, owned by the jailed uid — no shared inode needed.
+    let jail_vmstate = jail_root.join(crate::snapshot::SNAPSHOT_VMSTATE_FILE);
+    if let Err(e) = copy_owned_private(host_vmstate, &jail_vmstate, fc_uid, fc_gid) {
+        unmount_quiet(&jail_rootfs);
+        return Err(prep(format!("stage vmstate: {e}")));
+    }
+
+    // The memory file must already be private to the firecracker uid/gid —
+    // host collection staged it that way — and is bind-mounted, never copied.
+    if let Err(reason) = ensure_owned_private(host_mem, fc_uid) {
+        unmount_quiet(&jail_rootfs);
+        return Err(prep(reason));
+    }
+    let jail_mem = jail_root.join(crate::snapshot::SNAPSHOT_MEM_FILE);
+    if !jail_mem.exists() {
+        if let Err(e) = std::fs::File::create(&jail_mem) {
+            unmount_quiet(&jail_rootfs);
+            return Err(prep(format!("create mem mount target: {e}")));
+        }
+    }
+    if let Err(e) = bind_mount(host_mem, &jail_mem) {
+        unmount_quiet(&jail_rootfs);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stage_restore_jail(
+    _jail_root: &Path,
+    _rootfs: &Path,
+    _host_vmstate: &Path,
+    _host_mem: &Path,
+    _fc_uid: u32,
+    _fc_gid: u32,
+) -> Result<(), FirecrackerError> {
+    Err(FirecrackerError::KvmUnavailable)
+}
+
+/// Verify `path` is a regular file owned by the firecracker uid with no
+/// group/other access — the private-memory contract restore refuses to loosen.
+#[cfg(unix)]
+fn ensure_owned_private(path: &Path, fc_uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta =
+        std::fs::symlink_metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    if !meta.file_type().is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if meta.uid() != fc_uid {
+        return Err(format!(
+            "{} is not owned by the firecracker uid {fc_uid} (uid {}); re-collect the snapshot",
+            path.display(),
+            meta.uid()
+        ));
+    }
+    if meta.mode() & 0o077 != 0 {
+        return Err(format!(
+            "{} grants group/other access (mode {:o}); the memory file must stay private",
+            path.display(),
+            meta.mode() & 0o7777
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remount_readonly(target: &Path) -> Result<(), FirecrackerError> {
+    let output = std::process::Command::new("mount")
+        .args(["-o", "remount,ro,bind", &target.to_string_lossy()])
+        .output()
+        .map_err(FirecrackerError::Io)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(FirecrackerError::JailPrepareFailed {
+        reason: format!(
+            "remount {} read-only: {}",
+            target.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    })
+}
+
+#[cfg(unix)]
+fn copy_owned_private(
+    source: &Path,
+    target: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    std::fs::copy(source, target)?;
+    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600))?;
+    chown(target, Some(uid), Some(gid))?;
+    Ok(())
+}
+
+/// Spawn the jailer behind a stdin launch barrier: a `sh` launcher reads one
+/// line before `exec`ing the jailer, so the parent decides — after its
+/// durable breadcrumb writes — whether the jailer runs at all. EOF (parent
+/// crash, dropped pipe) exits the launcher without exec.
+fn spawn_barriered_jailer(
+    plan: &JailerLaunchPlan,
+    (log_file, log_stderr): (std::fs::File, std::fs::File),
+) -> Result<Child, FirecrackerError> {
+    info!(socket = %plan.host_socket.display(), "spawning restore firecracker via barriered jailer");
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(r#"IFS= read -r _go || exit 1; exec "$0" "$@""#)
+        .arg(&plan.jailer_binary);
+    command.args(&plan.jailer_args);
+    command.arg("--");
+    command.args(&plan.firecracker_args);
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_stderr))
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(FirecrackerError::Io)
 }
 
 /// Reap a snapshotted base after its slot claim has already become a durable

@@ -574,7 +574,7 @@ fn managed_id_root(candidate: &Path, parent: &Path) -> Option<PathBuf> {
     crate::registry::is_valid_room_id(id).then(|| parent.join(id))
 }
 
-fn canonical_candidate(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn canonical_candidate(path: &Path) -> anyhow::Result<PathBuf> {
     let mut current = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -598,7 +598,7 @@ fn canonical_candidate(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(resolved)
 }
 
-fn overlaps(left: &Path, right: &Path) -> bool {
+pub(crate) fn overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
@@ -1047,7 +1047,7 @@ fn active_vsock(jail_root: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
-fn firecracker_version(config: &RoomsConfig) -> anyhow::Result<String> {
+pub(crate) fn firecracker_version(config: &RoomsConfig) -> anyhow::Result<String> {
     let output = std::process::Command::new(&config.firecracker_binary)
         .arg("--version")
         .output()?;
@@ -1060,7 +1060,7 @@ fn firecracker_version(config: &RoomsConfig) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn sha256_file(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0_u8; 64 * 1024].into_boxed_slice();
