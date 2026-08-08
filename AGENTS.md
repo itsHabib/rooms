@@ -35,7 +35,7 @@ These MCPs, planes, and skills are available in any agent session on this machin
 **MCPs (in-session):**
 - **dossier** — durable project memory: projects → phases → tasks → artifacts (markdown-on-disk).
 - **ship** — the driver engine: dispatch a task to a cloud/local agent and persist the run (dispatch→poll→judgment→land→record); inspect/cancel/replay.
-- **huddle** — *optional* multi-seat coordination (Slack-backed); off the normal PR path.
+- **channel** — *optional* agent message bus (append-only JSONL, `channel.post/read/list`); post/read to coordinate with peer agents or leave word for the operator; off the normal PR path.
 - **playwright** — browser automation when a task needs a real DOM.
 
 **Planes (CLIs, composed via exit codes + JSONL — not MCPs):**
@@ -64,7 +64,7 @@ dossier task → /worktree-add → spec → ship driver (cloud-first: dispatch�
 
 ### Why this shape
 
-Each layer owns one responsibility and is swappable without rippling: dossier owns *what needs doing*; worktree skills own *where work happens*; ship owns *drive an agent + persist the run*; pr-risk owns *how much review*; review-coordinator owns *consolidate the finders* (the bots are swappable under it); **gate owns *authorization* — is this exact head allowed to merge — which is not the reviewers' findings**; **flare owns *notification* — a best-effort sink on authoritative receipts, its own Slack app, never blocking the driver, never depending on huddle**; consult owns the stuck path; huddle owns optional multi-seat; playwright owns browser. The workbench is a menu, not a checklist — skip what a flow doesn't need.
+Each layer owns one responsibility and is swappable without rippling: dossier owns *what needs doing*; worktree skills own *where work happens*; ship owns *drive an agent + persist the run*; pr-risk owns *how much review*; review-coordinator owns *consolidate the finders* (the bots are swappable under it); **gate owns *authorization* — is this exact head allowed to merge — which is not the reviewers' findings**; **flare owns *notification* — a best-effort sink on authoritative receipts, its own Slack app, never blocking the driver, never depending on huddle**; consult owns the stuck path; channel owns optional agent-to-agent messaging (superseding huddle); playwright owns browser. The workbench is a menu, not a checklist — skip what a flow doesn't need.
 
 ### The shape underneath
 
