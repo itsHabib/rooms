@@ -441,6 +441,79 @@ pub fn lease(
     }
 }
 
+/// A held free-lock proving this room's lease on a slot.
+///
+/// The caller deletes the slot's tap and then calls
+/// [`LeaseHold::return_to_reservation`] — the free-lock is held continuously
+/// across both, so no other slot operation can interleave. This closes the
+/// window a separate [`leased_by`] check followed by [`release_lease`] would
+/// leave open: the tap is named by slot index alone, so the check→delete→return
+/// sequence must be atomic against another room leasing the same index.
+#[must_use = "delete the tap, then call return_to_reservation (or drop to retain the lease)"]
+pub struct LeaseHold {
+    // Held for its Drop side effect (releasing the flock), never read.
+    _lock: std::fs::File,
+    dir: std::path::PathBuf,
+    index: u8,
+    snapshot_id: String,
+}
+
+impl LeaseHold {
+    /// Return the held lease to a plain reservation, still under the same lock,
+    /// then release the lock. Call only after the slot's tap is deleted.
+    ///
+    /// # Errors
+    /// [`SlotError::Io`] if the atomic rewrite fails; the lease is retained
+    /// (the lock drops without a rewrite) so teardown can be retried.
+    pub fn return_to_reservation(self) -> Result<Released, SlotError> {
+        rewrite_slot_atomic(&self.dir, self.index, &reservation_token(&self.snapshot_id))?;
+        Ok(Released::Returned)
+    }
+}
+
+/// Acquire the free-lock and confirm this room's live lease at `slot_index`.
+///
+/// Returns a [`LeaseHold`] that keeps the lock held so the caller can delete
+/// the slot's tap and return the lease atomically (`snapshot_id` + `room_id`
+/// must both match the `@lease` token).
+///
+/// `Ok(None)` means the slot is not this room's lease (already returned, or
+/// re-leased by another room) — the caller must NOT delete the tap, since it
+/// may belong to whoever holds the slot now.
+///
+/// # Errors
+/// [`SlotError::InvalidIndex`] for an out-of-pool index; [`SlotError::Io`] on a
+/// filesystem error.
+pub fn hold_lease_for_teardown(
+    state: &Path,
+    slot_index: u8,
+    snapshot_id: &str,
+    room_id: &str,
+) -> Result<Option<LeaseHold>, SlotError> {
+    ensure_pool_index(slot_index)?;
+    let dir = state.join(SLOTS_DIR);
+    let path = dir.join(slot_index.to_string());
+    let lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(SlotError::Io(e)),
+    };
+    match parse_token(&contents) {
+        SlotToken::Leased {
+            snapshot_id: owner,
+            lessee,
+        } if owner == snapshot_id && lessee == room_id => Ok(Some(LeaseHold {
+            _lock: lock,
+            dir,
+            index: slot_index,
+            snapshot_id: snapshot_id.to_owned(),
+        })),
+        // Not our lease — the lock drops here, and the caller keeps the tap.
+        _ => Ok(None),
+    }
+}
+
 /// What [`release_lease`] found at the slot index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Released {

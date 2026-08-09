@@ -216,6 +216,18 @@ pub fn pending_all(config: &RoomsConfig) -> anyhow::Result<Vec<PendingSnapshot>>
     Ok(read_intents(config)?.iter().map(pending_summary).collect())
 }
 
+/// The output directories every in-flight snapshot transaction writes into.
+///
+/// A restore's `--out` must be disjoint from these: an output overlapping a
+/// live snapshot's directory would let restore's collect/clear step race a
+/// snapshot mid-write.
+pub fn pending_output_dirs(config: &RoomsConfig) -> anyhow::Result<Vec<PathBuf>> {
+    Ok(read_intents(config)?
+        .into_iter()
+        .map(|intent| intent.out_dir)
+        .collect())
+}
+
 fn build_intent(
     config: &RoomsConfig,
     base: &RoomMeta,

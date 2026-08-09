@@ -17,7 +17,7 @@ use crate::config::RoomsConfig;
 use crate::firecracker::{self, RestoreLaunch, RestoreSpawnRequest};
 use crate::restore::{self, RestoreOp};
 use crate::room::{self, Liveness};
-use crate::slot::{self, Released};
+use crate::slot;
 use crate::snapshot::{self, SnapshotMeta};
 use crate::snapshot_exec::{canonical_candidate, firecracker_version, overlaps, sha256_file};
 use crate::{egress, transport, vsock, witness};
@@ -387,36 +387,29 @@ pub fn finish_teardown(
     // keyed by room id and always safe. If they survive, the reap errors and
     // the tombstone stays for a retry, before we touch the shared slot.
     firecracker::reap_room_only(&room_dir, &jail_dir, &socket, config)?;
-    // The tap and egress chain are named by slot index alone. Delete them ONLY
-    // while we still hold the lease: a GC retry after an earlier pass already
-    // returned the lease — or a `rooms kill` racing a re-lease — must never
-    // delete a tap a *different* room has since re-leased and recreated.
+    // The tap and egress chain are named by slot index alone, so they may be
+    // deleted ONLY while we hold the lease: a GC retry after an earlier pass
+    // already returned the lease — or a `rooms kill` racing a re-lease — must
+    // never delete a tap a *different* room has since re-leased and recreated.
     //
-    // The `leased_by` probe drops the free-lock before the delete, but that is
-    // not a TOCTOU: a lease is released only by *its own* lessee (that's this
-    // room, right here, and not until `release_lease` below), so once
-    // `leased_by` reads true it stays true through the delete — no other actor
-    // can flip it. This holds because `finish_teardown` is the *sole* deleter
-    // of a leased tap: the room's RoomGuard is deliberately not given tap
-    // ownership (see `attach_leased_slot`), so no guard-drop path competes.
-    if slot::leased_by(&state, slot_index, snapshot_id, room_id)? {
-        firecracker::remove_egress_and_tap(&tap).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        match slot::release_lease(&state, slot_index, snapshot_id, room_id)? {
-            Released::Returned | Released::AlreadyReturned => {}
-            Released::NotOurLease => {
-                anyhow::bail!(
-                    "lease vanished between ownership check and return for slot {slot_index}"
-                )
-            }
+    // `hold_lease_for_teardown` keeps the free-lock held across the delete AND
+    // the return, so the whole check→delete→return is atomic — no other slot
+    // operation (a competing lease of this index) can interleave. `None` means
+    // the slot is not our lease, so we leave its tap/egress to whoever owns it
+    // now and just clear our tombstone. (This is also why the RoomGuard is
+    // deliberately not given tap ownership — see `attach_leased_slot`: this is
+    // the sole deleter of a leased tap.)
+    match slot::hold_lease_for_teardown(&state, slot_index, snapshot_id, room_id)? {
+        Some(hold) => {
+            firecracker::remove_egress_and_tap(&tap).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            hold.return_to_reservation()?;
         }
-    } else {
-        // Not our lease (already returned, or re-leased by another room). Our
-        // room-keyed residue is gone; leave the slot's tap/egress to whoever
-        // owns it now, and just clear our tombstone.
-        warn!(
-            slot = slot_index,
-            "restore teardown holds no lease for this room; leaving the slot tap/egress untouched"
-        );
+        None => {
+            warn!(
+                slot = slot_index,
+                "restore teardown holds no lease for this room; leaving the slot tap/egress untouched"
+            );
+        }
     }
     finish_index(config, room_id)
 }
@@ -573,6 +566,19 @@ fn validate_output_disjoint(
                 "restore output {} lies inside snapshot directory {}",
                 out.display(),
                 ancestor.display()
+            );
+        }
+    }
+    // Reject an output a still-in-flight snapshot transaction is writing to.
+    // A completed snapshot dir is caught above (its `snapshot.json`), but a
+    // pending one has no metadata yet — its live artifact pair would race
+    // restore's collect/clear step. The intent index names those dirs.
+    for pending in crate::snapshot_exec::pending_output_dirs(config)? {
+        if overlaps(&out, &canonical_candidate(&pending)?) {
+            anyhow::bail!(
+                "restore output {} overlaps a pending snapshot transaction's output {}",
+                out.display(),
+                pending.display()
             );
         }
     }

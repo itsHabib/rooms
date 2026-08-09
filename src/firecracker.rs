@@ -2035,7 +2035,7 @@ pub fn reap_reserved_base(
 /// slot-keyed network cleanup on still holding the lease: the tap is named by
 /// slot index alone, so deleting it unconditionally could tear down a tap a
 /// different room has since re-leased and recreated (see
-/// [`crate::slot::leased_by`]).
+/// [`crate::slot::hold_lease_for_teardown`]).
 pub fn reap_room_only(
     room_dir: &Path,
     jail_instance_dir: &Path,
