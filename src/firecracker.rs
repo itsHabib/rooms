@@ -1726,15 +1726,18 @@ impl RestoreLaunch {
         wait_for_socket(&socket, timeout, &mut self.child, Some(&log_path)).await
     }
 
-    /// Create the leased slot's tap and record tap ownership on the guard.
+    /// Create the leased slot's tap. The guard is deliberately NOT given
+    /// ownership of it (no `set_tap_owned`, no [`SlotRelease`]).
     ///
-    /// Deliberately does NOT bind a [`SlotRelease`]: a restore holds a lease,
-    /// not an ordinary claim, and the lease is returned explicitly by the
-    /// restore teardown after the reap-clean gate — never routed through
-    /// `slot::free`.
+    /// A restored room's tap is named by slot index alone and is deleted by
+    /// exactly one place — the lease-gated `restore_exec::finish_teardown`,
+    /// which only deletes it while this room still holds the lease. If the
+    /// guard owned the tap, its own drop/cleanup would `ip link del` it
+    /// unconditionally, bypassing that gate and racing a tap a *different*
+    /// room may have re-leased and recreated. So the guard reaps only this
+    /// room's own resources (process/jail/room dir); the shared slot's tap
+    /// and lease are the teardown's business.
     pub fn attach_leased_slot(&mut self, slot: &room::Slot) -> Result<(), FirecrackerError> {
-        self.guard.set_tap(slot.tap.clone());
-        self.guard.set_tap_owned(true);
         create_slot_tap(slot)?;
         Ok(())
     }

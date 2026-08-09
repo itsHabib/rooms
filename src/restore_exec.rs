@@ -390,9 +390,15 @@ pub fn finish_teardown(
     // The tap and egress chain are named by slot index alone. Delete them ONLY
     // while we still hold the lease: a GC retry after an earlier pass already
     // returned the lease — or a `rooms kill` racing a re-lease — must never
-    // delete a tap a *different* room has since re-leased and recreated. We
-    // hold the free-lock proof: no one else can take our lease while we hold
-    // it, so the check can't race the delete.
+    // delete a tap a *different* room has since re-leased and recreated.
+    //
+    // The `leased_by` probe drops the free-lock before the delete, but that is
+    // not a TOCTOU: a lease is released only by *its own* lessee (that's this
+    // room, right here, and not until `release_lease` below), so once
+    // `leased_by` reads true it stays true through the delete — no other actor
+    // can flip it. This holds because `finish_teardown` is the *sole* deleter
+    // of a leased tap: the room's RoomGuard is deliberately not given tap
+    // ownership (see `attach_leased_slot`), so no guard-drop path competes.
     if slot::leased_by(&state, slot_index, snapshot_id, room_id)? {
         firecracker::remove_egress_and_tap(&tap).map_err(|e| anyhow::anyhow!(e.to_string()))?;
         match slot::release_lease(&state, slot_index, snapshot_id, room_id)? {

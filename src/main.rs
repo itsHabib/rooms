@@ -1260,9 +1260,12 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     emit_restored(&room_id, &snapshot_id, &slot, args.json);
 
     if args.keep {
-        // Hand ownership to the persisted room: the guard dismisses, the
-        // intent tombstone stays with the lease it records, and `rooms gc`
-        // returns the lease once the room is conclusively dead.
+        // Hand ownership to the persisted room. The guard dismisses (and never
+        // owned the leased tap — see `attach_leased_slot`), so forgetting the
+        // VM leaks nothing the lease-aware teardown won't reclaim: the intent
+        // tombstone keeps the `@lease`, and `rooms kill` / `rooms gc` both
+        // route a restored room through `restore_exec::finish_teardown`, which
+        // returns the lease (never `slot::free`) once the room is torn down.
         vm.guard_mut().dismiss();
         std::mem::forget(vm);
         info!(room = %room_id, "--keep: restored room preserved; lease held until teardown");
