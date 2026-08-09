@@ -130,19 +130,44 @@ fi
 
 # --- Firecracker ---
 
-if command -v firecracker >/dev/null 2>&1; then
-    log "Firecracker already installed: $(firecracker --version)"
-else
+# Extract the dotted version from `firecracker --version` (first line, e.g.
+# "Firecracker v1.10.1" -> "1.10.1"). Empty when firecracker is absent.
+firecracker_installed_version() {
+    command -v firecracker >/dev/null 2>&1 || return 0
+    firecracker --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+}
+
+install_firecracker() {
     log "installing Firecracker $FIRECRACKER_VERSION"
+    local tmp
     tmp="$(mktemp -d)"
-    url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz"
+    local url="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz"
     curl -fSL "$url" -o "$tmp/fc.tgz"
     verify_sha256 "$tmp/fc.tgz" "firecracker-${FIRECRACKER_VERSION}-${ARCH}.tgz"
     tar -C "$tmp" -xzf "$tmp/fc.tgz"
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-${ARCH}/firecracker-${FIRECRACKER_VERSION}-${ARCH} /usr/local/bin/firecracker
     sudo install -m 0755 "$tmp"/release-${FIRECRACKER_VERSION}-${ARCH}/jailer-${FIRECRACKER_VERSION}-${ARCH} /usr/local/bin/jailer
     rm -rf "$tmp"
-    log "Firecracker installed: $(firecracker --version)"
+    log "Firecracker installed: $(firecracker --version | head -n1)"
+}
+
+# Install when absent, and UPGRADE when the installed version is below the
+# pinned minimum. Gating on mere presence would leave a pre-existing (e.g.
+# v1.10.1) binary in place — and on aarch64 that jailer panics at boot when the
+# outer hypervisor omits cpu cache geometry, a silent failure on exactly the
+# platform this targets. The `sort -V` check upgrades but never downgrades a
+# newer operator-installed build.
+FIRECRACKER_MIN="${FIRECRACKER_VERSION#v}"
+_fc_have="$(firecracker_installed_version)"
+if [[ -z "$_fc_have" ]]; then
+    install_firecracker
+elif [[ "$_fc_have" == "$FIRECRACKER_MIN" ]]; then
+    log "Firecracker $_fc_have already installed (matches pin)"
+elif [[ "$(printf '%s\n%s\n' "$FIRECRACKER_MIN" "$_fc_have" | sort -V | head -n1)" == "$FIRECRACKER_MIN" ]]; then
+    log "Firecracker $_fc_have installed (newer than pinned $FIRECRACKER_MIN); leaving as-is"
+else
+    warn "Firecracker $_fc_have is older than the required $FIRECRACKER_MIN; upgrading (older jailers panic on aarch64)"
+    install_firecracker
 fi
 
 # --- quickstart kernel + rootfs ---

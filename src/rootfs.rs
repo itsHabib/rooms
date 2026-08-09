@@ -44,9 +44,16 @@ pub fn validate_rootfs(path: &Path, min_bytes: u64) -> Result<(), RootfsError> {
     Ok(())
 }
 
-/// Validate that `path` exists and is a bootable Firecracker guest kernel:
-/// an uncompressed ELF vmlinux (`x86_64`) or a Linux ARM64 boot `Image`
-/// (`aarch64`; magic `ARM\x64` at byte offset 56).
+/// Validate that `path` is a bootable Firecracker guest kernel for this host.
+///
+/// An uncompressed ELF vmlinux on `x86_64`, or a Linux ARM64 boot `Image`
+/// (magic `ARM\x64` at byte offset 56) on `aarch64`.
+/// The guest kernel boots under the host's own Firecracker, so its format must
+/// match the host arch: the check is gated on the build's `target_arch` (which
+/// equals the host arch), the same way the shell-side `is_guest_kernel` gates
+/// on `uname -m`. Accepting the wrong-arch format here would defer a guaranteed
+/// boot failure past validation — worse than rejecting it up front on this
+/// isolation-boundary path.
 pub fn validate_kernel(path: &Path) -> Result<(), RootfsError> {
     if !path.exists() {
         return Err(RootfsError::KernelNotFound {
@@ -66,15 +73,36 @@ pub fn validate_kernel(path: &Path) -> Result<(), RootfsError> {
         Err(e) => return Err(e.into()),
     }
 
+    if kernel_matches_host_arch(&header) {
+        return Ok(());
+    }
+    Err(RootfsError::KernelBadFormat {
+        path: path.to_path_buf(),
+    })
+}
+
+/// Whether the 60-byte header is the bootable kernel format for this build's
+/// target architecture. `x86_64` requires an ELF vmlinux; `aarch64` requires
+/// an ARM64 boot `Image` (magic at offset 56). On any other target arch rooms
+/// does not run Firecracker, so accept either rather than hard-fail a format
+/// check that has no host to boot against.
+fn kernel_matches_host_arch(header: &[u8; 60]) -> bool {
     let elf = header[..4] == [0x7F, b'E', b'L', b'F'];
     let arm64_image = header[56..60] == *b"ARM\x64";
-    if !elf && !arm64_image {
-        return Err(RootfsError::KernelBadFormat {
-            path: path.to_path_buf(),
-        });
+    #[cfg(target_arch = "x86_64")]
+    {
+        let _ = arm64_image;
+        elf
     }
-
-    Ok(())
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = elf;
+        arm64_image
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        elf || arm64_image
+    }
 }
 
 /// Fail-closed admission for a snapshot-capable base image.
@@ -184,21 +212,61 @@ mod tests {
         f
     }
 
-    #[test]
-    fn validate_kernel_accepts_elf_and_arm64_image_rejects_others() {
-        // x86_64 uncompressed vmlinux: ELF magic at offset 0.
+    /// An ELF vmlinux header (magic at offset 0).
+    fn elf_kernel() -> Vec<u8> {
         let mut elf = vec![0_u8; 64];
         elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
-        let f = write_kernel(&elf);
-        assert!(validate_kernel(f.path()).is_ok(), "ELF vmlinux must pass");
+        elf
+    }
 
-        // aarch64 Linux boot Image: "ARMd" magic at byte offset 56.
+    /// An ARM64 Linux boot `Image` header (`ARMd` magic at offset 56).
+    fn arm64_kernel() -> Vec<u8> {
         let mut image = vec![0_u8; 64];
         image[56..60].copy_from_slice(b"ARM\x64");
-        let f = write_kernel(&image);
-        assert!(validate_kernel(f.path()).is_ok(), "ARM64 Image must pass");
+        image
+    }
 
-        // Neither magic → KernelBadFormat.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn validate_kernel_accepts_elf_and_rejects_arm64_on_x86() {
+        let f = write_kernel(&elf_kernel());
+        assert!(
+            validate_kernel(f.path()).is_ok(),
+            "ELF vmlinux must pass on x86_64"
+        );
+        // The wrong-arch kernel must be rejected at validation, not deferred to
+        // a boot failure.
+        let f = write_kernel(&arm64_kernel());
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "an ARM64 Image must be rejected on an x86_64 host"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn validate_kernel_accepts_arm64_and_rejects_elf_on_aarch64() {
+        let f = write_kernel(&arm64_kernel());
+        assert!(
+            validate_kernel(f.path()).is_ok(),
+            "ARM64 Image must pass on aarch64"
+        );
+        let f = write_kernel(&elf_kernel());
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "an ELF vmlinux must be rejected on an aarch64 host"
+        );
+    }
+
+    #[test]
+    fn validate_kernel_rejects_neither_magic_and_short_headers() {
+        // Neither magic → KernelBadFormat (on every arch).
         let f = write_kernel(&[0_u8; 64]);
         assert!(
             matches!(
@@ -207,7 +275,6 @@ mod tests {
             ),
             "a buffer that is neither ELF nor ARM64 Image must be rejected"
         );
-
         // Too short to carry the offset-56 magic → KernelBadFormat, not a panic.
         let f = write_kernel(&[0x7F, b'E']);
         assert!(
