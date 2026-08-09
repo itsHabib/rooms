@@ -63,6 +63,8 @@ dossier task -> /worktree-add -> spec -> ship driver (dispatch -> poll -> judgme
        \-> attention or terminal receipt -> flare -> Slack (best effort; never gates)
 ```
 
+`/work-driver` coordinates dispatch -> poll -> land and runs its own review triage inline. `/pr-risk` and `/review-coordinator` are explicit steps; the driver does not invoke them automatically.
+
 ### Why this shape
 
 Each layer owns one responsibility and can be replaced without rippling: dossier owns what needs doing; worktree skills own where work happens; Ship owns agent execution and durable run state; pr-risk owns review depth; reviewer bots are swappable finders; review-coordinator owns their consolidated artifact; Gate alone owns exact-head merge authorization; Escalate carries a human resolution without deciding it; Console explains Gate state; Flare notifies; Consult handles cross-repo knowledge. The workbench is a menu, not a checklist.
