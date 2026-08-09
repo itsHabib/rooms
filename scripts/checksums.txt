@@ -1,14 +1,22 @@
 # Central sha256 pins for rooms build inputs. Bump deliberately when upstream
 # versions change — this file is the single audit point for supply-chain pins.
 # Format: sha256␠␠artifact-name (verified by setup-rooms-host.sh and rooms doctor).
+# Artifact names are arch-qualified; each host verifies the pins for its own
+# `uname -m` (x86_64 or aarch64).
 #
 # Download-time artifacts (setup-rooms-host.sh):
-36112969952b0e34fadcfca769d48a55dc22cbba99af17e02bd0e24fc35adc77  firecracker-v1.10.1-x86_64.tgz
-e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2  vmlinux-6.1.155.bin
-2a840feeccb5cb161c6eab1ecd86667c06ed5e307da534d2d3c9e39a6ec6c30a  bionic.rootfs.ext4
+00cadf7f21e709e939dc0c8d16e2d2ce7b975a62bec6c50f74b421cc8ab3cab4  firecracker-v1.15.0-x86_64.tgz
+58325e6c3c539482a412ec0b60e6f539c3320adebcf8179c7629d06736aee0bd  firecracker-v1.15.0-aarch64.tgz
+e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2  vmlinux-6.1.155-x86_64.bin
+e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591  vmlinux-6.1.155-aarch64.bin
+2a840feeccb5cb161c6eab1ecd86667c06ed5e307da534d2d3c9e39a6ec6c30a  bionic.rootfs-x86_64.ext4
+aa5a84251a5f3aaa74c663b074e1ebb283756c244068aff8cf4d9adc13f825df  bionic.rootfs-aarch64.ext4
 6c30b75a75b28a96fd913a037c8581b580080b6ee9b8169a3c0feb1af7fe8caf  rustup-init.sh
 # Installed binaries (rooms doctor sha-drift check):
-96d25e000e5fcbf5b11dca0e1275b5d7dc0922ff8b8206aeaed98e515a8468dc  firecracker-v1.10.1-x86_64
-8965e9ee855537561ac3adaf0b086a3882456fdc55472691f3bbe489199014ce  jailer-v1.10.1-x86_64
+abbb763119b7519d204336b19ffd7629c0967c99f6266815fb072c837d70be06  firecracker-v1.15.0-x86_64
+3b5487ff3863c12318cc2cf3b4c182f6ccf9a0791d93bdb83fffb776158eac23  firecracker-v1.15.0-aarch64
+9f50ceec0a90cf8f823a97ddf23f80379aa93b243511c54b79234945bc97cae4  jailer-v1.15.0-x86_64
+b8871ccb985432596a46d7eaf8891f33a5e7a3937ee290acd30d6d11d9994914  jailer-v1.15.0-aarch64
 # Rootfs builder (build-rootfs-alpine.sh):
 8cba1ea3e8b500ea986a313d8eecf3d5952a2a0d23a69117bb81c023d9ceac05  alpine-minirootfs-3.21.7-x86_64.tar.gz
+d1d1a3fae5f4d6146e9742790a47fcb116199622cfb8439f218a4d5fbe5000da  alpine-minirootfs-3.21.7-aarch64.tar.gz
