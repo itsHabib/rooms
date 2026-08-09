@@ -132,8 +132,8 @@ pub enum RootfsError {
     },
     #[error("kernel not found at {path}")]
     KernelNotFound { path: PathBuf },
-    #[error("kernel at {path} is not a valid ELF")]
-    KernelNotElf { path: PathBuf },
+    #[error("kernel at {path} is neither an ELF vmlinux nor an ARM64 boot Image")]
+    KernelBadFormat { path: PathBuf },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -14,18 +14,25 @@ use crate::rootfs::{kernel_sibling, validate_kernel, validate_rootfs};
 /// Embedded checksum pins (same source as `scripts/checksums.txt`).
 const CHECKSUMS_TXT: &str = include_str!("../scripts/checksums.txt");
 
+/// Host architecture as it appears in arch-qualified artifact names
+/// (`x86_64` / `aarch64`); doctor runs on the host, so the binary's own
+/// target arch is the host arch.
+const HOST_ARCH: &str = std::env::consts::ARCH;
+
 /// Artifact names in `checksums.txt` checked against on-disk installs.
 ///
-/// `bionic.rootfs.ext4` is deliberately absent: its pin is verified at
+/// The bionic rootfs is deliberately absent: its pin is verified at
 /// download time by `setup-rooms-host.sh`, and the provisioning runbook then
 /// replaces the default rootfs path with a locally built agent image — so a
 /// resting-state drift check against the bionic digest would warn on every
 /// correctly provisioned host.
-const DRIFT_ARTIFACTS: &[&str] = &[
-    "firecracker-v1.10.1-x86_64",
-    "jailer-v1.10.1-x86_64",
-    "vmlinux-6.1.155.bin",
-];
+fn drift_artifacts() -> [String; 3] {
+    [
+        format!("firecracker-v1.15.0-{HOST_ARCH}"),
+        format!("jailer-v1.15.0-{HOST_ARCH}"),
+        format!("vmlinux-6.1.155-{HOST_ARCH}.bin"),
+    ]
+}
 
 /// Schema version for `--json` output (ED-4: forward-compatible).
 pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
@@ -231,8 +238,24 @@ fn check_kvm() -> CheckResult {
     }
 }
 
+/// The effective Firecracker floor for this host. On aarch64 the jailer needs
+/// v1.15 — older jailers panic when the outer hypervisor omits cpu cache
+/// geometry from sysfs (the reason this port bumped the pin) — so a host that
+/// installed, say, v1.13 would otherwise pass `doctor` and only fail at boot
+/// with an opaque jailer panic. Take the stricter of the config floor and the
+/// arch floor.
+fn effective_min_fc_version(config: &RoomsConfig) -> (u32, u32) {
+    let arch_floor = if HOST_ARCH == "aarch64" {
+        (1, 15)
+    } else {
+        (0, 0)
+    };
+    config.min_firecracker_version.max(arch_floor)
+}
+
 fn check_firecracker_version(config: &RoomsConfig) -> CheckResult {
     let name = "firecracker".to_owned();
+    let min = effective_min_fc_version(config);
     let output = Command::new(&config.firecracker_binary)
         .arg("--version")
         .output();
@@ -241,24 +264,17 @@ fn check_firecracker_version(config: &RoomsConfig) -> CheckResult {
         Ok(out) if out.status.success() => {
             let version_str = String::from_utf8_lossy(&out.stdout).trim().to_owned();
             match parse_firecracker_version(&version_str) {
-                Some((major, minor))
-                    if version_meets_min(major, minor, config.min_firecracker_version) =>
-                {
-                    CheckResult {
-                        name,
-                        ok: true,
-                        message: format!(
-                            "firecracker {major}.{minor} (>= {}.{})",
-                            config.min_firecracker_version.0, config.min_firecracker_version.1
-                        ),
-                    }
-                }
+                Some((major, minor)) if version_meets_min(major, minor, min) => CheckResult {
+                    name,
+                    ok: true,
+                    message: format!("firecracker {major}.{minor} (>= {}.{})", min.0, min.1),
+                },
                 Some((major, minor)) => CheckResult {
                     name,
                     ok: false,
                     message: format!(
                         "firecracker {major}.{minor} is below minimum {}.{}",
-                        config.min_firecracker_version.0, config.min_firecracker_version.1
+                        min.0, min.1
                     ),
                 },
                 None => CheckResult {
@@ -903,6 +919,30 @@ fn parse_tap_index(line: &str) -> Option<u8> {
 fn check_nested_virt() -> CheckResult {
     let name = "nested_virt".to_owned();
 
+    // aarch64 has no kvm_intel/kvm_amd nested knob and kvm-ok is x86-only;
+    // usable KVM is itself the signal — the outer hypervisor either exposes
+    // virtualization to this VM or it doesn't. Gate on r/w openability, not mere
+    // existence, so a permission-denied /dev/kvm can't report `kvm` ❌ and
+    // `nested_virt` ✅ in the same run.
+    if HOST_ARCH == "aarch64" {
+        let usable = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+            .is_ok();
+        return CheckResult {
+            name,
+            ok: usable,
+            message: if usable {
+                "nested virtualization available (/dev/kvm r/w on aarch64)".to_owned()
+            } else if Path::new("/dev/kvm").exists() {
+                "/dev/kvm present but not r/w-accessible; see the kvm check".to_owned()
+            } else {
+                "/dev/kvm absent; enable nested virtualization on the outer VM".to_owned()
+            },
+        };
+    }
+
     // Try kvm-ok first. Trust the exit status — the string match was a
     // double-positive that would have flipped "nested virtualisation not
     // enabled" stderr into a "ok" result.
@@ -1002,15 +1042,19 @@ fn drift_target_path(
     config: &RoomsConfig,
     image: Option<&Path>,
 ) -> Option<PathBuf> {
-    match artifact {
-        "firecracker-v1.10.1-x86_64" => resolve_in_path(&config.firecracker_binary),
-        // jailer installs alongside firecracker (setup-rooms-host.sh) and is a
-        // security-boundary binary, so cover its pin too. It is not in
-        // RoomsConfig, so resolve the conventional name on PATH.
-        "jailer-v1.10.1-x86_64" => resolve_in_path(Path::new("jailer")),
-        "vmlinux-6.1.155.bin" => resolve_kernel_path(image),
-        _ => None,
+    if artifact == format!("firecracker-v1.15.0-{HOST_ARCH}") {
+        return resolve_in_path(&config.firecracker_binary);
     }
+    // jailer installs alongside firecracker (setup-rooms-host.sh) and is a
+    // security-boundary binary, so cover its pin too. It is not in
+    // RoomsConfig, so resolve the conventional name on PATH.
+    if artifact == format!("jailer-v1.15.0-{HOST_ARCH}") {
+        return resolve_in_path(Path::new("jailer"));
+    }
+    if artifact == format!("vmlinux-6.1.155-{HOST_ARCH}.bin") {
+        return resolve_kernel_path(image);
+    }
+    None
 }
 
 /// Resolve a binary to a concrete path. Absolute or directory-qualified paths
@@ -1044,14 +1088,14 @@ where
     let mut warnings = Vec::new();
     let mut checked = 0u32;
 
-    for artifact in DRIFT_ARTIFACTS {
-        let Some(expected) = pins.get(*artifact) else {
+    for artifact in &drift_artifacts() {
+        let Some(expected) = pins.get(artifact.as_str()) else {
             warnings.push(format!(
                 "no checksum pin for {artifact} in embedded checksums"
             ));
             continue;
         };
-        let Some(path) = resolve_target(artifact, config, image) else {
+        let Some(path) = resolve_target(artifact.as_str(), config, image) else {
             continue;
         };
         if !path.exists() {
@@ -1170,6 +1214,26 @@ mod tests {
     }
 
     #[test]
+    fn aarch64_raises_the_firecracker_floor_to_1_15() {
+        // The config default floor is (1, 7); the effective floor never drops
+        // below it, and on aarch64 it rises to (1, 15) — where the jailer stops
+        // panicking on a hypervisor that omits cpu cache geometry.
+        let config = RoomsConfig::default();
+        let effective = super::effective_min_fc_version(&config);
+        if super::HOST_ARCH == "aarch64" {
+            assert_eq!(effective, (1, 15));
+        } else {
+            assert_eq!(effective, config.min_firecracker_version);
+        }
+        // A stricter config floor always wins over the arch floor.
+        let strict = RoomsConfig {
+            min_firecracker_version: (2, 0),
+            ..RoomsConfig::default()
+        };
+        assert_eq!(super::effective_min_fc_version(&strict), (2, 0));
+    }
+
+    #[test]
     fn parses_checksums_skips_comments_and_blanks() {
         let digest = "a".repeat(64);
         let input = format!("# comment\n\n{digest}  artifact-a\n");
@@ -1222,12 +1286,13 @@ mod tests {
         // image, so a resting-state drift check would warn on every correctly
         // provisioned host. Doctor must not resolve it as a drift target.
         let config = RoomsConfig::default();
+        let bionic = format!("bionic.rootfs-{}.ext4", super::HOST_ARCH);
         assert!(
-            !super::DRIFT_ARTIFACTS.contains(&"bionic.rootfs.ext4"),
+            !super::drift_artifacts().contains(&bionic),
             "bionic must not be drift-checked at rest"
         );
         assert_eq!(
-            drift_target_path("bionic.rootfs.ext4", &config, None),
+            drift_target_path(&bionic, &config, None),
             None,
             "bionic must not resolve to any on-disk drift target"
         );

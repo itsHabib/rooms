@@ -40,8 +40,14 @@ SSH_KEY=""
 EXTEND=""
 
 ALPINE_CDN="https://dl-cdn.alpinelinux.org/alpine"
+# The image is built for the build host's own arch (chroot, no cross-build).
+BUILD_ARCH="$(uname -m)"
 # Pinned in scripts/checksums.txt — do not trust the CDN .sha256 sidecar alone.
-ALPINE_MINIROOTFS_SHA256="8cba1ea3e8b500ea986a313d8eecf3d5952a2a0d23a69117bb81c023d9ceac05"
+case "$BUILD_ARCH" in
+    x86_64)  ALPINE_MINIROOTFS_SHA256="8cba1ea3e8b500ea986a313d8eecf3d5952a2a0d23a69117bb81c023d9ceac05" ;;
+    aarch64) ALPINE_MINIROOTFS_SHA256="d1d1a3fae5f4d6146e9742790a47fcb116199622cfb8439f218a4d5fbe5000da" ;;
+    *) printf '\033[1;31m[build-alpine]\033[0m unsupported build arch: %s (x86_64 or aarch64)\n' "$BUILD_ARCH" >&2; exit 1 ;;
+esac
 CLAUDE_KEY_URL="https://downloads.claude.ai/keys/claude-code.rsa.pub"
 CLAUDE_KEY_SHA256="395759c1f7449ef4cdef305a42e820f3c766d6090d142634ebdb049f113168b6"
 CLAUDE_APK_REPO="https://downloads.claude.ai/claude-code/apk/stable"
@@ -93,8 +99,8 @@ assert_root
 
 # Alpine branch is vMAJOR.MINOR (e.g. 3.21.7 -> v3.21).
 ALPINE_BRANCH="v$(printf '%s' "$ALPINE_VERSION" | cut -d. -f1,2)"
-TARBALL="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
-MIRROR="${ALPINE_CDN}/${ALPINE_BRANCH}/releases/x86_64"
+TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${BUILD_ARCH}.tar.gz"
+MIRROR="${ALPINE_CDN}/${ALPINE_BRANCH}/releases/${BUILD_ARCH}"
 
 MISSING=()
 for cmd in mkfs.ext4 mount umount chroot losetup truncate curl sha256sum tar; do

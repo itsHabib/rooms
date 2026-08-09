@@ -44,7 +44,16 @@ pub fn validate_rootfs(path: &Path, min_bytes: u64) -> Result<(), RootfsError> {
     Ok(())
 }
 
-/// Validate that `path` exists and has a valid ELF header.
+/// Validate that `path` is a bootable Firecracker guest kernel for this host.
+///
+/// An uncompressed ELF vmlinux on `x86_64`, or a Linux ARM64 boot `Image`
+/// (magic `ARM\x64` at byte offset 56) on `aarch64`.
+/// The guest kernel boots under the host's own Firecracker, so its format must
+/// match the host arch: the check is gated on the build's `target_arch` (which
+/// equals the host arch), the same way the shell-side `is_guest_kernel` gates
+/// on `uname -m`. Accepting the wrong-arch format here would defer a guaranteed
+/// boot failure past validation — worse than rejecting it up front on this
+/// isolation-boundary path.
 pub fn validate_kernel(path: &Path) -> Result<(), RootfsError> {
     if !path.exists() {
         return Err(RootfsError::KernelNotFound {
@@ -52,16 +61,48 @@ pub fn validate_kernel(path: &Path) -> Result<(), RootfsError> {
         });
     }
 
-    let mut header = [0_u8; 4];
+    let mut header = [0_u8; 60];
     let mut file = std::fs::File::open(path)?;
-    file.read_exact(&mut header)?;
-    if header != [0x7F, b'E', b'L', b'F'] {
-        return Err(RootfsError::KernelNotElf {
-            path: path.to_path_buf(),
-        });
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(RootfsError::KernelBadFormat {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(e) => return Err(e.into()),
     }
 
-    Ok(())
+    if kernel_matches_host_arch(&header) {
+        return Ok(());
+    }
+    Err(RootfsError::KernelBadFormat {
+        path: path.to_path_buf(),
+    })
+}
+
+/// Whether the 60-byte header is the bootable kernel format for this build's
+/// target architecture. `x86_64` requires an ELF vmlinux; `aarch64` requires
+/// an ARM64 boot `Image` (magic at offset 56). On any other target arch rooms
+/// does not run Firecracker, so accept either rather than hard-fail a format
+/// check that has no host to boot against.
+fn kernel_matches_host_arch(header: &[u8; 60]) -> bool {
+    let elf = header[..4] == [0x7F, b'E', b'L', b'F'];
+    let arm64_image = header[56..60] == *b"ARM\x64";
+    #[cfg(target_arch = "x86_64")]
+    {
+        let _ = arm64_image;
+        elf
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = elf;
+        arm64_image
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        elf || arm64_image
+    }
 }
 
 /// Fail-closed admission for a snapshot-capable base image.
@@ -156,10 +197,103 @@ pub fn unmount_overlay(mount_point: &Path) {
 mod tests {
     #![allow(
         clippy::expect_used,
+        clippy::indexing_slicing,
         reason = "test helper: a missing shell is an immediate test failure"
     )]
 
-    use super::{baked_host_private_key, debugfs_spawn_error};
+    use super::{baked_host_private_key, debugfs_spawn_error, validate_kernel};
+    use crate::error::RootfsError;
+
+    fn write_kernel(bytes: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(bytes).expect("write");
+        f.flush().expect("flush");
+        f
+    }
+
+    /// An ELF vmlinux header (magic at offset 0).
+    fn elf_kernel() -> Vec<u8> {
+        let mut elf = vec![0_u8; 64];
+        elf[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        elf
+    }
+
+    /// An ARM64 Linux boot `Image` header (`ARMd` magic at offset 56).
+    fn arm64_kernel() -> Vec<u8> {
+        let mut image = vec![0_u8; 64];
+        image[56..60].copy_from_slice(b"ARM\x64");
+        image
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn validate_kernel_accepts_elf_and_rejects_arm64_on_x86() {
+        let f = write_kernel(&elf_kernel());
+        assert!(
+            validate_kernel(f.path()).is_ok(),
+            "ELF vmlinux must pass on x86_64"
+        );
+        // The wrong-arch kernel must be rejected at validation, not deferred to
+        // a boot failure.
+        let f = write_kernel(&arm64_kernel());
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "an ARM64 Image must be rejected on an x86_64 host"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn validate_kernel_accepts_arm64_and_rejects_elf_on_aarch64() {
+        let f = write_kernel(&arm64_kernel());
+        assert!(
+            validate_kernel(f.path()).is_ok(),
+            "ARM64 Image must pass on aarch64"
+        );
+        let f = write_kernel(&elf_kernel());
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "an ELF vmlinux must be rejected on an aarch64 host"
+        );
+    }
+
+    #[test]
+    fn validate_kernel_rejects_neither_magic_and_short_headers() {
+        // Neither magic → KernelBadFormat (on every arch).
+        let f = write_kernel(&[0_u8; 64]);
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "a buffer that is neither ELF nor ARM64 Image must be rejected"
+        );
+        // Too short to carry the offset-56 magic → KernelBadFormat, not a panic.
+        let f = write_kernel(&[0x7F, b'E']);
+        assert!(
+            matches!(
+                validate_kernel(f.path()),
+                Err(RootfsError::KernelBadFormat { .. })
+            ),
+            "a sub-header file must be rejected as bad format"
+        );
+    }
+
+    #[test]
+    fn validate_kernel_missing_file_is_not_found() {
+        let missing = std::path::Path::new("/nonexistent/rooms/vmlinux.bin");
+        assert!(matches!(
+            validate_kernel(missing),
+            Err(RootfsError::KernelNotFound { .. })
+        ));
+    }
 
     #[test]
     fn private_host_keys_are_rejected_but_public_halves_are_not() {
