@@ -146,6 +146,11 @@ pub struct RoomMeta {
     /// files keep their exact shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provenance: Option<Provenance>,
+    /// The snapshot this room was restored from (`rooms restore`); `None` for
+    /// a booted (non-restored) room. Additive: absent in earlier schemas and
+    /// not serialized when unset, so legacy files keep their exact shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_lineage: Option<String>,
 }
 
 impl RoomMeta {
@@ -170,6 +175,7 @@ impl RoomMeta {
             keep,
             slot: None,
             provenance: None,
+            snapshot_lineage: None,
         }
     }
 

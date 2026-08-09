@@ -179,6 +179,49 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Restore a snapshot into one fresh room on its frozen slot.
+    ///
+    /// Starts a fresh jailed Firecracker, leases the snapshot's reserved slot,
+    /// installs custody (witness/egress) before the guest resumes, loads the
+    /// snapshot, resumes, and gates readiness on the guest's hygiene ack
+    /// (reseeded RNG, stepped clock, fresh sshd host key, new identity).
+    /// Exactly one lifecycle mode is required: `--keep` or `--command`.
+    Restore {
+        /// Completed snapshot artifact directory (from `rooms snapshot`).
+        snapshot_dir: PathBuf,
+        /// The backing rootfs image; its hash must match the snapshot's pin.
+        #[arg(long)]
+        image: PathBuf,
+        /// Keep the restored room alive; hands ownership to the persisted room.
+        #[arg(long, conflicts_with = "command")]
+        keep: bool,
+        /// Run one command in the restored guest, then tear down.
+        #[arg(long, conflicts_with = "keep", value_parser = non_empty_command)]
+        command: Option<String>,
+        /// Slot to restore onto; must equal the snapshot's frozen slot.
+        #[arg(long)]
+        slot: Option<u8>,
+        /// Collect the guest's `/workspace/out` into this host directory.
+        #[arg(long = "out", conflicts_with = "keep")]
+        out_dir: Option<PathBuf>,
+        /// Record the room's egress on its own tap (requires `--out`).
+        #[arg(long, conflicts_with = "keep", requires = "out_dir")]
+        witness: bool,
+        /// Deliver the named host env var through the resume nudge
+        /// (repeatable). Same admission rules as `rooms run --secret`; the
+        /// value never traverses SSH environment forwarding.
+        #[arg(long = "secret", value_parser = valid_secret_name)]
+        secret: Vec<String>,
+        /// Enforce a host-side egress policy on the restored room's tap.
+        #[arg(long = "egress", value_parser = egress::parse)]
+        egress: Option<egress::Policy>,
+        /// Hard wall-clock cap on the `--command` workload.
+        #[arg(long = "max-wall", value_parser = parse_max_wall, conflicts_with = "keep")]
+        max_wall: Option<Duration>,
+        /// Emit a machine-readable terminal record on stdout.
+        #[arg(long)]
+        json: bool,
+    },
     /// Resume an indexed snapshot transaction, or list all pending transactions.
     SnapshotRecover {
         /// Snapshot id to resume. Omit to list pending transactions.
@@ -454,10 +497,10 @@ fn main() -> ExitCode {
 /// Extract and harvest the `--secret` names of a `run` invocation; every
 /// other command carries none.
 fn harvest_cli_secrets(cli: &Cli) -> Result<Option<vsock::SecretsPayload>, RoomsError> {
-    let Command::Run { secret, .. } = &cli.command else {
-        return Ok(None);
-    };
-    harvest_secrets(secret)
+    match &cli.command {
+        Command::Run { secret, .. } | Command::Restore { secret, .. } => harvest_secrets(secret),
+        _ => Ok(None),
+    }
 }
 
 /// Whether the invocation asked for the machine-readable error record — the
@@ -465,7 +508,9 @@ fn harvest_cli_secrets(cli: &Cli) -> Result<Option<vsock::SecretsPayload>, Rooms
 const fn wants_json_error_record(cli: &Cli) -> bool {
     matches!(
         cli.command,
-        Command::Run { json: true, .. } | Command::BaseCreate { json: true, .. }
+        Command::Run { json: true, .. }
+            | Command::BaseCreate { json: true, .. }
+            | Command::Restore { json: true, .. }
     )
 }
 
@@ -553,6 +598,10 @@ fn emit_run_error_json(err: &RoomsError) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "flat 1:1 CLI-variant → DTO router; no logic to extract, only field lists"
+)]
 async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8, RoomsError> {
     let config = RoomsConfig::default();
     match cli.command {
@@ -623,6 +672,37 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         }
         Command::Snapshot { id, out, json } => {
             snapshot_cmd(&id, out.as_deref(), json, &config).await
+        }
+        Command::Restore {
+            snapshot_dir,
+            image,
+            keep,
+            command,
+            slot,
+            out_dir,
+            witness,
+            secret: _,
+            egress,
+            max_wall,
+            json,
+        } => {
+            restore_room(
+                RestoreArgs {
+                    snapshot_dir,
+                    image,
+                    keep,
+                    command,
+                    slot,
+                    out_dir,
+                    witness,
+                    secrets,
+                    egress: egress.unwrap_or(egress::Policy::Observe),
+                    max_wall,
+                    json,
+                },
+                &config,
+            )
+            .await
         }
         Command::SnapshotRecover { id, json } => {
             snapshot_recover_cmd(id.as_deref(), json, &config).await
@@ -1091,6 +1171,166 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provena
     {
         println!(
             "base created: room {room_id} on slot {} (guest {}); provenance=neutral — ready for `rooms snapshot`",
+            slot.index, slot.guest
+        );
+    }
+}
+
+/// Bound on the restored guest's hygiene ack. The resume agent polls every
+/// ~2s and the nudge itself is a few small frames, so a healthy restore acks
+/// within seconds; the bound exists for images predating the agent.
+const RESTORE_ACK_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Flags for `rooms restore` (a flat mirror of the CLI variant).
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat DTO mirroring independent, orthogonal CLI flags 1:1"
+)]
+struct RestoreArgs {
+    snapshot_dir: PathBuf,
+    image: PathBuf,
+    keep: bool,
+    command: Option<String>,
+    slot: Option<u8>,
+    out_dir: Option<PathBuf>,
+    witness: bool,
+    secrets: Option<vsock::SecretsPayload>,
+    egress: egress::Policy,
+    max_wall: Option<Duration>,
+    json: bool,
+}
+
+/// `rooms restore`: lease the frozen slot, resume the snapshot, gate on the
+/// hygiene ack, then run the requested lifecycle mode. The `--json` error
+/// record mirrors `run`.
+async fn restore_room(args: RestoreArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    let json = args.json;
+    let result = restore_room_inner(args, config).await;
+    if json {
+        if let Err(err) = &result {
+            emit_run_error_json(err);
+        }
+    }
+    result
+}
+
+async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(snapshot_dir = ?args.snapshot_dir, image = ?args.image, keep = args.keep, "rooms restore");
+    // Exactly one lifecycle mode, refused before any effect: a bare restore
+    // would immediately drop a successful guard, which is never what the
+    // operator meant.
+    if !args.keep && args.command.is_none() {
+        return Err(RoomsError::Internal(
+            "restore requires exactly one lifecycle mode: --keep or --command".to_owned(),
+        ));
+    }
+    ensure_witness_available(args.witness)?;
+    if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
+        return Err(RoomsError::Internal(remediation));
+    }
+    let egress_plan = egress::resolve(&args.egress).map_err(RoomsError::Internal)?;
+    warn_egress_without_witness(&egress_plan, args.witness);
+    let key = key_path()?;
+
+    let restored = rooms::restore_exec::restore(
+        config,
+        rooms::restore_exec::RestoreRequest {
+            snapshot_dir: &args.snapshot_dir,
+            image: &args.image,
+            target_slot: args.slot,
+            label: args.command.clone().or_else(|| Some("restore".to_owned())),
+            keep: args.keep,
+            witness: args.witness,
+            egress: &egress_plan,
+            secrets: args.secrets,
+            out_dir: args.out_dir.as_deref(),
+            ack_timeout: RESTORE_ACK_TIMEOUT,
+        },
+    )
+    .await
+    .map_err(|e| RoomsError::Internal(e.to_string()))?;
+
+    let rooms::restore_exec::Restored {
+        mut vm,
+        slot,
+        room_id,
+        snapshot_id,
+    } = restored;
+    let network = network_config_for(&slot);
+    emit_restored(&room_id, &snapshot_id, &slot, args.json);
+
+    if args.keep {
+        // Hand ownership to the persisted room. The guard dismisses (and never
+        // owned the leased tap — see `attach_leased_slot`), so forgetting the
+        // VM leaks nothing the lease-aware teardown won't reclaim: the intent
+        // tombstone keeps the `@lease`, and `rooms kill` / `rooms gc` both
+        // route a restored room through `restore_exec::finish_teardown`, which
+        // returns the lease (never `slot::free`) once the room is torn down.
+        vm.guard_mut().dismiss();
+        std::mem::forget(vm);
+        info!(room = %room_id, "--keep: restored room preserved; lease held until teardown");
+        return Ok(0);
+    }
+
+    let lifecycle = Lifecycle::disabled();
+    let env = PostBootEnv {
+        network: &network,
+        key: &key,
+        config,
+        max_wall: args.max_wall,
+        lifecycle: &lifecycle,
+        egress: &egress_plan,
+    };
+    let command = args
+        .command
+        .clone()
+        .ok_or_else(|| RoomsError::Internal("restore lifecycle lost its command".to_owned()))?;
+    let action = Action::Exec(runner::Runner::Command(command));
+    // Secrets arrived through the acked resume nudge, not the vsock one-shot,
+    // so the workload gate has no delivery to await here.
+    let outcome = post_boot(&env, &action, &mut vm, None).await;
+    collect_run_artifacts(&env, &action, &slot, args.out_dir.as_deref(), &mut vm).await;
+
+    if let Err(e) = vm.shutdown().await {
+        warn!(error = %e, "restore shutdown reported an error");
+    }
+    // The reap-clean gate + lease return: any residue keeps the intent
+    // tombstone for `rooms gc` and surfaces here as an error.
+    rooms::restore_exec::finish_teardown(config, &room_id, &snapshot_id, slot.index)
+        .map_err(|e| RoomsError::Internal(format!("restore teardown incomplete: {e}")))?;
+    outcome
+}
+
+/// Report a restored room — a human line, or a `--json` record.
+fn emit_restored(room_id: &str, snapshot_id: &str, slot: &room::Slot, json: bool) {
+    if json {
+        let record = serde_json::json!({
+            "room_id": room_id,
+            "snapshot_id": snapshot_id,
+            "slot": slot.index,
+            "guest_ip": slot.guest.to_string(),
+        });
+        match serde_json::to_string(&record) {
+            Ok(line) => {
+                #[allow(
+                    clippy::print_stdout,
+                    reason = "restore --json record; stdout is the documented contract"
+                )]
+                {
+                    println!("{line}");
+                }
+            }
+            Err(e) => warn!(error = %e, "failed to serialize restore --json record"),
+        }
+        return;
+    }
+    #[allow(
+        clippy::print_stdout,
+        reason = "restore human summary; stdout is the documented contract"
+    )]
+    {
+        println!(
+            "restored: room {room_id} from snapshot {snapshot_id} on slot {} (guest {})",
             slot.index, slot.guest
         );
     }

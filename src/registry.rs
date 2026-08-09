@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::config::RoomsConfig;
 use crate::doctor;
+use crate::error::FirecrackerError;
 use crate::error::RegistryError;
 use crate::firecracker::{self, KillSignalOutcome};
 use crate::room::{self, Liveness, RoomMeta};
@@ -75,6 +76,13 @@ pub struct RoomEntry {
     pub keep: bool,
     /// The room's claimed network slot; `None` for a legacy shared-tap room.
     pub slot: Option<room::Slot>,
+    /// The snapshot this room was restored from; `Some` marks a restored room
+    /// whose slot is held via a *lease*, not an ordinary claim — so its
+    /// teardown must return the lease (never `slot::free`) and only delete the
+    /// slot's tap while it still holds that lease. Internal — not in the
+    /// `ls --json` schema.
+    #[serde(skip)]
+    pub snapshot_lineage: Option<String>,
 }
 
 /// The `ls --json` payload (schema'd, like the doctor/diff reports).
@@ -191,8 +199,29 @@ fn entry_for(config: &RoomsConfig, id: &str) -> RoomEntry {
         pid_starttime,
         started_at: meta.as_ref().map(|m| m.started_at),
         keep,
-        slot: meta.and_then(|m| m.slot),
+        slot: meta.as_ref().and_then(|m| m.slot.clone()),
+        snapshot_lineage: meta.and_then(|m| m.snapshot_lineage),
     }
+}
+
+/// Reap a confirmed-dead room's resources, routing a **restored** room (slot
+/// held via a lease) through the lease-aware teardown and every other room
+/// through the ordinary tap-delete + slot-free path.
+///
+/// A restored room's slot is an `@lease` token: `slot::free` would no-op on it
+/// (leaving the lease stuck and the slot permanently unusable), and its tap is
+/// slot-keyed so it must only be deleted while this room still holds the lease.
+/// `restore_exec::finish_teardown` owns both; the ordinary path owns everything
+/// else.
+fn reap_room(config: &RoomsConfig, entry: &RoomEntry) -> Result<(), RegistryError> {
+    if let (Some(snapshot_id), Some(slot)) = (&entry.snapshot_lineage, &entry.slot) {
+        return crate::restore_exec::finish_teardown(config, &entry.id, snapshot_id, slot.index)
+            .map_err(|e| RegistryError::Firecracker(FirecrackerError::Internal(e.to_string())));
+    }
+    let (room_dir, jail_instance_dir, socket) = reap_paths(config, &entry.id)?;
+    let slot = slot_release_for(config, entry)?;
+    firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, slot, config)
+        .map_err(RegistryError::Firecracker)
 }
 
 /// Read a room's metadata, downgrading any read/parse error to `None` (one bad
@@ -286,6 +315,40 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
             });
         }
     }
+    // Restore-intent tombstones: finish the teardown + lease return for every
+    // conclusively dead restore. Runs after the room loop so a dead restored
+    // room's dirs are already reaped through its own room.json; the tombstone
+    // then completes what an ordinary reap cannot — returning the exact lease.
+    if opts.dry_run {
+        for pending in
+            crate::restore_exec::pending_all(config).map_err(|error| snapshot_error(&error))?
+        {
+            let in_scope = opts
+                .only
+                .as_ref()
+                .is_none_or(|only| only == &pending.room_id);
+            if in_scope {
+                outcomes.push(GcOutcome {
+                    id: pending.room_id,
+                    state: RoomState::Unknown,
+                    reaped: false,
+                    reason: format!(
+                        "pending restore of snapshot {} at boundary {}",
+                        pending.snapshot_id, pending.boundary
+                    ),
+                });
+            }
+        }
+    } else {
+        for reconciled in crate::restore_exec::gc_reconcile(config, opts.only.as_deref()) {
+            outcomes.push(GcOutcome {
+                id: reconciled.room_id,
+                state: RoomState::Unknown,
+                reaped: reconciled.reaped,
+                reason: reconciled.reason,
+            });
+        }
+    }
     Ok(GcReport {
         schema_version: REGISTRY_SCHEMA_VERSION,
         dry_run: opts.dry_run,
@@ -332,12 +395,11 @@ fn reap_entry(
     }
     // Resolve + safety-check the dirs even for a dry-run, so a preview surfaces
     // a path-escape rather than hiding it until the real run.
-    let (room_dir, jail_instance_dir, socket) = reap_paths(config, &entry.id)?;
+    let _ = reap_paths(config, &entry.id)?;
     if dry_run {
         return Ok(outcome(entry, false, "would reap (dry-run)"));
     }
-    let slot = slot_release_for(config, entry)?;
-    firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, slot, config)?;
+    reap_room(config, entry)?;
     Ok(outcome(entry, true, "reaped"))
 }
 
@@ -562,6 +624,7 @@ fn unknown_entry(id: &str) -> RoomEntry {
         started_at: None,
         keep: false,
         slot: None,
+        snapshot_lineage: None,
     }
 }
 
@@ -657,9 +720,9 @@ fn reap_after_kill(
     entry: &RoomEntry,
     ok_reason: &str,
 ) -> Result<KillOutcome, RegistryError> {
-    let (room_dir, jail_instance_dir, socket) = reap_paths(config, &entry.id)?;
-    let slot = slot_release_for(config, entry)?;
-    match firecracker::reap_orphan(&room_dir, &jail_instance_dir, &socket, slot, config) {
+    // Validate the reap paths (defense-in-depth) before touching anything.
+    let _ = reap_paths(config, &entry.id)?;
+    match reap_room(config, entry) {
         Ok(()) => Ok(kill_outcome(entry, KillDisposition::Killed, ok_reason)),
         Err(e) => {
             warn!(id = %entry.id, error = %e, "kill: reap after terminate failed");
@@ -715,6 +778,7 @@ mod tests {
             started_at: Some(Utc::now()),
             keep: true,
             slot: None,
+            snapshot_lineage: None,
         }
     }
 
@@ -1208,6 +1272,7 @@ mod tests {
             started_at: Some(Utc::now()),
             keep: false,
             slot: None,
+            snapshot_lineage: None,
         };
         let outcome = kill_live(&config, &entry).unwrap();
         assert_eq!(
