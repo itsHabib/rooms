@@ -142,7 +142,12 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
     let mut launch = match firecracker::spawn_restore(&spawn_req, config).await {
         Ok(launch) => launch,
         Err(e) => {
-            let _ = finish_index(config, &room_id);
+            // spawn_restore may have staged the room/jail dirs before failing
+            // (no lease was taken — this is still PreSpawn). Clean the planned
+            // paths, and clear the intent ONLY when that cleanup is proven
+            // complete; otherwise keep the tombstone so `rooms gc` retries from
+            // it, rather than orphaning a room dir GC would never touch.
+            clean_pre_spawn(config, &room_id);
             return Err(e.into());
         }
     };
@@ -328,6 +333,34 @@ fn abort_launch(config: &RoomsConfig, mut launch: RestoreLaunch, intent: &Restor
     }
 }
 
+/// Clean a failed pre-spawn restore: no child ran and no lease was taken, so
+/// only the planned room/jail dirs can exist. Reap them room-only (never the
+/// shared slot's tap), and clear the intent only if that succeeds — a residual
+/// dir keeps the tombstone for `rooms gc`.
+fn clean_pre_spawn(config: &RoomsConfig, room_id: &str) {
+    let reaped = (|| -> anyhow::Result<()> {
+        let room_dir = config
+            .room_dir(room_id)
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve room dir"))?;
+        let jail_dir = config
+            .jail_instance_dir(room_id)
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve jail dir"))?;
+        let socket = config
+            .jail_socket(room_id)
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve socket"))?;
+        firecracker::reap_room_only(&room_dir, &jail_dir, &socket, config)?;
+        Ok(())
+    })();
+    match reaped {
+        Ok(()) => {
+            let _ = finish_index(config, room_id);
+        }
+        Err(e) => {
+            warn!(room = %room_id, error = %e, "pre-spawn restore cleanup incomplete; keeping intent tombstone for `rooms gc`");
+        }
+    }
+}
+
 /// The terminal teardown gate: prove the process/jail/room/egress/tap are
 /// gone, then return the lease, then (and only then) clear the tombstone.
 ///
@@ -349,19 +382,35 @@ pub fn finish_teardown(
         .jail_socket(room_id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve socket"))?;
     let tap = format!("tap-fc{slot_index}");
-    // reap_reserved_base is exactly the checked, never-frees-the-slot reap
-    // this gate needs: dirs must be gone, egress chain removed, tap deleted
-    // or absent — else it errors and the tombstone stays.
-    firecracker::reap_reserved_base(&room_dir, &jail_dir, &socket, &tap, config)?;
     let state = state_base(config)?;
-    match slot::release_lease(&state, slot_index, snapshot_id, room_id)? {
-        Released::Returned | Released::AlreadyReturned => {}
-        Released::NotOurLease => {
-            warn!(
-                slot = slot_index,
-                "restore teardown found no lease of ours to return (already reclaimed?)"
-            );
+    // Reap this room's OWN resources first (process/jail/room dir) — these are
+    // keyed by room id and always safe. If they survive, the reap errors and
+    // the tombstone stays for a retry, before we touch the shared slot.
+    firecracker::reap_room_only(&room_dir, &jail_dir, &socket, config)?;
+    // The tap and egress chain are named by slot index alone. Delete them ONLY
+    // while we still hold the lease: a GC retry after an earlier pass already
+    // returned the lease — or a `rooms kill` racing a re-lease — must never
+    // delete a tap a *different* room has since re-leased and recreated. We
+    // hold the free-lock proof: no one else can take our lease while we hold
+    // it, so the check can't race the delete.
+    if slot::leased_by(&state, slot_index, snapshot_id, room_id)? {
+        firecracker::remove_egress_and_tap(&tap).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        match slot::release_lease(&state, slot_index, snapshot_id, room_id)? {
+            Released::Returned | Released::AlreadyReturned => {}
+            Released::NotOurLease => {
+                anyhow::bail!(
+                    "lease vanished between ownership check and return for slot {slot_index}"
+                )
+            }
         }
+    } else {
+        // Not our lease (already returned, or re-leased by another room). Our
+        // room-keyed residue is gone; leave the slot's tap/egress to whoever
+        // owns it now, and just clear our tombstone.
+        warn!(
+            slot = slot_index,
+            "restore teardown holds no lease for this room; leaving the slot tap/egress untouched"
+        );
     }
     finish_index(config, room_id)
 }

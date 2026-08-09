@@ -499,12 +499,19 @@ pub fn remove_checked(tap: &str) -> Result<(), String> {
     while iptables_exists(&input_drop_rule("-C", tap))? {
         run_iptables(&input_drop_rule("-D", tap))?;
     }
-    // Delete the jump while present — a stale install could have left more than
-    // one; the bounded loop clears every copy.
-    while iptables_exists(&jump_args("-C", tap, &chain))? {
-        run_iptables(&jump_args("-D", tap, &chain))?;
-    }
+    // Probe the per-room subchain's existence FIRST. A jump can only exist
+    // while its target chain does — iptables refuses to delete a referenced
+    // chain — so when the subchain is absent (an Observe-plan room that never
+    // installed egress), there is provably no jump to remove. Skipping the
+    // jump `-C` probe in that case avoids the "Chain '…' does not exist" error
+    // it would otherwise raise, without broadening the strict absent-rule
+    // classifier (which must still surface a genuine inspection failure).
     if iptables_exists(&["-S".to_owned(), chain.clone()])? {
+        // Delete the jump while present — a stale install could have left more
+        // than one; the bounded loop clears every copy.
+        while iptables_exists(&jump_args("-C", tap, &chain))? {
+            run_iptables(&jump_args("-D", tap, &chain))?;
+        }
         run_iptables(&["-F".to_owned(), chain.clone()])?;
         run_iptables(&["-X".to_owned(), chain])?;
     }
@@ -593,11 +600,13 @@ fn iptables_rule_is_absent(stderr: &str) -> bool {
         || stderr.contains("No chain/target/match")
         || stderr.contains("No rule exists at that position")
         || (stderr.contains("rule in chain") && stderr.contains("not found"))
-        // A `-C` probe for a jump to a per-room subchain that was never
-        // installed (an Observe-plan room — no egress enforcement) reports the
-        // missing target chain, not a missing rule. Treat it as absent: a jump
-        // to a non-existent chain trivially does not exist, and the cleanup
-        // goal (no residual rule) is already met.
+        // The `-S <chain>` existence probe on a per-room subchain that was
+        // never installed (an Observe-plan room — no egress enforcement)
+        // reports the missing chain under nf_tables as `Chain '…' does not
+        // exist`. That is unambiguously "absent": only a query about a chain
+        // that isn't there produces it — a genuine inspection failure is
+        // permission/netlink/table wording, none of which name a Chain. The
+        // pair `Chain` + `does not exist` also excludes `Table does not exist`.
         || (stderr.contains("Chain") && stderr.contains("does not exist"))
 }
 

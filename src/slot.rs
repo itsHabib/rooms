@@ -250,6 +250,38 @@ pub fn claimed_by(state: &Path, slot_index: u8, room_id: &str) -> Result<bool, S
     ))
 }
 
+/// Whether an index currently holds `room_id`'s live lease against
+/// `snapshot_id`'s reservation.
+///
+/// A restored room's teardown reads this under the free-lock before deleting
+/// the slot's tap: the tap is named by slot index alone, so a teardown that
+/// already returned its lease (a crash-then-GC-retry, or `rooms kill` racing a
+/// re-lease) must NOT delete a tap a *different* room has since re-leased and
+/// recreated. The same never-act-on-a-resource-a-reused-identity-now-owns rule
+/// as [`free`]'s compare-and-delete.
+pub fn leased_by(
+    state: &Path,
+    slot_index: u8,
+    snapshot_id: &str,
+    room_id: &str,
+) -> Result<bool, SlotError> {
+    ensure_pool_index(slot_index)?;
+    let path = state.join(SLOTS_DIR).join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(SlotError::Io(error)),
+    };
+    Ok(matches!(
+        parse_token(&contents),
+        SlotToken::Leased {
+            snapshot_id: owner,
+            lessee,
+        } if owner == snapshot_id && lessee == room_id
+    ))
+}
+
 /// The on-disk body of a reservation the walk allocator skips (the file exists,
 /// so `O_EXCL` create loses) and [`reconcile`] leaves held (not a `Claimed`
 /// token, so it is never judged by claimer liveness).
@@ -753,7 +785,7 @@ mod tests {
     )]
 
     use super::{
-        claim, claimed_by, classify_claimer_stat, free, lease, parse_token, reconcile,
+        claim, claimed_by, classify_claimer_stat, free, lease, leased_by, parse_token, reconcile,
         release_lease, reserve, Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken,
         MAX_SLOT, SLOTS_DIR,
     };
@@ -1273,6 +1305,36 @@ mod tests {
             first.index, again.index,
             "a lease retry by the same room is a no-op"
         );
+    }
+
+    #[test]
+    fn leased_by_is_true_only_for_the_exact_lessee_and_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        let lessee = room_id(2);
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        // A bare reservation is not leased by anyone.
+        assert!(!leased_by(dir.path(), 5, &snap, &lessee).unwrap());
+        lease(dir.path(), 5, &snap, &lessee).unwrap();
+        assert!(leased_by(dir.path(), 5, &snap, &lessee).unwrap());
+        // A different lessee or a different snapshot does not match — the
+        // teardown tap-delete gate must be exact.
+        assert!(!leased_by(dir.path(), 5, &snap, &room_id(3)).unwrap());
+        assert!(!leased_by(dir.path(), 5, &room_id(200), &lessee).unwrap());
+        // After the lease returns to a reservation, no room holds it.
+        release_lease(dir.path(), 5, &snap, &lessee).unwrap();
+        assert!(!leased_by(dir.path(), 5, &snap, &lessee).unwrap());
+    }
+
+    #[test]
+    fn leased_by_is_false_for_an_ordinary_claim_and_absent_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        base_claim(dir.path(), 5, &room_id(1));
+        // An ordinary claim is not a lease.
+        assert!(!leased_by(dir.path(), 5, &room_id(100), &room_id(1)).unwrap());
+        // An absent slot is not leased.
+        assert!(!leased_by(dir.path(), 6, &room_id(100), &room_id(2)).unwrap());
     }
 
     #[test]

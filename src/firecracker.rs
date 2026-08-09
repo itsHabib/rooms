@@ -2020,6 +2020,25 @@ pub fn reap_reserved_base(
     tap: &str,
     config: &RoomsConfig,
 ) -> Result<(), FirecrackerError> {
+    reap_room_only(room_dir, jail_instance_dir, socket, config)?;
+    remove_egress_and_tap(tap)
+}
+
+/// Reap only a room's OWN resources — process, jail binds, room dir.
+///
+/// Leaves the shared slot's tap and egress chain untouched, and errors
+/// (keeping the caller's recovery breadcrumb) if either dir survives.
+/// Split from the tap/egress teardown so a **restored** room can gate the
+/// slot-keyed network cleanup on still holding the lease: the tap is named by
+/// slot index alone, so deleting it unconditionally could tear down a tap a
+/// different room has since re-leased and recreated (see
+/// [`crate::slot::leased_by`]).
+pub fn reap_room_only(
+    room_dir: &Path,
+    jail_instance_dir: &Path,
+    socket: &Path,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
     let mut guard = RoomGuard::for_orphan(
         room_dir.to_path_buf(),
         socket.to_path_buf(),
@@ -2030,9 +2049,18 @@ pub fn reap_reserved_base(
     guard.dismiss();
     if jail_instance_dir.exists() || room_dir.exists() {
         return Err(FirecrackerError::Internal(
-            "snapshot base directories survived reap".to_owned(),
+            "room directories survived reap".to_owned(),
         ));
     }
+    Ok(())
+}
+
+/// Remove a slot's egress chain and delete its tap.
+///
+/// Both are checked and idempotent (already-absent is success). The caller
+/// owns the decision that this tap is safe to delete — for a leased slot, only
+/// after proving lease ownership.
+pub fn remove_egress_and_tap(tap: &str) -> Result<(), FirecrackerError> {
     egress::remove_checked(tap).map_err(FirecrackerError::Internal)?;
     delete_tap_checked(tap)
 }
