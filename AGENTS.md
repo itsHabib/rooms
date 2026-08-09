@@ -35,7 +35,7 @@ These MCPs, planes, and skills are available in Claude and Codex sessions on thi
 **MCPs (in-session):**
 - **dossier** - durable project memory: projects -> phases -> tasks -> artifacts.
 - **ship** - dispatch an agent and persist dispatch -> poll -> judgment -> land -> record.
-- **huddle** - optional multi-seat coordination; off the normal PR path.
+- **channel** - optional append-only agent message bus (`channel.post/read/list`); off the normal PR path and supersedes huddle.
 - **playwright** - browser automation when the task requires a real DOM.
 
 **Planes (workbench CLIs composed through exit codes and JSONL, not MCPs):**
@@ -67,7 +67,7 @@ dossier task -> /worktree-add -> spec -> ship driver (dispatch -> poll -> judgme
 
 ### Why this shape
 
-Each layer owns one responsibility and can be replaced without rippling: dossier owns what needs doing; worktree skills own where work happens; Ship owns agent execution and durable run state; pr-risk owns review depth; reviewer bots are swappable finders; review-coordinator owns their consolidated artifact; Gate alone owns exact-head merge authorization; Escalate carries a human resolution without deciding it; Console explains Gate state; Flare notifies; Consult handles cross-repo knowledge. The workbench is a menu, not a checklist.
+Each layer owns one responsibility and can be replaced without rippling: dossier owns what needs doing; worktree skills own where work happens; Ship owns agent execution and durable run state; pr-risk owns review depth; reviewer bots are swappable finders; review-coordinator owns their consolidated artifact; Gate alone owns exact-head merge authorization; Escalate carries a human resolution without deciding it; Console explains Gate state; Flare notifies; Consult handles cross-repo knowledge; Channel owns optional agent-to-agent messaging and supersedes Huddle. The workbench is a menu, not a checklist.
 
 ### The shape underneath
 
