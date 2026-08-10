@@ -115,3 +115,57 @@ must now serialize netns+veth reclaim, not just tap-delete.
 
 Ordering: 2a → 2b → 2c → 2d, strictly sequential (each depends on the prior). 2a is the reviewable
 first increment.
+
+## Review revisions (2026-08-09 — adversarial review, verdict REVISE→PROCEED)
+
+An independent adversarial pass verified the core direction against source (netns resolves the
+collision; two-hop MASQUERADE is return-path-symmetric via independent per-netns conntrack;
+`network_overrides` genuinely unneeded — the vsock resume-nudge binds a UDS under `jail_root`, so it
+is netns-agnostic, `vsock.rs:44`). It found load-bearing holes that change the on-disk grammar and the
+shared iptables layout, so they are pinned here **before** 2a code. Each amends a decision above.
+
+- **R1 (H1 — egress must not enforce on the frozen tap).** Under two-hop SNAT the guest packet reaches
+  the host on `veth-h<i>`, already SNAT'd off the guest IP; `tap-fc<k>` no longer exists in the default
+  ns. Keeping `egress::install(&slot.tap, …)` (`restore_exec.rs:218`, chain keyed `-i tap-fc<k>`,
+  `egress.rs:274`) installs a jump that never matches → egress silently fails **open** while reporting
+  custody installed (defeats FR7; witness fails *closed* and masks it). **Fix (2b):** egress enforces on
+  the host-side `veth-h<i>` (the guest source is already SNAT'd, so key on the veth iface, not the guest
+  IP), and a **fail-closed assertion** verifies the enforcing interface exists in the enforcing namespace
+  before `Resumed`.
+- **R2 (H3 — the veth supernet needs the *full* rule set, not just a cross-clone DROP).** The flat model's
+  guest→host protection is `INPUT -i tap-fc<k> -j DROP` for `Plan::None` (`egress.rs:301`). Under netns
+  each clone is adjacent to the host at its veth gateway. **Fix (2a substrate):** enumerate and test all
+  three — (i) FORWARD DROP `-s 172.17.0.0/24 -d 172.17.0.0/24` (cross-clone A↛B), (ii) per-veth
+  `INPUT -i veth-h<i> -j DROP` for the `none` posture (guest→host), (iii) their ordering relative to the
+  veth ACCEPT — with the same completeness `isolation.rs` already demands for the flat chain.
+- **R3 (M1 — separate chain; flat path diff must be zero).** `isolation.rs` asserts the flat `ROOMS_FWD`
+  **byte-for-byte** (`:137`) and holds a single supernet const (`:23`); `setup-tap.sh` builds one
+  supernet + one MASQUERADE. **Fix (2a):** the veth substrate lands in a **separate `ROOMS_VETH_FWD`
+  chain** with its own jump, its own MASQUERADE, and its own `isolation.rs`-style predicate set +
+  fixtures. The flat `ROOMS_FWD` and its fixtures stay literally unchanged — the reviewer holds 2a to
+  "flat-path diff == 0."
+- **R4 (H2 — N-lease is a data-model change, not a policy tweak).** One-live-lease guards more than the
+  guest-IP collision: the `@lease <snap> <lessee>` token is single-lessee by construction (`slot.rs:294`,
+  `parse_lease` rejects a third field `:780`); `finish_teardown`/`LeaseHold`/`return_to_reservation`
+  (`restore_exec.rs:384`, `slot.rs:452`) rest on "tap named by slot index alone"; `ROOMS_EG_<k>` +
+  the INPUT drop are slot-index-keyed. **Fix (2c):** a **multi-lessee lease token** (lessee set /
+  refcount) with a **refcounted return** (→ `Reserved` only when the set empties), and **re-key** egress
+  chain names, the INPUT drop, and the tap-teardown target from *slot index* to *clone identity*
+  (netns/veth index). This retires the "named by slot index alone" argument.
+- **R5 (M2 — single restore stays flat, provably).** There is one `restore()` entry point shared by
+  `rooms restore` and `rooms clone` (`restore_exec.rs:95`). **Fix (2b):** thread `CloneNet: Option<…>`
+  through `RestoreRequest` — `None` = the untouched flat single-restore path (phase-1 intermediate gate
+  still exercises flat), `Some` = the netns fan-out. The branch is explicit; the flat path is unchanged.
+- **R6 (M3 — enumerate the forwarding plumbing).** The flat path sets `net.ipv4.conf.<tap>.forwarding=1`
+  per tap (`firecracker.rs:680`). **Fix (2a):** the substrate checklist enumerates the analogous
+  per-`veth-h` + in-netns forwarding sysctls and the connected `/30` route; **2d** asserts *bidirectional*
+  reachability (not just clone→upstream) to catch a missing reverse route.
+- **R7 (L1 — reuse the slot crash-discipline, don't fork it).** The `CloneNet` veth-`/30` axis needs the
+  same O_EXCL-claim / liveness-token / reconcile / tombstone discipline `slot.rs` already implements
+  (`:80`, `:595`). **Fix (2a):** factor or reuse those primitives for the veth axis rather than a bespoke
+  parallel allocator + a second reconcile path.
+- **L2 note (2b):** pin the jailer version and confirm `--netns` enters the namespace before `exec`.
+
+The **rework-surface table and decomposition above are superseded by these revisions where they
+conflict** (egress row → R1; host-NAT row → R2/R3; lease-model → R4; restore branch → R5). The dossier
+task specs (2a/2b/2c/2d) carry the authoritative, revised scope.
