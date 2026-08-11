@@ -1,10 +1,10 @@
 //! Pure verification of the additive clone-veth firewall substrate.
 //!
 //! `ROOMS_VETH_FWD` is deliberately separate from the flat `ROOMS_FWD` path.
-//! These predicates prove the veth chain is jumped second, blocks clone-to-
-//! clone traffic before any ACCEPT, retains private-network deny rules, and
-//! carries both halves of the upstream forwarding path. The per-clone INPUT
-//! predicate covers the `none` posture's guest-to-host boundary.
+//! These predicates prove the veth chain is entered only for rooms interfaces,
+//! blocks clone-to-clone traffic before any ACCEPT, retains private-network
+//! deny rules, and carries both halves of the upstream forwarding path. The
+//! per-clone INPUT predicate covers the `none` posture's guest-to-host boundary.
 
 macro_rules! veth_supernet {
     () => {
@@ -26,7 +26,8 @@ pub const VETH_ANTISPOOF_DROP: &str = concat!(
     " -i veth-h+ -j DROP"
 );
 pub const FLAT_FORWARD_JUMP: &str = "-A FORWARD -j ROOMS_FWD";
-pub const VETH_FORWARD_JUMP: &str = "-A FORWARD -j ROOMS_VETH_FWD";
+pub const VETH_INGRESS_JUMP: &str = "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD";
+pub const VETH_EGRESS_JUMP: &str = "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD";
 const FLAT_SUPERNET: &str = "172.16.0.0/24";
 const VETH_TAIL_DROP: &str = concat!("-A ROOMS_VETH_FWD -s ", veth_supernet!(), " -j DROP");
 const PRIVATE_DROPS: [&str; 3] = [
@@ -54,10 +55,14 @@ pub fn forward_jumps_ordered(forward_dump: &str) -> bool {
         .filter(|line| line.starts_with("-A FORWARD "))
         .map(str::trim);
     let ordered = matches!(
-        (rules.next(), rules.next()),
-        (Some(FLAT_FORWARD_JUMP), Some(VETH_FORWARD_JUMP))
+        (rules.next(), rules.next(), rules.next()),
+        (
+            Some(FLAT_FORWARD_JUMP),
+            Some(VETH_INGRESS_JUMP),
+            Some(VETH_EGRESS_JUMP)
+        )
     );
-    ordered && rules.all(|rule| rule != FLAT_FORWARD_JUMP && rule != VETH_FORWARD_JUMP)
+    ordered && rules.all(|rule| !jumps_to(rule, "ROOMS_FWD") && !jumps_to(rule, "ROOMS_VETH_FWD"))
 }
 
 #[must_use]
@@ -90,12 +95,20 @@ fn has_token_pair(line: &str, key: &str, value: &str) -> bool {
     false
 }
 
+fn jumps_to(line: &str, chain: &str) -> bool {
+    has_token_pair(line, "-j", chain) || has_token_pair(line, "-g", chain)
+}
+
 #[must_use]
 pub fn rooms_veth_fwd_isolates(chain_dump: &str) -> bool {
     let mut rules = chain_dump
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("-A ROOMS_VETH_FWD "));
+        .filter(|line| line.starts_with("-A ROOMS_VETH_FWD "))
+        .peekable();
+    while rules.peek().is_some_and(|line| per_veth_source_drop(line)) {
+        rules.next();
+    }
     let fixed_prefix = rules.next() == Some(VETH_ANTISPOOF_DROP)
         && rules.next() == Some(VETH_ISOLATION_DROP)
         && rules.next() == Some(PRIVATE_DROPS[0])
@@ -107,6 +120,49 @@ pub fn rooms_veth_fwd_isolates(chain_dump: &str) -> bool {
         && matches!((egress, returned), (Some(out), Some(input)) if out == input)
         && rules.next() == Some(VETH_TAIL_DROP)
         && rules.next().is_none()
+}
+
+fn per_veth_source_drop(line: &str) -> bool {
+    let mut tokens = line.split_whitespace();
+    let parsed = match (
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+    ) {
+        (
+            Some("-A"),
+            Some("ROOMS_VETH_FWD"),
+            Some("!"),
+            Some("-s"),
+            Some(source),
+            Some("-i"),
+            Some(interface),
+            Some("-j"),
+            Some("DROP"),
+            None,
+            None,
+        ) => Some((interface, source)),
+        _ => None,
+    };
+    let Some((interface, source)) = parsed else {
+        return false;
+    };
+    let Some(index) = interface
+        .strip_prefix("veth-h")
+        .and_then(|value| value.parse::<u8>().ok())
+        .filter(|index| (1..=63).contains(index))
+    else {
+        return false;
+    };
+    source == format!("172.17.0.{}/32", 4 * index + 2)
 }
 
 #[must_use]
@@ -253,12 +309,39 @@ mod tests {
     #[test]
     fn complete_chain_and_ordered_jumps_pass() {
         assert!(rooms_veth_fwd_isolates(GOOD_CHAIN));
+        let with_bindings = GOOD_CHAIN.replacen(
+            "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24",
+            concat!(
+                "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP\n",
+                "-A ROOMS_VETH_FWD ! -s 172.17.0.34/32 -i veth-h8 -j DROP\n",
+                "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24"
+            ),
+            1,
+        );
+        assert!(rooms_veth_fwd_isolates(&with_bindings));
         assert!(flat_chain_falls_through_for_veth(FLAT_CHAIN));
         assert!(forward_jumps_ordered(concat!(
             "-P FORWARD ACCEPT\n",
             "-A FORWARD -j ROOMS_FWD\n",
-            "-A FORWARD -j ROOMS_VETH_FWD",
+            "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD\n",
+            "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD",
         )));
+    }
+
+    #[test]
+    fn malformed_or_misbound_per_veth_source_drop_is_caught() {
+        for rule in [
+            "-A ROOMS_VETH_FWD ! -s 172.17.0.18/32 -i veth-h3 -j DROP",
+            "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h+ -j DROP",
+            "-A ROOMS_VETH_FWD -s 172.17.0.14/32 -i veth-h3 -j DROP",
+        ] {
+            let broken = GOOD_CHAIN.replacen(
+                "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24",
+                &format!("{rule}\n-A ROOMS_VETH_FWD ! -s 172.17.0.0/24"),
+                1,
+            );
+            assert!(!rooms_veth_fwd_isolates(&broken));
+        }
     }
 
     #[test]
@@ -410,13 +493,38 @@ mod tests {
         assert!(!forward_jumps_ordered(concat!(
             "-A FORWARD -j ROOMS_FWD\n",
             "-A FORWARD -j ACCEPT\n",
-            "-A FORWARD -j ROOMS_VETH_FWD",
+            "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD\n",
+            "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD",
         )));
         assert!(!forward_jumps_ordered(concat!(
             "-A FORWARD -j ROOMS_FWD\n",
-            "-A FORWARD -j ROOMS_VETH_FWD\n",
-            "-A FORWARD -j ROOMS_VETH_FWD",
+            "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD\n",
+            "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD",
         )));
+    }
+
+    #[test]
+    fn broad_or_duplicate_veth_jump_is_caught() {
+        for rules in [
+            concat!(
+                "-A FORWARD -j ROOMS_FWD\n",
+                "-A FORWARD -j ROOMS_VETH_FWD\n",
+                "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD",
+            ),
+            concat!(
+                "-A FORWARD -j ROOMS_FWD\n",
+                "-A FORWARD -i docker0 -j ROOMS_VETH_FWD\n",
+                "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD",
+            ),
+            concat!(
+                "-A FORWARD -j ROOMS_FWD\n",
+                "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD\n",
+                "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD\n",
+                "-A FORWARD -j ROOMS_VETH_FWD",
+            ),
+        ] {
+            assert!(!forward_jumps_ordered(rules));
+        }
     }
 
     #[test]

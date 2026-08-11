@@ -50,10 +50,33 @@ pub(crate) enum ClaimOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimDecision {
+    Accept,
+    #[cfg(any(target_os = "linux", test))]
+    Skip,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ClaimSpec<'a> {
+    pub state: &'a Path,
+    pub pool: Pool,
+    pub owner_id: &'a str,
+    pub me: Claimer,
+    pub cap: u8,
+    pub target: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FreeOutcome {
     Removed,
     AlreadyFree,
     AlreadyReassigned,
+}
+
+#[derive(Debug)]
+pub(crate) enum ReleaseError {
+    Io(std::io::Error),
+    Cleanup(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,51 +114,100 @@ pub(crate) fn claim(
     cap: u8,
     target: Option<u8>,
 ) -> Result<ClaimOutcome, std::io::Error> {
-    if !is_id_shaped(owner_id) {
+    let spec = ClaimSpec {
+        state,
+        pool,
+        owner_id,
+        me,
+        cap,
+        target,
+    };
+    claim_with(spec, |_| Ok(ClaimDecision::Accept))
+}
+
+pub(crate) fn claim_with<F, E>(spec: ClaimSpec<'_>, mut select: F) -> Result<ClaimOutcome, E>
+where
+    F: FnMut(u8) -> Result<ClaimDecision, E>,
+    E: From<std::io::Error>,
+{
+    if !is_id_shaped(spec.owner_id) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
                 "{} owner ID must be 26 lowercase ASCII letters or digits",
-                pool.label
+                spec.pool.label
             ),
-        ));
+        )
+        .into());
     }
-    if let Some(index) = target {
-        if !valid_index(pool, index) {
+    if let Some(index) = spec.target {
+        if !valid_index(spec.pool, index) {
             return Ok(ClaimOutcome::InvalidIndex {
                 index,
-                max: pool.max_index,
+                max: spec.pool.max_index,
             });
         }
     }
-    let dir = state.join(pool.dir_name);
+    let dir = spec.state.join(spec.pool.dir_name);
     std::fs::create_dir_all(&dir)?;
     // Reconciliation may remove a malformed claim only while holding this same
     // lock. A live creator therefore finishes its token before reconcile can
     // classify an observed partial write as abandoned.
-    let _lock = lock_frees(state, pool)?;
-    if let Some(index) = target {
-        return claim_target(&dir, owner_id, me, index);
+    let _lock = lock_frees(spec.state, spec.pool)?;
+    if let Some(index) = spec.target {
+        return claim_target(&dir, spec.owner_id, spec.me, index, &mut select);
     }
-    let cap = cap.min(pool.max_index);
+    let cap = spec.cap.min(spec.pool.max_index);
     for index in 1..=cap {
-        if try_claim(&dir, index, owner_id, me)? {
+        if try_claim(&dir, index, spec.owner_id, spec.me)?
+            && select_claim(&dir, index, &mut select)?
+        {
             return Ok(ClaimOutcome::Claimed(index));
         }
     }
     Ok(ClaimOutcome::PoolFull { cap })
 }
 
-fn claim_target(
+fn claim_target<F, E>(
     dir: &Path,
     owner_id: &str,
     me: Claimer,
     index: u8,
-) -> Result<ClaimOutcome, std::io::Error> {
-    if try_claim(dir, index, owner_id, me)? {
+    select: &mut F,
+) -> Result<ClaimOutcome, E>
+where
+    F: FnMut(u8) -> Result<ClaimDecision, E>,
+    E: From<std::io::Error>,
+{
+    if try_claim(dir, index, owner_id, me)? && select_claim(dir, index, select)? {
         return Ok(ClaimOutcome::Claimed(index));
     }
     Ok(ClaimOutcome::TargetTaken { index })
+}
+
+fn select_claim<F, E>(dir: &Path, index: u8, select: &mut F) -> Result<bool, E>
+where
+    F: FnMut(u8) -> Result<ClaimDecision, E>,
+    E: From<std::io::Error>,
+{
+    let decision = match select(index) {
+        Ok(decision) => decision,
+        Err(error) => {
+            remove_rejected_claim(dir, index);
+            return Err(error);
+        }
+    };
+    if decision == ClaimDecision::Accept {
+        return Ok(true);
+    }
+    std::fs::remove_file(dir.join(index.to_string()))?;
+    Ok(false)
+}
+
+fn remove_rejected_claim(dir: &Path, index: u8) {
+    if let Err(error) = std::fs::remove_file(dir.join(index.to_string())) {
+        warn!(index, %error, "could not remove rejected indexed claim");
+    }
 }
 
 fn try_claim(dir: &Path, index: u8, owner_id: &str, me: Claimer) -> Result<bool, std::io::Error> {
@@ -172,22 +244,40 @@ pub(crate) fn free(
     index: u8,
     expected_owner: &str,
 ) -> Result<FreeOutcome, std::io::Error> {
+    match free_with(state, pool, index, expected_owner, || Ok(())) {
+        Ok(outcome) => Ok(outcome),
+        Err(ReleaseError::Io(error)) => Err(error),
+        Err(ReleaseError::Cleanup(detail)) => Err(std::io::Error::other(detail)),
+    }
+}
+
+pub(crate) fn free_with<F>(
+    state: &Path,
+    pool: Pool,
+    index: u8,
+    expected_owner: &str,
+    cleanup: F,
+) -> Result<FreeOutcome, ReleaseError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     let path = state.join(pool.dir_name).join(index.to_string());
-    let _lock = lock_frees(state, pool)?;
+    let _lock = lock_frees(state, pool).map_err(ReleaseError::Io)?;
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(FreeOutcome::AlreadyFree);
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(ReleaseError::Io(error)),
     };
     if contents.lines().next() != Some(expected_owner) {
         return Ok(FreeOutcome::AlreadyReassigned);
     }
+    cleanup().map_err(ReleaseError::Cleanup)?;
     match std::fs::remove_file(path) {
         Ok(()) => Ok(FreeOutcome::Removed),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FreeOutcome::AlreadyFree),
-        Err(error) => Err(error),
+        Err(error) => Err(ReleaseError::Io(error)),
     }
 }
 
