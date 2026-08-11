@@ -9,20 +9,20 @@
 //! Allocation truth is the slot *file* `<state>/slots/<k>`: [`claim`] is an
 //! `O_CREAT|O_EXCL` create (the filesystem is the race arbiter — two racers on
 //! one index get exactly one winner, no daemon, no lock held over a room's
-//! lifetime), [`free`] is a compare-and-delete whose verify+unlink runs under
-//! a short-lived free-lock, and each file carries its claimer's own liveness
-//! token so [`reconcile`] can judge a leaked slot before any `room.json`
-//! exists.
+//! lifetime). Claim publication, [`free`], and [`reconcile`] use the same
+//! short-lived free-lock so reconcile can distinguish a live partial writer
+//! from a creator that died mid-token. Each file carries its claimer's own
+//! liveness token so [`reconcile`] can judge a leaked slot before any
+//! `room.json` exists.
 //! `O_EXCL` is atomic on a local filesystem only — not reliably over NFS — so
 //! the state base must stay local (doctor enforces this once gc wiring lands).
 
-use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-use tracing::warn;
-
 use crate::error::SlotError;
+pub use crate::indexed_claim::Claimer;
+use crate::indexed_claim::{self, ClaimOutcome, FreeOutcome, Pool, ReconcileAction};
 use crate::room::Liveness;
 pub use crate::room::Slot;
 
@@ -38,33 +38,16 @@ const FREE_LOCK: &str = "slots.lock";
 /// reserved slot 0.
 pub const MAX_SLOT: u8 = 63;
 
+const SLOT_POOL: Pool = Pool {
+    dir_name: SLOTS_DIR,
+    lock_name: FREE_LOCK,
+    max_index: MAX_SLOT,
+    label: "slot",
+};
+
 /// Default per-invocation pool ceiling. Boot walks slots `1..=this`; an operator
 /// override to lower it can land later.
 pub const DEFAULT_MAX_POOL: u8 = 8;
-
-/// Identity of the process performing a claim.
-///
-/// A pid pinned to its incarnation via `/proc/<pid>/stat` start time — the
-/// same tuple `room::probe` keys on. Written into the slot file so reconcile
-/// can probe the claimer directly.
-#[derive(Debug, Clone, Copy)]
-pub struct Claimer {
-    pub pid: u32,
-    pub starttime: u64,
-}
-
-impl Claimer {
-    /// This process's own `(pid, starttime)` identity — what boot records into
-    /// the slot file so reconcile can probe the claimer directly. `None` when
-    /// the start time can't be read (off Linux, or an unreadable `/proc`); a
-    /// caller that can't identify itself must not claim.
-    #[must_use]
-    pub fn current() -> Option<Self> {
-        let pid = std::process::id();
-        let starttime = crate::room::starttime_of(pid)?;
-        Some(Self { pid, starttime })
-    }
-}
 
 /// Claim a slot for `room_id`, whose identity the caller pre-minted.
 ///
@@ -84,33 +67,12 @@ pub fn claim(
     cap: u8,
     target: Option<u8>,
 ) -> Result<Slot, SlotError> {
-    // Validate before create_dir_all — an invalid index must reject without
-    // touching (or failing on) the state tree.
-    if let Some(index) = target {
-        ensure_pool_index(index)?;
+    match indexed_claim::claim(state, SLOT_POOL, room_id, me, cap, target)? {
+        ClaimOutcome::Claimed(index) => Ok(derive(index)),
+        ClaimOutcome::PoolFull { cap } => Err(SlotError::PoolFull { cap }),
+        ClaimOutcome::InvalidIndex { index, max } => Err(SlotError::InvalidIndex { index, max }),
+        ClaimOutcome::TargetTaken { index } => Err(SlotError::TargetTaken { index }),
     }
-    let dir = state.join(SLOTS_DIR);
-    std::fs::create_dir_all(&dir)?;
-    if let Some(index) = target {
-        return claim_target(&dir, room_id, me, index);
-    }
-    // The error reports the effective cap — the pool size actually walked.
-    let cap = cap.min(MAX_SLOT);
-    for index in 1..=cap {
-        if try_claim(&dir, index, room_id, me)? {
-            return Ok(derive(index));
-        }
-    }
-    Err(SlotError::PoolFull { cap })
-}
-
-/// Attempt exactly one requested index (reserve-by-index; the caller has
-/// already validated it).
-fn claim_target(dir: &Path, room_id: &str, me: Claimer, index: u8) -> Result<Slot, SlotError> {
-    if try_claim(dir, index, room_id, me)? {
-        return Ok(derive(index));
-    }
-    Err(SlotError::TargetTaken { index })
 }
 
 /// Reject an index outside the claimable pool before any filesystem work —
@@ -126,41 +88,6 @@ const fn ensure_pool_index(index: u8) -> Result<(), SlotError> {
     Ok(())
 }
 
-/// One `O_EXCL` attempt on `slots/<index>`. `Ok(false)` = lost the race (the
-/// file already exists). The token is written through the same handle the
-/// create returned, so a crash between create and write leaves an empty file —
-/// the explicit claim-in-progress state readers skip, never a half-claim.
-fn try_claim(dir: &Path, index: u8, room_id: &str, me: Claimer) -> Result<bool, SlotError> {
-    let path = dir.join(index.to_string());
-    let open = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path);
-    let mut file = match open {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        // Windows reports ACCESS_DENIED for a create racing a delete-pending
-        // file (a slot mid-free), where unix reports the file as existing.
-        // Production hosts are Linux; on the Windows dev/CI platform treat it
-        // as a lost race — never a claim failure — so racing tests hold there.
-        #[cfg(windows)]
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
-        Err(e) => return Err(SlotError::Io(e)),
-    };
-    let token = format!("{room_id}\n{} {}\n", me.pid, me.starttime);
-    if let Err(e) = file.write_all(token.as_bytes()) {
-        // We exclusively created this file and no token committed, so removing
-        // it robs no one — and leaving it would wedge the index as
-        // claim-in-progress forever after a transient failure (ENOSPC).
-        drop(file);
-        if let Err(rm) = std::fs::remove_file(&path) {
-            warn!(index, error = %rm, "could not remove half-claimed slot file");
-        }
-        return Err(SlotError::Io(e));
-    }
-    Ok(true)
-}
-
 /// Take the exclusive free-lock, released when the returned handle drops.
 ///
 /// Held only across a verify+unlink critical section — milliseconds, never a
@@ -169,13 +96,7 @@ fn try_claim(dir: &Path, index: u8, room_id: &str, me: Claimer) -> Result<bool, 
 /// with a fresh claim of the index and unlink the *new* room's file, robbing
 /// a live claim and re-opening double allocation.
 fn lock_frees(state: &Path) -> Result<std::fs::File, SlotError> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(state.join(FREE_LOCK))?;
-    file.lock()?;
-    Ok(file)
+    indexed_claim::lock_frees(state, SLOT_POOL).map_err(SlotError::Io)
 }
 
 /// Derive slot k's network identity: the /30 at `172.16.0.4k`. Callers
@@ -210,21 +131,10 @@ pub enum Freed {
 /// (the same never-act-on-a-reused-identity rule as `terminate_by_identity`).
 pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Freed, SlotError> {
     ensure_pool_index(slot_index)?;
-    let path = state.join(SLOTS_DIR).join(slot_index.to_string());
-    let _lock = lock_frees(state)?;
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Freed::AlreadyFree),
-        Err(e) => return Err(SlotError::Io(e)),
-    };
-    if contents.lines().next() != Some(expected_room_id) {
-        return Ok(Freed::AlreadyReassigned);
-    }
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(Freed::Removed),
-        // Lost a delete race — the slot is free either way.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Freed::AlreadyFree),
-        Err(e) => Err(SlotError::Io(e)),
+    match indexed_claim::free(state, SLOT_POOL, slot_index, expected_room_id)? {
+        FreeOutcome::Removed => Ok(Freed::Removed),
+        FreeOutcome::AlreadyFree => Ok(Freed::AlreadyFree),
+        FreeOutcome::AlreadyReassigned => Ok(Freed::AlreadyReassigned),
     }
 }
 
@@ -299,36 +209,11 @@ fn lease_token(snapshot_id: &str, lessee_room_id: &str) -> String {
 /// dir, so the swap is a single rename even under the free-lock). Callers hold
 /// the free-lock across the read+verify+rewrite critical section.
 fn rewrite_slot_atomic(dir: &Path, index: u8, body: &str) -> Result<(), SlotError> {
-    let tmp = dir.join(format!(".{index}.tmp"));
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&tmp)?;
-    file.write_all(body.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    // rename replaces the target on both unix and Windows (MOVEFILE_REPLACE_
-    // EXISTING); the `.tmp` name is never a canonical index, so a crash between
-    // write and rename leaves a stray reconcile ignores.
-    std::fs::rename(&tmp, dir.join(index.to_string()))?;
-    sync_dir(dir)?;
-    Ok(())
+    indexed_claim::rewrite_atomic(dir, index, body).map_err(SlotError::Io)
 }
 
-#[cfg(unix)]
 fn sync_dir(path: &Path) -> Result<(), SlotError> {
-    std::fs::File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "keeps durable slot-transition call sites identical across cfg targets"
-)]
-const fn sync_dir(_path: &Path) -> Result<(), SlotError> {
-    Ok(())
+    indexed_claim::sync_dir(path).map_err(SlotError::Io)
 }
 
 /// What [`reserve`] found at the slot index.
@@ -593,108 +478,19 @@ pub struct Reclaimed {
 /// when no room dir exists for the recorded id. Scan errors downgrade to a
 /// warning — reconcile is a best-effort sweep, not a gate.
 pub fn reconcile(state: &Path) -> Vec<Reclaimed> {
-    let dir = state.join(SLOTS_DIR);
-    let read_dir = match std::fs::read_dir(&dir) {
-        Ok(read_dir) => read_dir,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(e) => {
-            warn!(dir = %dir.display(), error = %e, "cannot scan slots dir; skipping reconcile");
-            return Vec::new();
+    indexed_claim::reconcile(state, SLOT_POOL, |_, room_id| {
+        if state.join(room_id).is_dir() {
+            return Ok(ReconcileAction::Keep);
         }
-    };
-    let mut reclaimed = Vec::new();
-    for dirent in read_dir {
-        let dirent = match dirent {
-            Ok(dirent) => dirent,
-            Err(e) => {
-                warn!(error = %e, "unreadable slots dir entry; skipping");
-                continue;
-            }
-        };
-        let Some(index) = slot_index_of(&dirent.file_name()) else {
-            continue;
-        };
-        if let Some(entry) = reconcile_slot(state, &dirent.path(), index) {
-            reclaimed.push(entry);
-        }
-    }
-    reclaimed
-}
-
-/// Parse a `slots/` file name as a claimable index; `None` for strays
-/// (`0`, `64`, temp files) — never touched. Only the canonical spelling the
-/// allocator writes counts: `u8::parse` also accepts `"01"` / `"+1"`, and
-/// attributing such a stray to index 1 would report a false reclaim against
-/// the real `slots/1`.
-fn slot_index_of(name: &std::ffi::OsStr) -> Option<u8> {
-    let name = name.to_str()?;
-    let index: u8 = name.parse().ok()?;
-    if name != index.to_string() {
-        return None;
-    }
-    (1..=MAX_SLOT).contains(&index).then_some(index)
-}
-
-/// Judge one slot file; `Some` only for a confirmed-dead claimer.
-fn reconcile_slot(state: &Path, path: &Path, index: u8) -> Option<Reclaimed> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(e) => {
-            warn!(index, error = %e, "cannot read slot file; skipping");
-            return None;
-        }
-    };
-    let SlotToken::Claimed {
-        room_id,
-        pid,
-        starttime,
-    } = parse_token(&contents)
-    else {
-        return None;
-    };
-    if claimer_liveness(pid, starttime) != Liveness::Dead {
-        return None;
-    }
-    // Room-id shape was validated by parse_token, so this join can't traverse.
-    if state.join(&room_id).is_dir() {
-        return Some(Reclaimed {
-            index,
-            room_id,
-            removed: false,
-        });
-    }
-    remove_if_unchanged(state, path, &contents, index).then_some(Reclaimed {
-        index,
-        room_id,
-        removed: true,
+        Ok(ReconcileAction::Remove)
     })
-}
-
-/// Unlink a leaked slot file, but only if it still holds `expected` — under
-/// the free-lock, and re-verified there, so the index churning (freed and
-/// re-claimed by a live room) between this pass's read and its unlink can
-/// never unlink the new claim.
-fn remove_if_unchanged(state: &Path, path: &Path, expected: &str, index: u8) -> bool {
-    let removed = (|| -> Result<bool, SlotError> {
-        let _lock = lock_frees(state)?;
-        let now = match std::fs::read_to_string(path) {
-            Ok(now) => now,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(SlotError::Io(e)),
-        };
-        if now != expected {
-            return Ok(false);
-        }
-        std::fs::remove_file(path)?;
-        Ok(true)
-    })();
-    match removed {
-        Ok(removed) => removed,
-        Err(e) => {
-            warn!(index, error = %e, "cannot remove leaked slot file; leaving for the next pass");
-            false
-        }
-    }
+    .into_iter()
+    .map(|entry| Reclaimed {
+        index: entry.index,
+        room_id: entry.owner_id,
+        removed: entry.removed,
+    })
+    .collect()
 }
 
 /// A slot file's parsed contents.
@@ -754,23 +550,13 @@ fn parse_token(contents: &str) -> SlotToken {
     if let Some(rest) = first.strip_prefix("@lease ") {
         return parse_lease(rest);
     }
-    // Otherwise a claim.
-    if !is_id_shaped(first) {
-        return SlotToken::InProgress;
-    }
-    let Some(token_line) = lines.next() else {
-        return SlotToken::InProgress;
-    };
-    let mut parts = token_line.split_whitespace();
-    let pid = parts.next().and_then(|s| s.parse().ok());
-    let starttime = parts.next().and_then(|s| s.parse().ok());
-    let (Some(pid), Some(starttime)) = (pid, starttime) else {
+    let Some(claim) = indexed_claim::parse_claim(contents) else {
         return SlotToken::InProgress;
     };
     SlotToken::Claimed {
-        room_id: first.to_owned(),
-        pid,
-        starttime,
+        room_id: claim.owner_id,
+        pid: claim.pid,
+        starttime: claim.starttime,
     }
 }
 
@@ -810,41 +596,7 @@ fn is_id_shaped(s: &str) -> bool {
 /// unparseable stat is unknown (fail-safe: never reclaimed).
 #[must_use]
 pub fn classify_claimer_stat(stat: &str, expected_starttime: u64) -> Liveness {
-    let Some(close) = stat.rfind(')') else {
-        return Liveness::Unknown;
-    };
-    let state = stat
-        .get(close + 1..)
-        .and_then(|rest| rest.trim_start().chars().next());
-    if matches!(state, Some('Z' | 'X' | 'x')) {
-        return Liveness::Dead;
-    }
-    match crate::room::parse_starttime(stat) {
-        Some(actual) if actual == expected_starttime => Liveness::Alive,
-        Some(_) => Liveness::Dead,
-        None => Liveness::Unknown,
-    }
-}
-
-/// Probe a claimer's liveness via `/proc/<pid>/stat`. A missing entry is dead;
-/// an unreadable one is unknown (fail-safe).
-#[cfg(target_os = "linux")]
-fn claimer_liveness(pid: u32, starttime: u64) -> Liveness {
-    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => classify_claimer_stat(&stat, starttime),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Liveness::Dead,
-        Err(_) => Liveness::Unknown,
-    }
-}
-
-/// Off Linux there is no `/proc` to consult — unknown, so nothing reclaims.
-#[cfg(not(target_os = "linux"))]
-#[allow(
-    clippy::missing_const_for_fn,
-    reason = "kept non-const to match the Linux claimer_liveness that reads /proc"
-)]
-fn claimer_liveness(_pid: u32, _starttime: u64) -> Liveness {
-    Liveness::Unknown
+    indexed_claim::classify_claimer_stat(stat, expected_starttime)
 }
 
 #[cfg(test)]
@@ -1110,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_skips_claim_in_progress() {
+    fn reconcile_removes_abandoned_partial_claims() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(SLOTS_DIR)).unwrap();
         std::fs::write(slot_path(dir.path(), 1), b"").unwrap();
@@ -1119,8 +871,8 @@ mod tests {
         assert_eq!(reconcile(dir.path()), Vec::new());
         for index in 1..=3 {
             assert!(
-                slot_path(dir.path(), index).exists(),
-                "slot {index}: an in-progress claim must never be reclaimed"
+                !slot_path(dir.path(), index).exists(),
+                "slot {index}: an abandoned partial claim must be reclaimed"
             );
         }
     }
