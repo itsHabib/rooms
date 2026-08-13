@@ -10,59 +10,51 @@ Live state — what's shipped, what's in flight, and what's next — lives in do
 
 **Spec (single source of truth for v0):** [`docs/features/rooms-v0/spec.md`](docs/features/rooms-v0/spec.md).
 
-<!-- BEGIN dev-workbench (managed by /dev-workbench skill — re-run to refresh; hand-edits inside this block will be overwritten) -->
+<!-- BEGIN dev-workbench (managed by /dev-workbench skill - re-run to refresh; hand-edits inside this block will be overwritten) -->
 ## Dev workbench
 
-These MCPs, planes, and skills are available in any agent session on this machine; the harness injects each tool's signature, so this is the *map* — how they compose — not the per-verb manual. When the signal matches, call the verb; don't ask permission. Stuck on a *knowledge* question about another portfolio repo → `/consult` its steward; only *authority* questions (direction, spend, irreversible calls) go to the operator.
+These MCPs, planes, and skills are available in Claude and Codex sessions on this machine; each harness injects tool signatures, so this is the map of how they compose, not a second verb manual. When the signal matches, call the verb. Knowledge questions about another portfolio repo go to `/consult`; authority questions - direction, spend, credentials, irreversible actions - go to the operator.
 
 **MCPs (in-session):**
-- **dossier** — durable project memory: projects → phases → tasks → artifacts (markdown-on-disk).
-- **ship** — the driver engine: dispatch a task to a cloud/local agent and persist the run (dispatch→poll→judgment→land→record); inspect/cancel/replay.
-- **huddle** — *optional* multi-seat coordination (Slack-backed); off the normal PR path.
-- **playwright** — browser automation when a task needs a real DOM.
+- **dossier** - durable project memory: projects -> phases -> tasks -> artifacts.
+- **ship** - dispatch an agent and persist dispatch -> poll -> judgment -> land -> record.
+- **channel** - optional append-only agent message bus (`channel.post/read/list`); off the normal PR path and supersedes huddle.
+- **playwright** - browser automation when the task requires a real DOM.
 
-**Planes (workbench tenants — CLIs composed via exit codes + JSONL, not MCPs; `itsHabib/workbench` `cmd/<tool>`):**
-- **gate** — the flagship: authorization. Evaluates the *exact* PR head against an operator-minted grant + the escalate-only verifier ladder; hash-chained audit log; exit 0 pass / 1 blocked / 2 parked / 3 refused / 4 error. Findings ≠ authorization; gate is the merge boundary. State + keys stay `~/pers/gate`.
-- **flare** — notification: best-effort escalation sink over authoritative receipts → its own Slack app/channel. Pure sink; never gates; not built on huddle.
-- **console** — read-only local web view of gate's inbox (parked runs + grant ledger); shells the gate binary, owns no authoritative state.
-- **escalate** — the agent→human→agent back-channel: ingests the human's decision for a parked escalation and drives `gate resolve`.
+**Planes (workbench CLIs composed through exit codes and JSONL, not MCPs):**
+- **gate** - authorization at the exact PR head against an operator-minted grant; findings are not authorization. Exit 0 pass / 1 block / 2 park / 3 refuse / 4 error.
+- **flare** - best-effort notification sink over authoritative receipts; never gates.
+- **console** - read-only local view of Gate's inbox and grant ledger; explains, never decides.
+- **escalate** - agent -> human -> agent resolution channel for a parked Gate run.
 
 **Skills:**
-- **/work-driver** [+ **/work-driver-prep**] — drive agent-led impl end-to-end; prep builds the specs + conflict-batched plan.
-- **/pr-risk** — size how much review a PR needs (deterministic floor + agent advisory); upstream of the reviewers — it decides *how much*, they *do* it.
-- **/review-coordinator** [+ **/review-digest**] — consolidate the AI PR reviewers into one verdict (the judge over the finders); digest pre-triages the bot pile locally.
-- **/shipped** · **/status** · **/wip** — retrospective recap · in-flight update · cross-store live board.
-- **/consult** — summon a sibling repo's steward for a same-turn answer; knowledge → peer, authority → operator.
-- **/worktree-*** — add · list · remove · transfer · where, over `git worktree`.
+- **/work-driver** + **/work-driver-prep** - drive implementation; prep builds specs and conflict-safe batches.
+- **/pr-risk** - decide how much review a change needs; reviewers perform it.
+- **/review-coordinator** + **/review-digest** - consolidate reviewer findings; digest is the deterministic pre-pass.
+- **/shipped** / **/status** / **/wip** - retrospective / current-session / portfolio-liveness views.
+- **/consult** - ask a sibling repo's steward; knowledge to peers, authority to the operator.
+- **/worktree-*** - add / list / remove / transfer / locate isolated checkouts.
 
 ### The loop
 
-```
-dossier task → /worktree-add → spec → ship driver (cloud-first: dispatch→poll→judgment→land→record)
-   → PR + CI → /pr-risk tiers it → reviewers fire → /review-coordinator → one verdict
-   → gate evaluates the exact head → 0: governed-path authorization → merge
-   → authoritative receipts → dossier close-out → /worktree-remove
-        ↘ 2: gate PARKS → console / gate next surface it → human decides → escalate → gate resolve → re-judge
-        ↘ any attention/terminal receipt → best-effort flare sweep → Slack   (independent; never gates)
+```text
+dossier task -> /worktree-add -> spec -> ship driver (dispatch -> poll -> judgment -> land -> record)
+  -> PR + CI -> /pr-risk -> reviewer panel -> /review-coordinator -> one findings artifact
+  -> gate evaluates the exact head -> 0: emitted head-pinned merge command -> merge
+  -> authoritative receipts -> dossier close-out -> /worktree-remove
+       \-> 2: park -> console / gate next -> human decision -> escalate -> gate resolve -> gate next
+       \-> attention or terminal receipt -> flare -> Slack (best effort; never gates)
 ```
 
-`/work-driver` coordinates dispatch→poll→land and runs its own review triage inline. `/pr-risk` and `/review-coordinator` are steps you *invoke* — the driver→pr-risk / driver→coordinator wiring is planned, not built, so nothing here auto-delegates.
+`/work-driver` coordinates dispatch -> poll -> land and runs its own review triage inline. `/pr-risk` and `/review-coordinator` are explicit steps; the driver does not invoke them automatically.
 
 ### Why this shape
 
-Each layer owns one responsibility and is swappable without rippling: dossier owns *what needs doing*; worktree skills own *where work happens*; ship owns *drive an agent + persist the run*; pr-risk owns *how much review*; review-coordinator owns *consolidate the finders* (the bots are swappable under it); **gate owns *authorization* — is this exact head allowed to merge — which is not the reviewers' findings**; **escalate owns *resolution* — closing the agent→human→agent loop a park opens, without ever deciding for the human**; **console owns the *read-only view* of gate's inbox — it explains, never decides**; **flare owns *notification* — a best-effort sink on authoritative receipts, its own Slack app, never blocking the driver, never depending on huddle**; consult owns the stuck path; huddle owns optional multi-seat; playwright owns browser. The workbench is a menu, not a checklist — skip what a flow doesn't need.
+Each layer owns one responsibility and can be replaced without rippling: dossier owns what needs doing; worktree skills own where work happens; Ship owns agent execution and durable run state; pr-risk owns review depth; reviewer bots are swappable finders; review-coordinator owns their consolidated artifact; Gate alone owns exact-head merge authorization; Escalate carries a human resolution without deciding it; Console explains Gate state; Flare notifies; Consult handles cross-repo knowledge; Channel owns optional agent-to-agent messaging and supersedes Huddle. The workbench is a menu, not a checklist.
 
 ### The shape underneath
 
-These tools instantiate the redesign's five contract planes — coupled only by typed artifacts (`evidence → verdict → action`), never call stacks:
-
-- **State** (remembers) — dossier + gate's hash-chained log + run/verdict/grant/receipt artifacts; the append-only substrate.
-- **Execution** (does) — ship's driver; emits evidence, never judges itself.
-- **Verification** (judges) — the escalate-only ladder (deterministic floor → local → premium), monotone `worst`/`max`: gate's reducer, review-coordinator, triage/tracelens.
-- **Capability** (bounds) — scoped/timed grants; every effectful verb needs a live grant + a supporting verdict.
-- **Observability** (explains) — read-only, storeless views from State: flare, console, /wip, /shipped, /status.
-
-This section is the sixth — **Composition**: the agent + thin policy choosing which planes a task needs. gate is the flagship — the one tool spanning Verification + Capability, holding the merge boundary. The boundaries above *are* the plane laws, not conventions.
+The contract planes are **State** (dossier plus run, verdict, grant, and receipt artifacts), **Execution** (Ship), **Verification** (review and Gate's escalate-only verifier ladder), **Capability** (scoped operator-minted grants), and **Observability** (Console, Flare, /wip, /shipped, /status). This section is **Composition**. Planes share typed artifacts - evidence -> verdict -> action - rather than call stacks.
 <!-- END dev-workbench -->
 
 ## Architecture
