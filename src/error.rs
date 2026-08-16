@@ -61,6 +61,19 @@ pub enum SlotError {
     Io(#[from] std::io::Error),
 }
 
+/// Errors from clone host-network allocation (`<state>/clonenets/` claims).
+#[derive(Debug, Error)]
+pub enum CloneNetError {
+    #[error("clone network pool full: all {cap} allocations claimed")]
+    PoolFull { cap: u8 },
+    #[error("invalid clone network index {index}: valid allocations are 1..={max}")]
+    InvalidIndex { index: u8, max: u8 },
+    #[error("target clone network {index} already claimed")]
+    TargetTaken { index: u8 },
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 /// Errors from the room registry (`rooms ls` / `rooms gc`).
 #[derive(Debug, Error)]
 pub enum RegistryError {
