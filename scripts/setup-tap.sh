@@ -130,8 +130,24 @@ validate_active_veth() {
         || fatal "$interface is not a marker-owned rooms clone network; refusing to change firewall state"
 }
 
+# FORWARD jumps into $VETH_FWD_CHAIN on `-i/-o veth-h+`, and iptables' `+` matches
+# *any* suffix — so every veth-h* the kernel has takes the rooms egress/NAT path,
+# not just the ones whose suffix happens to parse as an index in 1..63. Skipping
+# the rest, as for_each_numeric_veth does, lets a foreign `veth-h64`, a
+# zero-padded `veth-h08` (which bash reads as invalid octal and drops), or any
+# `veth-hxyz` reach that path with an overlapping 172.17.0.0/24 source and no
+# marker/netns/route preflight. Anything matched by the jump must be accounted
+# for here, so a name outside the rooms shape is fatal rather than skipped.
 validate_active_veths() {
-    for_each_numeric_veth validate_active_veth
+    local path interface index
+    for path in /sys/class/net/veth-h*; do
+        [[ -e "$path" ]] || continue
+        interface="${path##*/}"
+        index="${interface#veth-h}"
+        [[ "$index" =~ ^[1-9][0-9]*$ ]] && (( index <= 63 )) \
+            || fatal "$interface is matched by the FORWARD jump into $VETH_FWD_CHAIN (veth-h+) but is not a rooms clone network name; refusing to change firewall state"
+        validate_active_veth "$interface" "$index"
+    done
 }
 
 restore_active_veth_binding() {

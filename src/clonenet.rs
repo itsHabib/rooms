@@ -741,52 +741,63 @@ fn check_default_policy_rules() -> Result<(), CloneNetError> {
     if !output.status.success() {
         return Err(command_error(&command, &output.stderr));
     }
-    let rules = String::from_utf8_lossy(&output.stdout);
+    validate_policy_rules(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Accept only the kernel's untouched RPDB: every observed rule is one of
+/// [`DEFAULT_POLICY_RULES`], and each appears exactly once.
+///
+/// Rejecting unknown rules is only half the check — a *deleted* rule leaves the
+/// survivors individually allowed. Losing `32766: from all lookup main` is the
+/// dangerous one: the RPDB then never consults the main table, so the `/30` route
+/// allocation installs there is dead and clone traffic is unroutable while
+/// allocation reports success.
+#[cfg(any(target_os = "linux", test))]
+fn validate_policy_rules(rules: &str) -> Result<(), CloneNetError> {
+    let mut seen = [0usize; DEFAULT_POLICY_RULES.len()];
     for rule in rules.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if !default_policy_rule(rule) {
+        let counted = default_policy_rule_index(rule).and_then(|index| seen.get_mut(index));
+        let Some(count) = counted else {
             return Err(CloneNetError::PolicyRouting {
                 rule: rule.to_owned(),
             });
-        }
+        };
+        *count += 1;
     }
-    Ok(())
+    let mismatch = seen
+        .iter()
+        .zip(DEFAULT_POLICY_RULES)
+        .find(|(count, _)| **count != 1);
+    let Some((count, expected)) = mismatch else {
+        return Ok(());
+    };
+    Err(CloneNetError::PolicyRouting {
+        rule: format!("expected exactly one `{expected}`, found {count}"),
+    })
+}
+
+/// The kernel's untouched RPDB, in priority order. Allocation's routing model
+/// assumes exactly this set: no rule may be added, and none may be missing.
+#[cfg(any(target_os = "linux", test))]
+const DEFAULT_POLICY_RULES: [&str; 3] = [
+    "0: from all lookup local",
+    "32766: from all lookup main",
+    "32767: from all lookup default",
+];
+
+/// Position of `rule` within [`DEFAULT_POLICY_RULES`], or `None` if it is not one
+/// of them. Compared token-wise so `ip` spacing differences do not matter.
+#[cfg(any(target_os = "linux", test))]
+fn default_policy_rule_index(rule: &str) -> Option<usize> {
+    let tokens: Vec<&str> = rule.split_whitespace().collect();
+    DEFAULT_POLICY_RULES
+        .iter()
+        .position(|expected| expected.split_whitespace().eq(tokens.iter().copied()))
 }
 
 #[cfg(any(target_os = "linux", test))]
 fn default_policy_rule(rule: &str) -> bool {
-    let mut tokens = rule.split_whitespace();
-    matches!(
-        (
-            tokens.next(),
-            tokens.next(),
-            tokens.next(),
-            tokens.next(),
-            tokens.next(),
-            tokens.next(),
-        ),
-        (
-            Some("0:"),
-            Some("from"),
-            Some("all"),
-            Some("lookup"),
-            Some("local"),
-            None
-        ) | (
-            Some("32766:"),
-            Some("from"),
-            Some("all"),
-            Some("lookup"),
-            Some("main"),
-            None
-        ) | (
-            Some("32767:"),
-            Some("from"),
-            Some("all"),
-            Some("lookup"),
-            Some("default"),
-            None
-        )
-    )
+    default_policy_rule_index(rule).is_some()
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -802,7 +813,12 @@ fn classify_route(route: &str) -> RouteClass {
     let Some(cidr) = route_cidr(route) else {
         return RouteClass::Disjoint;
     };
-    if cidr.prefix == 0 || !overlaps_clone_supernet(cidr.network, cidr.prefix) {
+    // A catch-all does not claim the clone supernet: our /30s are longer and win
+    // longest-prefix-match. `/1` covers the split-default pair (`0.0.0.0/1` +
+    // `128.0.0.0/1`) that VPNs install to override the default without deleting
+    // it. Anything narrower stays a claim — a `172.16.0.0/12` on vpn0 really does
+    // route our addresses and must still be rejected.
+    if cidr.prefix <= 1 || !overlaps_clone_supernet(cidr.network, cidr.prefix) {
         return RouteClass::Disjoint;
     }
     rooms_route_index(route, cidr).map_or(RouteClass::Foreign, RouteClass::Rooms)
@@ -1189,6 +1205,9 @@ mod tests {
             "default via 192.168.5.2 dev eth0",
             "0.0.0.0/0 via 192.168.5.2 dev eth0",
             "172.18.0.0/16 dev docker0",
+            // VPN split-defaults: a catch-all pair, not a claim on clone space.
+            "0.0.0.0/1 via 10.8.0.1 dev tun0",
+            "128.0.0.0/1 via 10.8.0.1 dev tun0",
             "192.168.5.0/24 dev eth0",
         ] {
             assert_eq!(
@@ -1217,6 +1236,41 @@ mod tests {
         ] {
             assert!(!default_policy_rule(rule));
         }
+    }
+
+    #[test]
+    fn a_deleted_default_policy_rule_is_caught() {
+        use super::DEFAULT_POLICY_RULES;
+
+        let all = DEFAULT_POLICY_RULES.join("\n");
+        super::validate_policy_rules(&all).expect("the untouched RPDB must pass");
+
+        // Every single deletion must be rejected. Dropping `lookup main` is the one
+        // that silently strands clone traffic: allocation installs each /30 in the
+        // main table, which the RPDB would no longer consult.
+        for (omitted, expected) in DEFAULT_POLICY_RULES.iter().enumerate() {
+            let remaining: Vec<&str> = DEFAULT_POLICY_RULES
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != omitted)
+                .map(|(_, rule)| *rule)
+                .collect();
+            let err = super::validate_policy_rules(&remaining.join("\n")).unwrap_err();
+            let CloneNetError::PolicyRouting { rule } = err else {
+                panic!("expected PolicyRouting for a missing rule, got {err:?}");
+            };
+            assert!(
+                rule.contains(expected),
+                "error must name the missing rule, got {rule}"
+            );
+        }
+
+        // A duplicate is not the untouched RPDB either.
+        let main_rule = DEFAULT_POLICY_RULES
+            .get(1)
+            .expect("the RPDB set has a main-table rule");
+        let duplicated = format!("{all}\n{main_rule}");
+        super::validate_policy_rules(&duplicated).expect_err("a duplicated rule must be rejected");
     }
 
     #[test]
