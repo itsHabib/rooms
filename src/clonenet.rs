@@ -815,15 +815,32 @@ fn classify_route(route: &str) -> RouteClass {
     let Some(cidr) = route_cidr(route) else {
         return RouteClass::Disjoint;
     };
+    if !overlaps_clone_supernet(cidr.network, cidr.prefix) {
+        return RouteClass::Disjoint;
+    }
     // A catch-all does not claim the clone supernet: our /30s are longer and win
     // longest-prefix-match. `/1` covers the split-default pair (`0.0.0.0/1` +
     // `128.0.0.0/1`) that VPNs install to override the default without deleting
     // it. Anything narrower stays a claim — a `172.16.0.0/12` on vpn0 really does
     // route our addresses and must still be rejected.
-    if cidr.prefix <= 1 || !overlaps_clone_supernet(cidr.network, cidr.prefix) {
+    //
+    // That reasoning only holds in tables consulted *after* `main`. The kernel's
+    // priority-0 rule hits `local` first, and a match there ends RPDB processing,
+    // so a catch-all in `local` shadows the /30 allocation installs in `main` no
+    // matter how much longer that prefix is.
+    if cidr.prefix <= 1 && !in_local_table(route, cidr) {
         return RouteClass::Disjoint;
     }
     rooms_route_index(route, cidr).map_or(RouteClass::Foreign, RouteClass::Rooms)
+}
+
+/// Whether a route lives in the `local` table, which the kernel's priority-0 rule
+/// consults before `main`. `local`/`broadcast` types are local-table by
+/// construction; anything else has to say so explicitly.
+#[cfg(any(target_os = "linux", test))]
+fn in_local_table(route: &str, cidr: RouteCidr) -> bool {
+    matches!(cidr.kind, RouteKind::Local | RouteKind::Broadcast)
+        || route_pair(route, "table") == Some("local")
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1209,6 +1226,13 @@ mod tests {
             "anycast 172.17.0.6 dev eth0 table local",
             "multicast 172.17.0.0/24 dev eth0 table local",
             "someday-new-type 172.17.0.6 dev eth0",
+            // A catch-all is only harmless after `main`. In `local` it ends RPDB
+            // processing first, so it shadows the /30 however long that prefix is.
+            // Note it must be the `128.0.0.0/1` half: `0.0.0.0/1` stops at
+            // 127.255.255.255 and never reaches the supernet at all.
+            "local 128.0.0.0/1 dev lo table local",
+            "128.0.0.0/1 dev lo table local",
+            "128.0.0.0/1 via 10.8.0.1 dev tun0 table local",
         ] {
             assert_eq!(super::classify_route(route), RouteClass::Foreign, "{route}");
         }
