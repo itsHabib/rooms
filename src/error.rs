@@ -70,6 +70,16 @@ pub enum CloneNetError {
     InvalidIndex { index: u8, max: u8 },
     #[error("target clone network {index} already claimed")]
     TargetTaken { index: u8 },
+    #[error("clone network 172.17.0.0/24 overlaps host route `{route}`")]
+    RouteOverlap { route: String },
+    #[error("clone networking refuses non-default IPv4 policy rule `{rule}`")]
+    PolicyRouting { rule: String },
+    #[error("clone networking is supported only on Linux hosts")]
+    UnsupportedPlatform,
+    #[error("clone network command `{command}` failed: {detail}")]
+    Command { command: String, detail: String },
+    #[error("clone network setup failed: {setup}; rollback failed: {rollback}")]
+    Rollback { setup: String, rollback: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

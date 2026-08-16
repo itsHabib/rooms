@@ -21,6 +21,9 @@ set -euo pipefail
 
 FWD_CHAIN="${ROOMS_FWD_CHAIN:-ROOMS_FWD}"
 SUPERNET="${ROOMS_SUPERNET:-172.16.0.0/24}"
+VETH_FWD_CHAIN="ROOMS_VETH_FWD"
+VETH_SUPERNET="172.17.0.0/24"
+CLONENET_OWNER_DIR="/run/rooms/clonenet-owners"
 # Marker doctor keys on: version + supernet. Bump the version when the chain's
 # rule shape changes so `rooms doctor` flags hosts still on the old layout.
 MARKER="${ROOMS_FWD_MARKER:-rooms:fwd:v1:172.16.0.0/24}"
@@ -52,12 +55,122 @@ iptables_delete_while_present() {
 }
 
 detect_out_iface() {
+    if [[ -n "${ROOMS_OUT_IFACE:-}" ]]; then
+        printf '%s\n' "$ROOMS_OUT_IFACE"
+        return
+    fi
     ip route get 8.8.8.8 2>/dev/null \
         | awk '/dev/ { for (i=1; i<NF; i++) if ($i == "dev") print $(i+1); exit }'
 }
 
+remove_rooms_nat_rules() {
+    local out_iface="$1"
+    iptables_delete_while_present nat POSTROUTING -s "$SUPERNET" -o "$out_iface" -j MASQUERADE
+    iptables_delete_while_present nat POSTROUTING -s "$VETH_SUPERNET" -o "$out_iface" -j MASQUERADE
+}
+
+remove_nat_rules() {
+    local out_iface="$1"
+    remove_rooms_nat_rules "$out_iface"
+    iptables_delete_while_present nat POSTROUTING -o "$out_iface" -j MASQUERADE
+}
+
+reconcile_recorded_out_iface() {
+    local current="$1"
+    if [[ ! -f "$OUT_FORWARD_STATE" && ! -f "$OUT_IFACE_STATE" ]]; then
+        return
+    fi
+    if [[ ! -f "$OUT_FORWARD_STATE" || ! -f "$OUT_IFACE_STATE" ]]; then
+        fatal "incomplete outbound-interface state in $STATE_DIR; run --teardown after repairing it"
+    fi
+
+    local recorded prior
+    recorded="$(<"$OUT_IFACE_STATE")"
+    [[ "$recorded" == "$current" ]] && return
+    prior="$(<"$OUT_FORWARD_STATE")"
+    log "outbound interface changed: restoring $recorded before switching to $current"
+    remove_rooms_nat_rules "$recorded"
+    if [[ -e "/proc/sys/net/ipv4/conf/${recorded}/forwarding" ]]; then
+        sudo sysctl -w "net.ipv4.conf.${recorded}.forwarding=$prior" >/dev/null
+    else
+        log "recorded interface $recorded is gone; no forwarding sysctl remains to restore"
+    fi
+    sudo rm -f "$OUT_FORWARD_STATE" "$OUT_IFACE_STATE"
+}
+
+active_rooms_veth() {
+    local interface="$1" index="$2"
+    local subnet source route
+    subnet="172.17.0.$((4 * index))/30"
+    source="172.17.0.$((4 * index + 1))"
+    [[ -L "$CLONENET_OWNER_DIR/$index" ]] || return 1
+    sudo ip netns exec "rooms-c$index" true >/dev/null 2>&1 || return 1
+    while IFS= read -r route; do
+        [[ "$route" == "$subnet dev $interface "* ]] || continue
+        [[ " $route " == *" src $source "* ]] && return 0
+    done < <(ip -4 route show table main)
+    return 1
+}
+
+for_each_numeric_veth() {
+    local callback="$1" path interface index
+    for path in /sys/class/net/veth-h*; do
+        [[ -e "$path" ]] || continue
+        interface="${path##*/}"
+        index="${interface#veth-h}"
+        [[ "$index" =~ ^[0-9]+$ ]] || continue
+        (( index >= 1 && index <= 63 )) || continue
+        "$callback" "$interface" "$index"
+    done
+}
+
+validate_active_veth() {
+    local interface="$1" index="$2"
+    active_rooms_veth "$interface" "$index" \
+        || fatal "$interface is not a marker-owned rooms clone network; refusing to change firewall state"
+}
+
+# FORWARD jumps into $VETH_FWD_CHAIN on `-i/-o veth-h+`, and iptables' `+` matches
+# *any* suffix — so every veth-h* the kernel has takes the rooms egress/NAT path,
+# not just the ones whose suffix happens to parse as an index in 1..63. Skipping
+# the rest, as for_each_numeric_veth does, lets a foreign `veth-h64`, a
+# zero-padded `veth-h08` (which bash reads as invalid octal and drops), or any
+# `veth-hxyz` reach that path with an overlapping 172.17.0.0/24 source and no
+# marker/netns/route preflight. Anything matched by the jump must be accounted
+# for here, so a name outside the rooms shape is fatal rather than skipped.
+validate_active_veths() {
+    local path interface index
+    for path in /sys/class/net/veth-h*; do
+        [[ -e "$path" ]] || continue
+        interface="${path##*/}"
+        index="${interface#veth-h}"
+        [[ "$index" =~ ^[1-9][0-9]*$ ]] && (( index <= 63 )) \
+            || fatal "$interface is matched by the FORWARD jump into $VETH_FWD_CHAIN (veth-h+) but is not a rooms clone network name; refusing to change firewall state"
+        validate_active_veth "$interface" "$index"
+    done
+}
+
+restore_active_veth_binding() {
+    local interface="$1" index="$2" source
+    source="172.17.0.$((4 * index + 2))/32"
+    sudo iptables -I "$VETH_FWD_CHAIN" 1 -i "$interface" ! -s "$source" -j DROP
+}
+
+restore_active_veth_bindings() {
+    for_each_numeric_veth restore_active_veth_binding
+}
+
 install_host() {
     local out_iface="$1"
+
+    # The wildcard FORWARD jumps affect every numeric veth-h interface. Prove
+    # each existing match belongs to a marker-owned live rooms allocation
+    # before changing any NAT, sysctl, or filter state.
+    validate_active_veths
+
+    # A default-route change must retire the interface recorded by the prior
+    # install before state is transferred to the new interface.
+    reconcile_recorded_out_iface "$out_iface"
 
     # Fresh chain every run: create-if-missing, then flush so re-runs converge
     # on exactly the rule set below regardless of prior version.
@@ -90,11 +203,36 @@ install_host() {
     iptables_delete_while_present filter FORWARD -j "$FWD_CHAIN"
     sudo iptables -I FORWARD 1 -j "$FWD_CHAIN"
 
+    # Clone veth traffic is a separate, additive path. Keep the flat chain at
+    # position 1; scoped ingress/egress jumps occupy positions 2 and 3 so an
+    # unrelated host network that overlaps 172.17.0.0/24 never enters it.
+    sudo iptables -N "$VETH_FWD_CHAIN" 2>/dev/null || true
+    sudo iptables -F "$VETH_FWD_CHAIN"
+    # Traffic arriving from clone namespaces must have crossed their first-hop
+    # MASQUERADE. Drop untransformed/spoofed sources before any destination rule.
+    sudo iptables -A "$VETH_FWD_CHAIN" -i 'veth-h+' ! -s "$VETH_SUPERNET" -j DROP
+    sudo iptables -A "$VETH_FWD_CHAIN" -s "$VETH_SUPERNET" -d "$VETH_SUPERNET" -j DROP
+    sudo iptables -A "$VETH_FWD_CHAIN" -s "$VETH_SUPERNET" -d 10.0.0.0/8 -j DROP
+    sudo iptables -A "$VETH_FWD_CHAIN" -s "$VETH_SUPERNET" -d 192.168.0.0/16 -j DROP
+    sudo iptables -A "$VETH_FWD_CHAIN" -s "$VETH_SUPERNET" -d 172.16.0.0/12 -j DROP
+    sudo iptables -A "$VETH_FWD_CHAIN" -s "$VETH_SUPERNET" -o "$out_iface" -j ACCEPT
+    sudo iptables -A "$VETH_FWD_CHAIN" -i "$out_iface" -d "$VETH_SUPERNET" \
+        -m state --state RELATED,ESTABLISHED -j ACCEPT
+    sudo iptables -A "$VETH_FWD_CHAIN" -s "$VETH_SUPERNET" -j DROP
+    # Allocations add the same exact per-veth source binding. Reconstruct those
+    # dynamic rules after a host-substrate re-run flushes the chain.
+    restore_active_veth_bindings
+    iptables_delete_while_present filter FORWARD -j "$VETH_FWD_CHAIN"
+    iptables_delete_while_present filter FORWARD -i 'veth-h+' -j "$VETH_FWD_CHAIN"
+    iptables_delete_while_present filter FORWARD -o 'veth-h+' -j "$VETH_FWD_CHAIN"
+    sudo iptables -I FORWARD 2 -i 'veth-h+' -j "$VETH_FWD_CHAIN"
+    sudo iptables -I FORWARD 3 -o 'veth-h+' -j "$VETH_FWD_CHAIN"
+
     # One supernet-scoped NAT rule for egress. Drop any legacy unrestricted or
     # prior rooms rule first so re-runs land in a known-good state.
-    iptables_delete_while_present nat POSTROUTING -s "$SUPERNET" -o "$out_iface" -j MASQUERADE
-    iptables_delete_while_present nat POSTROUTING -o "$out_iface" -j MASQUERADE
+    remove_nat_rules "$out_iface"
     sudo iptables -t nat -A POSTROUTING -s "$SUPERNET" -o "$out_iface" -j MASQUERADE
+    sudo iptables -t nat -A POSTROUTING -s "$VETH_SUPERNET" -o "$out_iface" -j MASQUERADE
 
     # The guest→internet return path is forwarded per the outbound interface's
     # setting. Record the prior value (and the interface name) so teardown
@@ -108,7 +246,7 @@ install_host() {
     log "enabling IPv4 forwarding on $out_iface"
     sudo sysctl -w "net.ipv4.conf.${out_iface}.forwarding=1" >/dev/null
 
-    log "done. $FWD_CHAIN installed and scoped to $SUPERNET; egress via $out_iface."
+    log "done. $FWD_CHAIN + $VETH_FWD_CHAIN installed; egress via $out_iface."
 }
 
 teardown_host() {
@@ -119,15 +257,22 @@ teardown_host() {
     out_iface="${out_iface:-eth0}"
     [[ -f "$OUT_IFACE_STATE" ]] && out_iface="$(<"$OUT_IFACE_STATE")"
 
+    log "removing $VETH_FWD_CHAIN and veth NAT rule"
+    iptables_delete_while_present filter FORWARD -j "$VETH_FWD_CHAIN"
+    iptables_delete_while_present filter FORWARD -i 'veth-h+' -j "$VETH_FWD_CHAIN"
+    iptables_delete_while_present filter FORWARD -o 'veth-h+' -j "$VETH_FWD_CHAIN"
+    if sudo iptables -L "$VETH_FWD_CHAIN" >/dev/null 2>&1; then
+        sudo iptables -F "$VETH_FWD_CHAIN"
+        sudo iptables -X "$VETH_FWD_CHAIN"
+    fi
+    remove_nat_rules "$out_iface"
+
     log "removing $FWD_CHAIN and NAT rule"
     iptables_delete_while_present filter FORWARD -j "$FWD_CHAIN"
     if sudo iptables -L "$FWD_CHAIN" >/dev/null 2>&1; then
         sudo iptables -F "$FWD_CHAIN"
         sudo iptables -X "$FWD_CHAIN"
     fi
-    iptables_delete_while_present nat POSTROUTING -s "$SUPERNET" -o "$out_iface" -j MASQUERADE
-    iptables_delete_while_present nat POSTROUTING -o "$out_iface" -j MASQUERADE
-
     if [[ -f "$OUT_FORWARD_STATE" ]]; then
         local prior_out
         prior_out="$(<"$OUT_FORWARD_STATE")"
