@@ -844,13 +844,33 @@ struct RouteCidr {
 }
 
 #[cfg(any(target_os = "linux", test))]
+impl RouteCidr {
+    /// What `ip` prints as the bare `default` keyword: `0.0.0.0/0`.
+    const DEFAULT: Self = Self {
+        kind: RouteKind::Unicast,
+        network: 0,
+        prefix: 0,
+    };
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn route_cidr(route: &str) -> Option<RouteCidr> {
     let mut tokens = route.split_whitespace();
     let first = tokens.next()?;
     let (kind, destination) = match first {
+        // `ip` prints the default route as the keyword, not 0.0.0.0/0.
+        "default" => return Some(RouteCidr::DEFAULT),
         "local" => (RouteKind::Local, tokens.next()?),
         "broadcast" => (RouteKind::Broadcast, tokens.next()?),
-        "blackhole" | "unreachable" | "prohibit" | "throw" => {
+        "anycast" | "multicast" | "blackhole" | "unreachable" | "prohibit" | "throw" | "nat" => {
+            (RouteKind::ForeignSpecial, tokens.next()?)
+        }
+        // Any other leading keyword is a route type we do not model. Falling
+        // through to "parse it as an address" yields None, which classify_route
+        // reads as Disjoint — so an overlapping route of an unknown type would be
+        // waved through. Treat it as a destination-bearing special and let the
+        // overlap check decide, so unknown forms fail closed.
+        _ if first.starts_with(|c: char| c.is_ascii_alphabetic()) => {
             (RouteKind::ForeignSpecial, tokens.next()?)
         }
         _ => (RouteKind::Unicast, first),
@@ -1183,6 +1203,12 @@ mod tests {
             "172.17.0.4/30 via 192.0.2.1 dev eth0",
             "172.17.0.4/30 dev veth-h2 scope link src 172.17.0.5",
             "172.17.0.4/30 dev veth-h1 scope link src 172.17.0.9",
+            // Route types whose keyword we must not mistake for a destination:
+            // failing to parse one would read as Disjoint and wave it through,
+            // while the local table it lives in is consulted before main.
+            "anycast 172.17.0.6 dev eth0 table local",
+            "multicast 172.17.0.0/24 dev eth0 table local",
+            "someday-new-type 172.17.0.6 dev eth0",
         ] {
             assert_eq!(super::classify_route(route), RouteClass::Foreign, "{route}");
         }

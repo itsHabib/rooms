@@ -209,8 +209,12 @@ assert_veth_rules_present
 assert_grep "$(iptables -S "$VETH_FWD_CHAIN")" \
     "-A $VETH_FWD_CHAIN ! -s 172.17.0.254/32 -i veth-h63 -j DROP" \
     "restored active-veth source binding"
+# Deleting the namespace takes veth-g63 with it, and destroying either end of a
+# veth pair destroys both — so veth-h63 is usually already gone here. Under
+# `set -e` an unguarded delete of an absent link would abort the run before the
+# outbound-interface and teardown assertions below.
 ip netns del rooms-c63
-ip link del veth-h63
+ip link del veth-h63 >/dev/null 2>&1 || true
 rm -f "$CLONENET_OWNER_DIR/63"
 
 log "re-running setup after an outbound-interface change"
