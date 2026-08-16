@@ -795,7 +795,9 @@ fn default_policy_rule_index(rule: &str) -> Option<usize> {
         .position(|expected| expected.split_whitespace().eq(tokens.iter().copied()))
 }
 
-#[cfg(any(target_os = "linux", test))]
+/// Membership-only view of [`default_policy_rule_index`], for the tests that pin
+/// which rule shapes are recognised. Production code needs the position.
+#[cfg(test)]
 fn default_policy_rule(rule: &str) -> bool {
     default_policy_rule_index(rule).is_some()
 }
