@@ -716,11 +716,7 @@ fn check_clone_subnet_available() -> Result<(), CloneNetError> {
         return Err(command_error(&command, &output.stderr));
     }
     let routes = String::from_utf8_lossy(&output.stdout);
-    for route in routes
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
+    for route in top_level_routes(&routes) {
         match classify_route(route) {
             RouteClass::Disjoint => {}
             RouteClass::Rooms(index) if marker_owner(index)?.is_some() => {}
@@ -810,10 +806,29 @@ enum RouteClass {
     Foreign,
 }
 
+/// Column-zero route records from `ip route` output.
+///
+/// Multipath nexthops and cache details are emitted on indented continuation
+/// lines. Their parent route has already been classified, so parsing them as
+/// standalone routes would reject otherwise valid ECMP hosts.
+#[cfg(any(target_os = "linux", test))]
+fn top_level_routes(routes: &str) -> impl Iterator<Item = &str> {
+    routes.lines().filter_map(|line| {
+        let route = line.trim();
+        if route.is_empty() || line.as_bytes().first().is_some_and(u8::is_ascii_whitespace) {
+            return None;
+        }
+        Some(route)
+    })
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn classify_route(route: &str) -> RouteClass {
     let Some(cidr) = route_cidr(route) else {
-        return RouteClass::Disjoint;
+        // `ip -4 route` output should always be parseable. Treating an
+        // unexpected form as disjoint would make every future grammar gap a
+        // fail-open overlap check.
+        return RouteClass::Foreign;
     };
     if !overlaps_clone_supernet(cidr.network, cidr.prefix) {
         return RouteClass::Disjoint;
@@ -862,12 +877,14 @@ struct RouteCidr {
 
 #[cfg(any(target_os = "linux", test))]
 impl RouteCidr {
-    /// What `ip` prints as the bare `default` keyword: `0.0.0.0/0`.
-    const DEFAULT: Self = Self {
-        kind: RouteKind::Unicast,
-        network: 0,
-        prefix: 0,
-    };
+    /// What `ip` prints as the `default` destination keyword: `0.0.0.0/0`.
+    const fn default_for(kind: RouteKind) -> Self {
+        Self {
+            kind,
+            network: 0,
+            prefix: 0,
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -875,23 +892,26 @@ fn route_cidr(route: &str) -> Option<RouteCidr> {
     let mut tokens = route.split_whitespace();
     let first = tokens.next()?;
     let (kind, destination) = match first {
-        // `ip` prints the default route as the keyword, not 0.0.0.0/0.
-        "default" => return Some(RouteCidr::DEFAULT),
+        "default" => (RouteKind::Unicast, first),
         "local" => (RouteKind::Local, tokens.next()?),
         "broadcast" => (RouteKind::Broadcast, tokens.next()?),
         "anycast" | "multicast" | "blackhole" | "unreachable" | "prohibit" | "throw" | "nat" => {
             (RouteKind::ForeignSpecial, tokens.next()?)
         }
-        // Any other leading keyword is a route type we do not model. Falling
-        // through to "parse it as an address" yields None, which classify_route
-        // reads as Disjoint — so an overlapping route of an unknown type would be
-        // waved through. Treat it as a destination-bearing special and let the
-        // overlap check decide, so unknown forms fail closed.
+        // Any other alphabetic first token may be a route type we do not model.
+        // Consume its destination as a foreign special; if that is absent or
+        // malformed, classify_route rejects the parse failure too.
         _ if first.starts_with(|c: char| c.is_ascii_alphabetic()) => {
             (RouteKind::ForeignSpecial, tokens.next()?)
         }
         _ => (RouteKind::Unicast, first),
     };
+    // `default` is a destination as well as a possible first token. Preserve
+    // an explicit route type (`local default`, `blackhole default`, …) so the
+    // local-table precedence check can reject a catch-all that shadows main.
+    if destination == "default" {
+        return Some(RouteCidr::default_for(kind));
+    }
     let (address, prefix) = match destination.split_once('/') {
         Some((address, prefix)) => (address, prefix.parse::<u8>().ok()?),
         None => (destination, 32),
@@ -1209,7 +1229,35 @@ mod tests {
     }
 
     #[test]
+    fn route_scanner_skips_only_iproute_continuations() {
+        let routes = concat!(
+            "default proto static\n",
+            "\tnexthop via 192.0.2.1 dev eth0 weight 1\n",
+            "\tnexthop via 198.51.100.1 dev eth1 weight 1\n",
+            "    cache expires 10sec\n",
+            "nexthop via 203.0.113.1 dev eth2\n",
+            "local not-an-address dev lo table local\n",
+        );
+        assert_eq!(
+            super::top_level_routes(routes).collect::<Vec<_>>(),
+            vec![
+                "default proto static",
+                "nexthop via 203.0.113.1 dev eth2",
+                "local not-an-address dev lo table local",
+            ]
+        );
+    }
+
+    #[test]
     fn route_classifier_rejects_overlaps_but_recognizes_rooms_routes() {
+        assert_eq!(
+            super::route_cidr("local default dev lo table local"),
+            Some(super::RouteCidr {
+                kind: super::RouteKind::Local,
+                network: 0,
+                prefix: 0,
+            })
+        );
         for route in [
             "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1",
             "172.17.0.0/24 dev bridge0 proto kernel scope link src 172.17.0.1",
@@ -1220,9 +1268,8 @@ mod tests {
             "172.17.0.4/30 via 192.0.2.1 dev eth0",
             "172.17.0.4/30 dev veth-h2 scope link src 172.17.0.5",
             "172.17.0.4/30 dev veth-h1 scope link src 172.17.0.9",
-            // Route types whose keyword we must not mistake for a destination:
-            // failing to parse one would read as Disjoint and wave it through,
-            // while the local table it lives in is consulted before main.
+            // Route types whose keyword we must not mistake for a destination;
+            // the local table they live in is consulted before main.
             "anycast 172.17.0.6 dev eth0 table local",
             "multicast 172.17.0.0/24 dev eth0 table local",
             "someday-new-type 172.17.0.6 dev eth0",
@@ -1233,6 +1280,13 @@ mod tests {
             "local 128.0.0.0/1 dev lo table local",
             "128.0.0.0/1 dev lo table local",
             "128.0.0.0/1 via 10.8.0.1 dev tun0 table local",
+            "local default dev lo table local",
+            "blackhole default table local",
+            "someday-new-type default dev lo table local",
+            // A route line we cannot model must fail closed. `ip -4 route`
+            // should be parseable; treating an unexpected form as disjoint
+            // would let the next overlapping route grammar bypass preflight.
+            "local not-an-address dev lo table local",
         ] {
             assert_eq!(super::classify_route(route), RouteClass::Foreign, "{route}");
         }
@@ -1255,6 +1309,7 @@ mod tests {
         }
         for route in [
             "default via 192.168.5.2 dev eth0",
+            "blackhole default table main",
             "0.0.0.0/0 via 192.168.5.2 dev eth0",
             "172.18.0.0/16 dev docker0",
             // VPN split-defaults: a catch-all pair, not a claim on clone space.
