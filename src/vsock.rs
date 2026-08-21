@@ -86,9 +86,7 @@ impl SecretsPayload {
 
 impl Drop for SecretsPayload {
     fn drop(&mut self) {
-        for b in &mut self.0 {
-            *b = 0;
-        }
+        self.0.fill(0);
     }
 }
 
