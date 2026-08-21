@@ -833,6 +833,13 @@ fn classify_route(route: &str) -> RouteClass {
     if !overlaps_clone_supernet(cidr.network, cidr.prefix) {
         return RouteClass::Disjoint;
     }
+    // A throw in the priority-0 local table cannot shadow `main`: it terminates
+    // that table's lookup as though no route was found, so the RPDB continues.
+    // Do not extend this exemption to `main`, where a more-specific throw can
+    // beat the Rooms /30 before lookup continues past the table.
+    if cidr.kind == RouteKind::Throw && in_local_table(route, cidr) {
+        return RouteClass::Disjoint;
+    }
     // A catch-all does not claim the clone supernet: our /30s are longer and win
     // longest-prefix-match. `/1` covers the split-default pair (`0.0.0.0/1` +
     // `128.0.0.0/1`) that VPNs install to override the default without deleting
@@ -843,7 +850,7 @@ fn classify_route(route: &str) -> RouteClass {
     // priority-0 rule hits `local` first, and a match there ends RPDB processing,
     // so a catch-all in `local` shadows the /30 allocation installs in `main` no
     // matter how much longer that prefix is.
-    if cidr.prefix <= 1 && (cidr.kind == RouteKind::Throw || !in_local_table(route, cidr)) {
+    if cidr.prefix <= 1 && !in_local_table(route, cidr) {
         return RouteClass::Disjoint;
     }
     rooms_route_index(route, cidr).map_or(RouteClass::Foreign, RouteClass::Rooms)
@@ -1292,6 +1299,9 @@ mod tests {
             "local default dev lo table 255",
             "blackhole default table local",
             "someday-new-type default dev lo table local",
+            // A more-specific throw in `main` can win over the Rooms /30 and
+            // terminate that table's lookup, so it remains an overlap.
+            "throw 172.17.0.6/32 table main",
             // A route line we cannot model must fail closed. `ip -4 route`
             // should be parseable; treating an unexpected form as disjoint
             // would let the next overlapping route grammar bypass preflight.
@@ -1320,8 +1330,11 @@ mod tests {
             "default via 192.168.5.2 dev eth0",
             "blackhole default table main",
             // A throw lookup deliberately behaves as though the route was not
-            // found, so even the priority-0 local table continues to `main`.
+            // found, so the priority-0 local table always continues to `main`,
+            // regardless of the throw prefix.
             "throw default table local",
+            "throw 172.17.0.0/24 table local",
+            "throw 172.17.0.6/32 table local",
             // An explicit table overrides the default table implied by the
             // local route type. `default` is consulted after `main`.
             "local default dev lo table default",
