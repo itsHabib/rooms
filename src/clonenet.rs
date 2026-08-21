@@ -843,19 +843,25 @@ fn classify_route(route: &str) -> RouteClass {
     // priority-0 rule hits `local` first, and a match there ends RPDB processing,
     // so a catch-all in `local` shadows the /30 allocation installs in `main` no
     // matter how much longer that prefix is.
-    if cidr.prefix <= 1 && !in_local_table(route, cidr) {
+    if cidr.prefix <= 1 && (cidr.kind == RouteKind::Throw || !in_local_table(route, cidr)) {
         return RouteClass::Disjoint;
     }
     rooms_route_index(route, cidr).map_or(RouteClass::Foreign, RouteClass::Rooms)
 }
 
 /// Whether a route lives in the `local` table, which the kernel's priority-0 rule
-/// consults before `main`. `local`/`broadcast` types are local-table by
-/// construction; anything else has to say so explicitly.
+/// consults before `main`.
+///
+/// `local`/`broadcast` types default to that table, but an explicit table always
+/// wins. That matters for shapes such as `local default table default`: the
+/// route type describes delivery, while the table controls RPDB precedence.
 #[cfg(any(target_os = "linux", test))]
 fn in_local_table(route: &str, cidr: RouteCidr) -> bool {
-    matches!(cidr.kind, RouteKind::Local | RouteKind::Broadcast)
-        || route_pair(route, "table") == Some("local")
+    match route_pair(route, "table") {
+        Some("local" | "255") => true,
+        Some(_) => false,
+        None => matches!(cidr.kind, RouteKind::Local | RouteKind::Broadcast),
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -864,6 +870,7 @@ enum RouteKind {
     Unicast,
     Local,
     Broadcast,
+    Throw,
     ForeignSpecial,
 }
 
@@ -895,7 +902,8 @@ fn route_cidr(route: &str) -> Option<RouteCidr> {
         "default" => (RouteKind::Unicast, first),
         "local" => (RouteKind::Local, tokens.next()?),
         "broadcast" => (RouteKind::Broadcast, tokens.next()?),
-        "anycast" | "multicast" | "blackhole" | "unreachable" | "prohibit" | "throw" | "nat" => {
+        "throw" => (RouteKind::Throw, tokens.next()?),
+        "anycast" | "multicast" | "blackhole" | "unreachable" | "prohibit" | "nat" => {
             (RouteKind::ForeignSpecial, tokens.next()?)
         }
         // Any other alphabetic first token may be a route type we do not model.
@@ -947,7 +955,7 @@ const fn cidr_mask(prefix: u8) -> u32 {
 
 #[cfg(any(target_os = "linux", test))]
 fn rooms_route_index(route: &str, cidr: RouteCidr) -> Option<u8> {
-    if cidr.kind == RouteKind::ForeignSpecial
+    if matches!(cidr.kind, RouteKind::Throw | RouteKind::ForeignSpecial)
         || route.split_whitespace().any(|token| token == "via")
     {
         return None;
@@ -966,7 +974,7 @@ fn rooms_route_index(route: &str, cidr: RouteCidr) -> Option<u8> {
         RouteKind::Broadcast => {
             cidr.prefix == 32 && matches!(cidr.network, value if value == base || value == base + 3)
         }
-        RouteKind::ForeignSpecial => false,
+        RouteKind::Throw | RouteKind::ForeignSpecial => false,
     };
     let expected_source = net.host_ip.to_string();
     if expected_shape && route_pair(route, "src") == Some(expected_source.as_str()) {
@@ -1281,6 +1289,7 @@ mod tests {
             "128.0.0.0/1 dev lo table local",
             "128.0.0.0/1 via 10.8.0.1 dev tun0 table local",
             "local default dev lo table local",
+            "local default dev lo table 255",
             "blackhole default table local",
             "someday-new-type default dev lo table local",
             // A route line we cannot model must fail closed. `ip -4 route`
@@ -1310,6 +1319,14 @@ mod tests {
         for route in [
             "default via 192.168.5.2 dev eth0",
             "blackhole default table main",
+            // A throw lookup deliberately behaves as though the route was not
+            // found, so even the priority-0 local table continues to `main`.
+            "throw default table local",
+            // An explicit table overrides the default table implied by the
+            // local route type. `default` is consulted after `main`.
+            "local default dev lo table default",
+            "local default dev lo table 253",
+            "local default dev lo table main",
             "0.0.0.0/0 via 192.168.5.2 dev eth0",
             "172.18.0.0/16 dev docker0",
             // VPN split-defaults: a catch-all pair, not a claim on clone space.
