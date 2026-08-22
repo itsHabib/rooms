@@ -681,9 +681,7 @@ fn ipv4_network(destination: &str) -> Option<(u32, u8)> {
         return None;
     }
     let address = u32::from(address.parse::<std::net::Ipv4Addr>().ok()?);
-    let mask = u32::MAX
-        .checked_shl(u32::from(32 - prefix))
-        .map_or(0, |mask| mask);
+    let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
     Some((address & mask, prefix))
 }
 
