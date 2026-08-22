@@ -4133,7 +4133,7 @@ mod tests {
     impl Drop for ProbeCancellationOnDrop {
         fn drop(&mut self) {
             if let Some(sender) = self.0.take() {
-                let _ = sender.send(Some(CloneTermination::Terminate));
+                let _ = sender.send(Some(CloneTermination::Interrupt));
             }
         }
     }
@@ -4745,7 +4745,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(CloneReadinessBarrierError::Cancelled(
-                CloneTermination::Terminate
+                CloneTermination::Interrupt
             ))
         ));
     }
@@ -4766,7 +4766,7 @@ mod tests {
         let barrier = tokio::spawn(run_clone_readiness_barrier(vec![probe], cancellation));
         started_receiver.await.expect("probe started");
         cancellation_sender
-            .send(Some(CloneTermination::Terminate))
+            .send(Some(CloneTermination::Interrupt))
             .expect("barrier still observes cancellation");
         tokio::task::yield_now().await;
         assert!(
@@ -4782,7 +4782,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(CloneReadinessBarrierError::Cancelled(
-                CloneTermination::Terminate
+                CloneTermination::Interrupt
             ))
         ));
         assert!(
