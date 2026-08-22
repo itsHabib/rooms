@@ -539,6 +539,10 @@ mod tests {
             .status()
             .expect("initialize repository")
             .success());
+        for directory in [&repo, &repo.join(".git")] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))
+                .expect("protect repository directory");
+        }
         let home = root.join("home/rooms");
         for arguments in [
             &["config", "extensions.worktreeConfig", "true"][..],
@@ -547,6 +551,10 @@ mod tests {
             &["config", "--worktree", "user.email", "warm@evil.invalid"][..],
         ] {
             assert!(git_in_repo(&repo, &home, arguments).status.success());
+        }
+        for config in [repo.join(".git/config"), repo.join(".git/config.worktree")] {
+            std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600))
+                .expect("protect repository config");
         }
         repo
     }
