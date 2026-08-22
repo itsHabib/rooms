@@ -10,43 +10,31 @@ on:
   pull_request_review:
     types: [submitted]
 
-# Group by thread if and only if this run will invoke Claude — the condition
-# below mirrors the job's `if:` exactly, and must keep mirroring it. Two
-# invariants meet here, and only that equivalence satisfies both:
+# No `concurrency:` on purpose, and adding one is a regression.
 #
-#   1. Any two runs that invoke Claude on one thread must serialize. The
-#      attestation's evidence check accepts claude[bot] output postdating this
-#      job's start, so a concurrent run's completion comment would otherwise
-#      credit a review this job never got. `@claude` inside a review body
-#      counts: pull_request_review* invoke Claude too.
-#   2. No run that will NOT invoke Claude may join a thread group. GitHub keeps
-#      one pending run per group and cancels the older, and this workflow feeds
-#      its own group — claude[bot]'s completion comment and the attestation
-#      from github-actions[bot] are both issue_comment events on this thread.
-#      Sharing a group with those lets them silently evict a queued review.
-#
-# Narrower than the `if:` reopens (1); broader reopens (2).
-concurrency:
-  group: >-
-    ${{
-      (
-        (github.event_name == 'issue_comment'
-          && contains(github.event.comment.body, '@claude'))
-        || (github.event_name == 'pull_request_review_comment'
-          && contains(github.event.comment.body, '@claude'))
-        || (github.event_name == 'pull_request_review'
-          && contains(github.event.review.body, '@claude'))
-        || (github.event_name == 'issues'
-          && (contains(github.event.issue.body, '@claude')
-            || contains(github.event.issue.title, '@claude')))
-      )
-      && format('claude-{0}',
-        github.event.issue.number || github.event.pull_request.number)
-      || format('claude-run-{0}', github.run_id)
-    }}
-  cancel-in-progress: false
+# An earlier revision grouped runs per thread so the attestation's evidence
+# window could not straddle a concurrent run's output. Correlating the evidence
+# to this run's id (see `attest` below) replaced that: a concurrent run's
+# completion comment carries a different run URL and is unusable here no matter
+# how the runs interleave. The group's only remaining effect was a hazard
+# GitHub documents — exactly one run per group stays pending, so a third
+# `@claude` mention evicts a queued second one — which can silently drop an
+# `@claude review` and the panel slot it would have filled. Serialization is no
+# longer load-bearing, so it goes; parallel runs simply attest independently,
+# and a duplicate attestation for the same head is a no-op for gate.
 
 jobs:
+  # The reviewer holds read-only repository scopes — the same set main has
+  # carried across every working `@claude review`. It must NOT hold the write
+  # scopes the attestation needs. The action hands its GITHUB_TOKEN to the
+  # agent's own tools, and on a public repo the prompt is built from
+  # fork-controlled text (PR title, body, diff, comments), so a prompt
+  # injection reaching a write-capable token could post a forged
+  # `<!-- gate:review-attestation -->` comment under the very
+  # `github-actions[bot]` identity gate accepts as authority — clearing a panel
+  # for a review that never happened, and doing it on the fork path where the
+  # explicit check below refuses to attest at all. Write scopes live in
+  # `attest`, a job that runs no model.
   claude:
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
@@ -56,17 +44,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # write, not read: the attestation step below posts a comment with the
-      # repository's own Actions token. Claude's own review comments come from
-      # the claude[bot] app and never needed this.
-      pull-requests: write
-      # `gh pr comment` hits the issues-comments endpoint, which GitHub gates on
-      # Issues-write for issues and Pull-requests-write for PRs. Rather than bet
-      # the whole mechanism on that reading, match the two repos where this
-      # attestation demonstrably lands — workbench and roxiq both grant it.
-      issues: write
+      pull-requests: read
+      issues: read
       id-token: write
       actions: read
+    # Facts pinned by this job for `attest` to act on. Every one is established
+    # before the model runs, so none of them is reachable by anything the model
+    # does or is told to do.
+    outputs:
+      review_ref: ${{ steps.review_ref.outputs.ref }}
+      reviewed_sha: ${{ steps.reviewed_head.outputs.sha }}
+      window_started: ${{ steps.reviewed_head.outputs.started }}
     steps:
       # The action diffs via `git hash-object <path>`, so files a PR adds must
       # exist in the working tree — a main checkout has none of them, at any
@@ -76,8 +64,8 @@ jobs:
       # fork head never replaces the trusted workspace — fork PRs keep the
       # default-branch checkout.
       #
-      # This also gives the attestation step below a truthful anchor: the tree
-      # the reviewer actually ran against, resolved once, before it runs.
+      # This also gives the attestation a truthful anchor: the tree the
+      # reviewer actually ran against, resolved once, before it runs.
       - name: Resolve review ref (PR head for same-repo PRs)
         id: review_ref
         env:
@@ -121,17 +109,23 @@ jobs:
           # kills @claude review on any PR that adds files.
           fetch-depth: 0
 
-      # Anchors the attestation's evidence window. A queued request keeps its
-      # original comment timestamp, so "postdates the request" would accept a
-      # PREVIOUS serialized run's output; "postdates this job's own start"
-      # cannot — under the per-thread concurrency group, nothing else claude
-      # runs on this thread between here and the attestation. The window is the
-      # outer bound only — correctness rests on correlating the evidence to
-      # this run's id below, so that a mis-drawn group cannot forge an
-      # attestation on its own.
-      - name: Open the evidence window
-        id: attest_window
-        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+      # Both facts are read from the resolved workspace before the model runs:
+      #
+      #   sha     — the commit the reviewer is about to read. Recorded here
+      #             rather than after the fact so the attested head is the tree
+      #             that was reviewed, not whatever the repo looks like later.
+      #   started — the outer bound of the evidence window. Correlating
+      #             evidence to this run's id is what actually makes the
+      #             evidence this run's; the timestamp is a cheap second bound
+      #             kept for defence in depth, not the load-bearing check.
+      - name: Pin the reviewed tree and open the evidence window
+        id: reviewed_head
+        run: |
+          set -euo pipefail
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Run Claude Code
         id: claude
@@ -147,50 +141,71 @@ jobs:
           additional_permissions: |
             actions: read
 
-      # Gate counts a reviewer only against evidence bound to the exact judged
-      # head: classifyPanel in gate's cmd/gate/internal/evidence/panel.go wants a
-      # formal GitHub review with User.Type=Bot, a COMMENTED/APPROVED/
-      # CHANGES_REQUESTED state, and commit_id == head. claude[bot] publishes its
-      # review as an issue comment, which carries no commit anchor and satisfies
-      # none of that, so every rooms PR parked on
-      # `review panel incomplete: missing=[claude]` while a thorough review sat
-      # right there in the thread. codex clears the panel only through a bespoke
-      # comment-regex exemption; claude has no such carve-out.
-      #
-      # The `claude` check run on the PR is not the missing evidence and never
-      # was. An @claude review runs on `issue_comment`, whose run is bound to the
-      # default branch, so its check never appears on the PR at all; the `claude
-      # skipping` line in `gh pr checks` is a *different* run — the one a bot's
-      # own review submission triggers, correctly skipped because that review
-      # body holds no `@claude`. No `if:` change can turn that into review
-      # evidence.
-      #
-      # This step is the authority instead. The checkout above resolved a
-      # specific ref and the reviewer ran against exactly that tree, so the
-      # workflow can state the reviewed head as fact, in the fixed shape gate
-      # parses (workflowAttestation in that same file) — the same structural
-      # role the Codex connector's "Reviewed commit:" line plays. Asking the
-      # model to publish a formal review instead cannot work here: gate refuses
-      # provider prose as authority on principle, and a `gh pr review` posted
-      # with the Actions token would carry the github-actions[bot] identity
-      # rather than claude's.
-      #
-      # Attest only for a review request that succeeded: `@claude fix the typo`
-      # runs this same job and must never clear a review panel.
+  # Gate counts a reviewer only against evidence bound to the exact judged
+  # head: classifyPanel in gate's cmd/gate/internal/evidence/panel.go wants a
+  # formal GitHub review with User.Type=Bot, a COMMENTED/APPROVED/
+  # CHANGES_REQUESTED state, and commit_id == head. claude[bot] publishes its
+  # review as an issue comment, which carries no commit anchor and satisfies
+  # none of that, so every rooms PR parked on
+  # `review panel incomplete: missing=[claude]` while a thorough review sat
+  # right there in the thread. codex clears the panel only through a bespoke
+  # comment-regex exemption; claude has no such carve-out.
+  #
+  # The `claude` check run on the PR is not the missing evidence and never was.
+  # An @claude review runs on `issue_comment`, whose run is bound to the
+  # default branch, so its check never appears on the PR at all; the `claude
+  # skipping` line in `gh pr checks` is a *different* run — the one a bot's own
+  # review submission triggers, correctly skipped because that review body
+  # holds no `@claude`. No `if:` change can turn that into review evidence.
+  #
+  # This job is the authority instead. The `claude` job resolved a specific ref
+  # and the reviewer ran against exactly that tree, so the workflow can state
+  # the reviewed head as fact, in the fixed shape gate parses
+  # (workflowAttestation in that same file) — the same structural role the Codex
+  # connector's "Reviewed commit:" line plays. Asking the model to publish a
+  # formal review instead cannot work here: gate refuses provider prose as
+  # authority on principle, and a `gh pr review` posted with the Actions token
+  # would carry the github-actions[bot] identity rather than claude's.
+  #
+  # It is a separate job so that the write scopes it needs never coexist with a
+  # running model: everything it acts on arrives as a `needs` output, fixed
+  # before the reviewer started. `needs: claude` also carries the guard the
+  # single-job version spelled as `steps.claude.outcome == 'success'` — a
+  # failed or skipped reviewer skips this job.
+  attest:
+    needs: claude
+    # Attest only for a review request on a PR: `@claude fix the typo` runs the
+    # reviewer too and must never clear a review panel, and the `issues` and
+    # `pull_request_review*` triggers have no PR comment to match at all. The
+    # request itself is matched below, where a real regex is available.
+    if: >-
+      needs.claude.result == 'success'
+      && github.event_name == 'issue_comment'
+      && github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      # write, not read: this job posts a comment with the repository's own
+      # Actions token. Claude's own review comments come from the claude[bot]
+      # app and never needed this — which is why the reviewer job above stays
+      # read-only.
+      pull-requests: write
+      # `gh pr comment` hits the issues-comments endpoint, which GitHub gates on
+      # Issues-write for issues and Pull-requests-write for PRs. Rather than bet
+      # the whole mechanism on that reading, match the two repos where this
+      # attestation demonstrably lands — workbench and roxiq both grant it.
+      issues: write
+    steps:
       - name: Attest the reviewed head for gate's review panel
-        if: >-
-          steps.claude.outcome == 'success'
-          && github.event_name == 'issue_comment'
-          && github.event.issue.pull_request
-          && contains(github.event.comment.body, '@claude')
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
-          REVIEW_REF: ${{ steps.review_ref.outputs.ref }}
-          # This job's own start time, not the request's timestamp: a queued
-          # request predates the previous serialized run's output, so anchoring
-          # on it would let this job attest on that run's evidence.
-          WINDOW_STARTED_AT: ${{ steps.attest_window.outputs.started }}
+          REVIEW_REF: ${{ needs.claude.outputs.review_ref }}
+          # The commit the reviewer read, pinned before it ran.
+          REVIEWED_SHA: ${{ needs.claude.outputs.reviewed_sha }}
+          # The reviewer job's start, not the request's timestamp: a request
+          # can sit queued, so anchoring on it would widen the window past
+          # output this run had nothing to do with.
+          WINDOW_STARTED_AT: ${{ needs.claude.outputs.window_started }}
           # Read as data, never interpolated into the script: the body is
           # attacker-controlled on a public repo.
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -198,9 +213,9 @@ jobs:
           set -euo pipefail
           # The trigger must be a review *request*, not any comment containing
           # the word. `@claude how do I review permissions?` and `@claude the
-          # code-review tool is broken` both run this job and must not attest,
-          # so match the request verb anchored at the start of the comment —
-          # something an Actions `contains()` cannot express.
+          # code-review tool is broken` both run the reviewer and must not
+          # attest, so match the request verb anchored at the start of the
+          # comment — something an Actions `contains()` cannot express.
           #
           # This is precision over recall on purpose. `@claude could you review`
           # and `Hey @claude review this` are real review requests that do not
@@ -221,47 +236,56 @@ jobs:
             echo "not a review request — no attestation"
             exit 0
           fi
-          # A fork PR keeps the default-branch checkout by design, so HEAD is
-          # not the reviewed head and there is nothing truthful to attest.
+          # A fork PR keeps the default-branch checkout by design, so the
+          # reviewed tree is not the PR head and there is nothing truthful to
+          # attest.
           if [ "${REVIEW_REF}" != "refs/pull/${PR_NUMBER}/head" ]; then
             echo "reviewed ${REVIEW_REF}, not the PR head — no attestation"
             exit 0
           fi
-          # A push between checkout and now would make the attestation credit
-          # a head Claude never saw. Attest only while the live PR head still
-          # IS the checked-out commit; a moved head means gate parks, which is
-          # the correct failure mode.
-          head_sha="$(git rev-parse HEAD)"
-          live_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
-            --jq '.head.sha' || echo "")
-          if [ "${live_sha}" != "${head_sha}" ]; then
-            echo "PR head moved to ${live_sha:-unknown} since checkout ${head_sha} — no attestation"
+          # The reviewed head crosses a job boundary, so validate its shape
+          # rather than trusting it: an empty or malformed output means the
+          # reviewer job did not pin one, and gate's attestation regex wants a
+          # full 40-hex SHA anyway.
+          shopt -u nocasematch
+          if ! [[ "${REVIEWED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "no reviewed head pinned — no attestation"
             exit 0
           fi
-          # steps.claude.outcome == 'success' proves the action exited 0, not
-          # that a review exists: a quota error, a setup failure, or a "I
-          # could not inspect the diff" reply all exit 0 — this repo has already
-          # shipped a stub review from exactly that path. Require published
-          # evidence from claude[bot]: an issue comment whose task list is fully
-          # checked ("working…" stubs and error replies have unchecked boxes or
-          # none at all). Missing evidence skips the attestation — precision
-          # over recall, same as the trigger match above.
+          # A push between checkout and now would make the attestation credit
+          # a head Claude never saw. Attest only while the live PR head still
+          # IS the reviewed commit; a moved head means gate parks, which is
+          # the correct failure mode.
+          live_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            --jq '.head.sha' || echo "")
+          if [ "${live_sha}" != "${REVIEWED_SHA}" ]; then
+            echo "PR head moved to ${live_sha:-unknown} since checkout ${REVIEWED_SHA} — no attestation"
+            exit 0
+          fi
+          # A successful reviewer job proves the action exited 0, not that a
+          # review exists: a quota error, a setup failure, or a "I could not
+          # inspect the diff" reply all exit 0 — this repo has already shipped
+          # a stub review from exactly that path. Require published evidence
+          # from claude[bot]: an issue comment whose task list is fully checked
+          # ("working…" stubs and error replies have unchecked boxes or none at
+          # all). Missing evidence skips the attestation — precision over
+          # recall, same as the trigger match above.
           #
-          # The evidence must come from THIS invocation, not merely postdate it.
-          # A window alone is only as sound as the serialization around it, and
-          # every trigger that mentions @claude — review bodies and review
-          # comments included — runs Claude and publishes into this same thread.
-          # claude[bot] links the job that produced each comment, so matching
-          # this run's URL correlates the evidence to the exact invocation and
-          # makes a concurrent run's output unusable here however the
-          # concurrency groups happen to be drawn. The window stays as a second
-          # bound. If the action ever drops that link the attestation simply
-          # stops, which is a park — the safe direction.
+          # The evidence must come from THIS invocation, not merely postdate
+          # it. Every trigger that mentions @claude — review bodies and review
+          # comments included — runs the reviewer and publishes into this same
+          # thread, and nothing serializes those runs. claude[bot] links the
+          # run that produced each comment, so matching this run's URL
+          # correlates the evidence to the exact invocation and makes a
+          # concurrent run's output unusable here. That correlation is the
+          # check; the timestamp window is a second bound behind it. If the
+          # action ever drops the link the attestation simply stops, which is a
+          # park — the safe direction.
           #
           # No formal-review branch on purpose: a claude[bot] review pinned to
           # the head is evidence gate counts directly, so it never needed an
           # attestation, and accepting it here would only add a cross-credit
-          # surface for a path that does not use this step.
+          # surface for a path that does not use this job.
           #
           # Fetch and parse are separate statements, and each failure exits
           # instead of being folded into the count. `gh ... | jq ... || echo 0`
@@ -289,7 +313,7 @@ jobs:
             echo "no completed claude review published by this run — no attestation"
             exit 0
           fi
-          echo "attesting claude review of ${head_sha}"
+          echo "attesting claude review of ${REVIEWED_SHA}"
           printf '%s\n**Reviewer:** claude\n**Reviewed commit:** `%s`\n' \
-            '<!-- gate:review-attestation -->' "${head_sha}" \
+            '<!-- gate:review-attestation -->' "${REVIEWED_SHA}" \
             | gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body-file -
