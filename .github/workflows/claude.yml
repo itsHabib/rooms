@@ -262,15 +262,30 @@ jobs:
           # the head is evidence gate counts directly, so it never needed an
           # attestation, and accepting it here would only add a cross-credit
           # surface for a path that does not use this step.
+          #
+          # Fetch and parse are separate statements, and each failure exits
+          # instead of being folded into the count. `gh ... | jq ... || echo 0`
+          # cannot express "no evidence": on a failed fetch jq still prints 0
+          # for its empty input AND the fallback appends one, so the variable
+          # holds "0\n0", which is not "0" — a transient API error would read
+          # as evidence and attest. Fail closed on anything that is not a
+          # successful lookup returning a count.
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          finished=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-            | jq -s --arg since "${WINDOW_STARTED_AT}" --arg run "${run_url}" \
+          if ! comments=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"); then
+            echo "evidence lookup failed — no attestation"
+            exit 0
+          fi
+          if ! finished=$(jq -s \
+            --arg since "${WINDOW_STARTED_AT}" --arg run "${run_url}" \
               '[.[][] | select(.user.login == "claude[bot]" and .created_at > $since)
                 | select(.body | contains($run))
                 | select((.body | contains("- [x]")) and ((.body | contains("- [ ]")) | not))] | length' \
-            || echo 0)
-          if [ "${finished}" = "0" ]; then
+            <<<"${comments}"); then
+            echo "evidence parse failed — no attestation"
+            exit 0
+          fi
+          if ! [[ "${finished}" =~ ^[0-9]+$ ]] || [ "${finished}" -eq 0 ]; then
             echo "no completed claude review published by this run — no attestation"
             exit 0
           fi
