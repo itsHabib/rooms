@@ -12,7 +12,9 @@ pub struct RoomsConfig {
     pub instance_start_timeout: Duration,
     /// How long to wait for the Firecracker API socket to accept connections.
     pub api_socket_timeout: Duration,
-    /// How long to wait for the guest to become reachable (SSH).
+    /// Overall SSH establishment budget: bounds the readiness wait and the
+    /// connection/banner/auth phase of workload SSH. It does not bound the
+    /// remote command after login; `--max-wall` owns that lifecycle cap.
     pub guest_reach_timeout: Duration,
     /// Poll interval while waiting for guest reachability.
     pub guest_reach_poll_interval: Duration,

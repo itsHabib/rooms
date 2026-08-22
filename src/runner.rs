@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -26,6 +26,12 @@ const GUEST_USER: &str = "rooms";
 /// concurrent guests enough time to finish that work while keeping connection
 /// establishment and the protocol handshake bounded.
 const SSH_PROBE_CONNECT_TIMEOUT_OPTION: &str = "ConnectTimeout=10";
+
+/// Short connection bound for best-effort post-run operations. Workload setup
+/// uses the configured guest-reach budget instead: clone fan-out opens those
+/// authenticated connections concurrently, and a five-second banner timeout
+/// is not a meaningful readiness boundary on a contended host.
+const SSH_AUXILIARY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Absolute path of the baked cursor runner script inside the guest image.
 const CURSOR_RUNNER_JS: &str = "/opt/rooms/cursor-runner/cursor-runner.js";
@@ -316,10 +322,11 @@ pub async fn exec(
     target: GuestTarget<'_>,
     key_path: &Path,
     runner: &Runner,
+    config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
     match runner {
-        Runner::Command(command) => exec_in_guest(target, key_path, command).await,
-        Runner::Cursor(request) => exec_cursor_in_guest(target, key_path, request).await,
+        Runner::Command(command) => exec_in_guest(target, key_path, command, config).await,
+        Runner::Cursor(request) => exec_cursor_in_guest(target, key_path, request, config).await,
     }
 }
 
@@ -344,6 +351,7 @@ pub async fn collect_out_to_host(
         key_path,
         "if [ -d /workspace/out ]; then tar cf - -C /workspace/out .; else exit 0; fi",
         false,
+        SSH_AUXILIARY_CONNECT_TIMEOUT,
     )?
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
@@ -403,14 +411,20 @@ pub async fn collect_changeset_to_host(
     key_path: &Path,
     host_dir: &Path,
 ) -> Result<()> {
-    let ssh_out = ssh_command(target, key_path, ENUMERATE_OVERLAY, false)?
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .context("failed to enumerate overlay over ssh")?;
+    let ssh_out = ssh_command(
+        target,
+        key_path,
+        ENUMERATE_OVERLAY,
+        false,
+        SSH_AUXILIARY_CONNECT_TIMEOUT,
+    )?
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true)
+    .output()
+    .await
+    .context("failed to enumerate overlay over ssh")?;
     if !ssh_out.status.success() {
         let stderr = String::from_utf8_lossy(&ssh_out.stderr);
         anyhow::bail!(
@@ -523,8 +537,10 @@ pub async fn exec_in_guest(
     target: GuestTarget<'_>,
     key_path: &Path,
     command: &str,
+    config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
-    let run = run_wrapped(target, key_path, command).await?;
+    let connect_timeout = config.guest_reach_timeout;
+    let run = run_wrapped(target, key_path, command, connect_timeout).await?;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let result = ResultJson::from_exec(
         run.exit_code,
@@ -533,7 +549,7 @@ pub async fn exec_in_guest(
         run.ended_at,
         guest_command_argv(command),
     );
-    write_guest_result_json(target, key_path, &result).await?;
+    write_guest_result_json_with_timeout(target, key_path, &result, connect_timeout).await?;
 
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
@@ -556,18 +572,35 @@ pub async fn exec_cursor_in_guest(
     target: GuestTarget<'_>,
     key_path: &Path,
     request: &CursorRequest,
+    config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
-    clone_repo_in_guest(target, key_path, &request.repo_url, &request.meta.base_sha).await?;
-    stage_cursor_input(target, key_path, &request.task_md, &request.meta).await?;
+    let connect_timeout = config.guest_reach_timeout;
+    clone_repo_in_guest(
+        target,
+        key_path,
+        &request.repo_url,
+        &request.meta.base_sha,
+        connect_timeout,
+    )
+    .await?;
+    stage_cursor_input(
+        target,
+        key_path,
+        &request.task_md,
+        &request.meta,
+        connect_timeout,
+    )
+    .await?;
 
     let run = run_wrapped(
         target,
         key_path,
         &format!("node {CURSOR_RUNNER_JS} < /dev/null"),
+        connect_timeout,
     )
     .await?;
 
-    let patch_written = match generate_result_patch(target, key_path).await {
+    let patch_written = match generate_result_patch(target, key_path, connect_timeout).await {
         Ok(()) => true,
         Err(err) => {
             warn!(error = %err, "failed to generate result.patch; omitting patch_path");
@@ -583,7 +616,9 @@ pub async fn exec_cursor_in_guest(
     let mut push_err: Option<anyhow::Error> = None;
     let pushed_branch = match (&request.push_branch, run.exit_code) {
         (Some(branch), 0) => {
-            match push_branch_in_guest(target, key_path, &request.repo_url, branch).await {
+            match push_branch_in_guest(target, key_path, &request.repo_url, branch, connect_timeout)
+                .await
+            {
                 Ok(true) => Some(branch.clone()),
                 Ok(false) => None,
                 Err(e) => {
@@ -614,6 +649,7 @@ pub async fn exec_cursor_in_guest(
         key_path,
         "mkdir -p /workspace/out && touch /workspace/out/events.ndjson /workspace/out/summary.md",
         "ensure cursor output artifacts exist",
+        connect_timeout,
     )
     .await?;
     result.summary_path = Some("summary.md".to_owned());
@@ -622,7 +658,7 @@ pub async fn exec_cursor_in_guest(
         result.patch_path = Some("result.patch".to_owned());
     }
     result.pushed_branch = pushed_branch;
-    write_guest_result_json(target, key_path, &result).await?;
+    write_guest_result_json_with_timeout(target, key_path, &result, connect_timeout).await?;
 
     // result.json is recorded before the push failure surfaces, so a push
     // error never eats the run's artifact. The outcome carries the failure
@@ -656,7 +692,12 @@ struct WrappedRun {
 /// argument to `bash -c`, so no syntax in it can reach the outer wrapper.
 /// `bash -c` also gives subshell isolation, so a user `exit 42` aborts only the
 /// inner bash and the wrapper's `echo EXIT=$?` still prints.
-async fn run_wrapped(target: GuestTarget<'_>, key_path: &Path, inner: &str) -> Result<WrappedRun> {
+async fn run_wrapped(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    inner: &str,
+    connect_timeout: Duration,
+) -> Result<WrappedRun> {
     let started_at = Utc::now();
     let quoted_command = shell_single_quote(inner);
     let remote = format!(
@@ -664,7 +705,7 @@ async fn run_wrapped(target: GuestTarget<'_>, key_path: &Path, inner: &str) -> R
          bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
          echo EXIT=$?"
     );
-    let output = ssh_command(target, key_path, &remote, false)?
+    let output = ssh_command(target, key_path, &remote, false, connect_timeout)?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -722,6 +763,7 @@ async fn clone_repo_in_guest(
     key_path: &Path,
     repo_url: &str,
     base_sha: &str,
+    connect_timeout: Duration,
 ) -> Result<()> {
     let url = shell_single_quote(repo_url);
     let sha = shell_single_quote(base_sha);
@@ -730,7 +772,14 @@ async fn clone_repo_in_guest(
          git -C /workspace/repo checkout {sha} && \
          git -C /workspace/repo update-ref refs/rooms/base HEAD"
     );
-    run_setup_ssh(target, key_path, &remote, "clone repo in guest").await
+    run_setup_ssh(
+        target,
+        key_path,
+        &remote,
+        "clone repo in guest",
+        connect_timeout,
+    )
+    .await
 }
 
 /// Resolve the optional repository entirely on the host and build the
@@ -844,6 +893,7 @@ async fn stage_cursor_input(
     key_path: &Path,
     task_md: &str,
     meta: &CursorMeta,
+    connect_timeout: Duration,
 ) -> Result<()> {
     write_guest_file(
         target,
@@ -851,6 +901,7 @@ async fn stage_cursor_input(
         "/workspace/in",
         "task.md",
         task_md.as_bytes(),
+        connect_timeout,
     )
     .await?;
     let meta_json = serde_json::to_string_pretty(meta).context("serialize meta.json")?;
@@ -860,6 +911,7 @@ async fn stage_cursor_input(
         "/workspace/in",
         "meta.json",
         meta_json.as_bytes(),
+        connect_timeout,
     )
     .await
 }
@@ -870,10 +922,21 @@ async fn stage_cursor_input(
 /// Best effort: a git error still leaves an (empty) patch file via the `>`
 /// redirect, but a transport failure propagates so the caller can omit
 /// `patch_path` rather than reference a missing file.
-async fn generate_result_patch(target: GuestTarget<'_>, key_path: &Path) -> Result<()> {
+async fn generate_result_patch(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    connect_timeout: Duration,
+) -> Result<()> {
     let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
          git diff --cached refs/rooms/base > /workspace/out/result.patch 2>/dev/null || true";
-    run_setup_ssh(target, key_path, remote, "generate result.patch").await
+    run_setup_ssh(
+        target,
+        key_path,
+        remote,
+        "generate result.patch",
+        connect_timeout,
+    )
+    .await
 }
 
 /// Commit the agent's changes and push them to `branch` on the repo's remote.
@@ -887,6 +950,7 @@ async fn push_branch_in_guest(
     key_path: &Path,
     repo_url: &str,
     branch: &str,
+    connect_timeout: Duration,
 ) -> Result<bool> {
     let url = shell_single_quote(repo_url);
     let branch_q = shell_single_quote(branch);
@@ -908,7 +972,7 @@ async fn push_branch_in_guest(
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );
-    let output = ssh_command(target, key_path, &remote, true)?
+    let output = ssh_command(target, key_path, &remote, true, connect_timeout)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -945,6 +1009,7 @@ pub async fn ensure_guest_artifact_skeleton(
         key_path,
         remote,
         "create cancelled-run artifact skeleton",
+        SSH_AUXILIARY_CONNECT_TIMEOUT,
     )
     .await
 }
@@ -955,6 +1020,16 @@ pub async fn write_guest_result_json(
     key_path: &Path,
     result: &ResultJson,
 ) -> Result<()> {
+    write_guest_result_json_with_timeout(target, key_path, result, SSH_AUXILIARY_CONNECT_TIMEOUT)
+        .await
+}
+
+async fn write_guest_result_json_with_timeout(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    result: &ResultJson,
+    connect_timeout: Duration,
+) -> Result<()> {
     let json = serde_json::to_string_pretty(result).context("serialize result.json")?;
     write_guest_file(
         target,
@@ -962,6 +1037,7 @@ pub async fn write_guest_result_json(
         "/workspace/out",
         "result.json",
         json.as_bytes(),
+        connect_timeout,
     )
     .await
 }
@@ -977,9 +1053,10 @@ async fn write_guest_file(
     dir: &str,
     name: &str,
     contents: &[u8],
+    connect_timeout: Duration,
 ) -> Result<()> {
     let remote = format!("mkdir -p {dir} && cat > {dir}/{name}");
-    let mut child = ssh_command(target, key_path, &remote, false)?
+    let mut child = ssh_command(target, key_path, &remote, false, connect_timeout)?
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1024,8 +1101,9 @@ async fn run_setup_ssh(
     key_path: &Path,
     remote: &str,
     what: &str,
+    connect_timeout: Duration,
 ) -> Result<()> {
-    let output = ssh_command(target, key_path, remote, false)?
+    let output = ssh_command(target, key_path, remote, false, connect_timeout)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1106,9 +1184,11 @@ fn ssh_command(
     key_path: &Path,
     remote: &str,
     forward_gh_token: bool,
+    connect_timeout: Duration,
 ) -> Result<Command> {
     let key = key_path.to_str().context("key path not utf-8")?;
     let dest = format!("{GUEST_USER}@{}", target.guest_ip);
+    let connect_timeout_option = ssh_connect_timeout_option(connect_timeout);
     let mut cmd = guest_process(target, "ssh");
     cmd.args([
         "-i",
@@ -1116,7 +1196,7 @@ fn ssh_command(
         "-o",
         "BatchMode=yes",
         "-o",
-        "ConnectTimeout=5",
+        connect_timeout_option.as_str(),
         "-o",
         "StrictHostKeyChecking=no",
         "-o",
@@ -1141,6 +1221,17 @@ fn ssh_command(
     Ok(cmd)
 }
 
+/// OpenSSH accepts an integral-second `ConnectTimeout`. Round a configured
+/// duration up so the generated client never expires earlier than the caller's
+/// connection-establishment budget; zero still gets a finite one-second bound.
+fn ssh_connect_timeout_option(timeout: Duration) -> String {
+    let seconds = timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() != 0))
+        .max(1);
+    format!("ConnectTimeout={seconds}")
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1154,8 +1245,8 @@ mod tests {
 
     use super::{
         cursor_command_argv, ping_command, repo_url_has_userinfo, shell_single_quote, ssh_command,
-        ssh_probe_command, tar_member_is_safe, validate_neutral_warm, wait_for_ssh, CursorMeta,
-        GuestTarget,
+        ssh_connect_timeout_option, ssh_probe_command, tar_member_is_safe, validate_neutral_warm,
+        wait_for_ssh, CursorMeta, GuestTarget, SSH_AUXILIARY_CONNECT_TIMEOUT,
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
@@ -1185,12 +1276,18 @@ mod tests {
     fn ssh_command_scopes_gh_token_to_push() {
         let key = std::path::Path::new("/tmp/id_rooms");
         let collect = |forward| {
-            ssh_command(GuestTarget::flat("10.0.0.1"), key, "true", forward)
-                .expect("build ssh command")
-                .as_std()
-                .get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
+            ssh_command(
+                GuestTarget::flat("10.0.0.1"),
+                key,
+                "true",
+                forward,
+                SSH_AUXILIARY_CONNECT_TIMEOUT,
+            )
+            .expect("build ssh command")
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
         };
         let without = collect(false);
         let with = collect(true);
@@ -1228,13 +1325,20 @@ mod tests {
     #[test]
     fn guest_commands_keep_flat_argv_and_add_direct_netns_prefix() {
         let key = std::path::Path::new("/tmp/id_rooms");
-        let flat = ssh_command(GuestTarget::flat("10.0.0.1"), key, "true", false)
-            .expect("build flat ssh command");
+        let flat = ssh_command(
+            GuestTarget::flat("10.0.0.1"),
+            key,
+            "true",
+            false,
+            SSH_AUXILIARY_CONNECT_TIMEOUT,
+        )
+        .expect("build flat ssh command");
         let namespaced = ssh_command(
             GuestTarget::new("10.0.0.1", Some("rooms-c3")),
             key,
             "true",
             false,
+            SSH_AUXILIARY_CONNECT_TIMEOUT,
         )
         .expect("build namespaced ssh command");
         let (flat_program, flat_args) = command_parts(&flat);
@@ -1328,6 +1432,34 @@ mod tests {
     }
 
     #[test]
+    fn workload_ssh_uses_the_configured_overall_connect_budget() {
+        let config = RoomsConfig::default();
+        let command = ssh_command(
+            GuestTarget::flat("10.0.0.1"),
+            std::path::Path::new("/tmp/id_rooms"),
+            "true",
+            false,
+            config.guest_reach_timeout,
+        )
+        .expect("build workload ssh command");
+        let (_, args) = command_parts(&command);
+
+        assert!(
+            args.iter().any(|arg| arg == "ConnectTimeout=120"),
+            "the post-readiness workload handshake must get the full configured budget: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "ConnectTimeout=5"),
+            "the old one-shot five-second banner deadline must not survive: {args:?}"
+        );
+        assert_eq!(
+            ssh_connect_timeout_option(Duration::from_millis(1_001)),
+            "ConnectTimeout=2",
+            "fractional seconds must round up instead of shortening the budget"
+        );
+    }
+
+    #[test]
     fn namespace_metacharacters_remain_one_argv_token() {
         let namespace = "rooms-c3; touch /tmp/escaped $(false)";
         let command = ssh_command(
@@ -1335,6 +1467,7 @@ mod tests {
             std::path::Path::new("/tmp/id_rooms"),
             "true",
             false,
+            SSH_AUXILIARY_CONNECT_TIMEOUT,
         )
         .expect("build namespaced ssh command");
         let (program, args) = command_parts(&command);

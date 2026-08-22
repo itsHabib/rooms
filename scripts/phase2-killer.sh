@@ -190,12 +190,10 @@ on_error() {
     local line="$2"
     local command="$3"
     if ((IN_EXIT == 0)); then
-        set +e
         record_failure \
             "fatal" \
             "unexpected_command_failure" \
-            "line $line exited $status: $command"
-        set -e
+            "line $line exited $status: $command" || true
     fi
 }
 
@@ -239,6 +237,54 @@ run_rooms() {
         HOME="$PROOF_HOME" \
         PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         "$ROOMS_BIN" "$@"
+}
+
+log_cleanup_command() {
+    local label="$1"
+    local attempt="$2"
+    local status="$3"
+    local stdout="$4"
+    local stderr="$5"
+    shift 5
+
+    printf 'cleanup command: label=%q attempt=%s status=%s rooms_bin=%q home=%q stdout=%q stderr=%q argv=' \
+        "$label" "$attempt" "$status" "$ROOMS_BIN" "$PROOF_HOME" \
+        "$stdout" "$stderr" >>"$CLEANUP_LOG"
+    printf ' %q' "$@" >>"$CLEANUP_LOG"
+    printf '\n' >>"$CLEANUP_LOG"
+}
+
+# Cleanup runs from EXIT after an arbitrary failing command. Execute every
+# rooms probe in an explicit conditional so neither inherited errexit nor ERR
+# trap state can change its status, and retain the exact status/argv in the
+# proof log. Snapshot recovery and roster reads are safe to retry.
+run_rooms_cleanup_capture() {
+    local output_name="$1"
+    local label="$2"
+    local attempt
+    local output
+    local stderr
+    local stderr_path
+    local status=1
+    shift 2
+
+    for attempt in 1 2 3; do
+        stderr_path="$LOG_DIR/cleanup-$label-attempt-$attempt.stderr"
+        if output="$(run_rooms "$@" 2>"$stderr_path")"; then
+            status=0
+        else
+            status=$?
+        fi
+        stderr="$(<"$stderr_path")" || stderr="<unreadable>"
+        log_cleanup_command \
+            "$label" "$attempt" "$status" "$output" "$stderr" "$@"
+        if ((status == 0)); then
+            printf -v "$output_name" '%s' "$output"
+            return 0
+        fi
+        sleep 0.1 || return "$status"
+    done
+    return "$status"
 }
 
 # rooms runs as root and deliberately publishes state and immutable snapshots
@@ -406,6 +452,46 @@ endpoint_interface_is_owned() {
     [[ -z "$current_alias" || "$current_alias" == "$ENDPOINT_ALIAS" ]]
 }
 
+endpoint_interface_presence() {
+    local state
+
+    state="$(sudo -n sh -c '
+        path=$1
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            printf present
+        else
+            printf absent
+        fi
+    ' sh "/sys/class/net/$ENDPOINT_IF")" || return 1
+    [[ "$state" == "present" || "$state" == "absent" ]] || return 1
+    printf '%s\n' "$state"
+}
+
+log_endpoint_state() {
+    local reason="$1"
+    local current_address="<unavailable>"
+    local current_alias="<unavailable>"
+    local current_ifindex="<unavailable>"
+    local presence="<unknown>"
+
+    presence="$(endpoint_interface_presence 2>>"$CLEANUP_LOG")" \
+        || presence="<inspection-failed>"
+    if [[ "$presence" == "present" ]]; then
+        current_ifindex="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/ifindex" \
+            2>>"$CLEANUP_LOG")" || current_ifindex="<read-failed>"
+        current_address="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/address" \
+            2>>"$CLEANUP_LOG")" || current_address="<read-failed>"
+        current_alias="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/ifalias" \
+            2>>"$CLEANUP_LOG")" || current_alias="<read-failed>"
+    fi
+    printf 'endpoint state: reason=%q interface=%q presence=%q expected_stage=%q expected_ifindex=%q current_ifindex=%q expected_address=%q current_address=%q expected_alias=%q current_alias=%q pid=%q pid_starttime=%q process_started=%q rule_installed=%q port=%q\n' \
+        "$reason" "$ENDPOINT_IF" "$presence" "$ENDPOINT_INTERFACE_STAGE" \
+        "$ENDPOINT_IFINDEX" "$current_ifindex" "$ENDPOINT_ADDRESS" \
+        "$current_address" "$ENDPOINT_ALIAS" "$current_alias" "$ENDPOINT_PID" \
+        "$ENDPOINT_PID_STARTTIME" "$ENDPOINT_PROCESS_STARTED" \
+        "$ENDPOINT_RULE_INSTALLED" "$ENDPOINT_PORT" >>"$CLEANUP_LOG"
+}
+
 endpoint_rule_present() {
     sudo -n iptables -C INPUT \
         -i 'veth-h+' \
@@ -449,84 +535,130 @@ endpoint_absent() {
 }
 
 cleanup_proof_endpoint() {
-    local failed=0
     local attempt
-    local interface_present="false"
-    local rule_present="false"
+    local delete_status
+    local interface_state="<unknown>"
 
-    if [[ -n "$ENDPOINT_PORT" ]] && endpoint_rule_present; then
-        rule_present="true"
+    if [[ -n "$ENDPOINT_PORT" ]]; then
+        for attempt in 1 2 3; do
+            if endpoint_rule_present; then
+                if sudo -n iptables -D INPUT \
+                    -i 'veth-h+' \
+                    -d "$ENDPOINT_IP/32" \
+                    -p tcp \
+                    --dport "$ENDPOINT_PORT" \
+                    -m comment \
+                    --comment "$ENDPOINT_COMMENT" \
+                    -j ACCEPT \
+                    >>"$CLEANUP_LOG" 2>&1; then
+                    printf 'endpoint cleanup: exact INPUT rule deleted attempt=%s\n' \
+                        "$attempt" >>"$CLEANUP_LOG"
+                else
+                    delete_status=$?
+                    printf 'endpoint cleanup: exact INPUT rule delete attempt=%s status=%s\n' \
+                        "$attempt" "$delete_status" >>"$CLEANUP_LOG"
+                fi
+            fi
+            sleep 0.1 || true
+        done
     fi
-    if [[ "$ENDPOINT_RULE_INSTALLED" == "true" && "$rule_present" != "true" ]]; then
-        failed=1
-    fi
-    if [[ "$rule_present" == "true" ]]; then
-        sudo -n iptables -D INPUT \
-            -i 'veth-h+' \
-            -d "$ENDPOINT_IP/32" \
-            -p tcp \
-            --dport "$ENDPOINT_PORT" \
-            -m comment \
-            --comment "$ENDPOINT_COMMENT" \
-            -j ACCEPT \
-            >>"$CLEANUP_LOG" 2>&1 || failed=1
-    fi
-    if [[ -n "$ENDPOINT_PORT" ]] && endpoint_rule_present; then
-        failed=1
-    else
+    if [[ -z "$ENDPOINT_PORT" ]] || ! endpoint_rule_present; then
         ENDPOINT_RULE_INSTALLED="false"
     fi
 
     if [[ "$ENDPOINT_PROCESS_STARTED" == "true" ]]; then
         if endpoint_pid_is_owned; then
-            kill -TERM "$ENDPOINT_PID" >>"$CLEANUP_LOG" 2>&1 || failed=1
+            if kill -TERM "$ENDPOINT_PID" >>"$CLEANUP_LOG" 2>&1; then
+                :
+            else
+                delete_status=$?
+                printf 'endpoint cleanup: TERM status=%s pid=%s\n' \
+                    "$delete_status" "$ENDPOINT_PID" >>"$CLEANUP_LOG"
+            fi
         elif kill -0 "$ENDPOINT_PID" 2>/dev/null; then
             # The saved PID now belongs to a foreign process. Never signal it.
-            failed=1
+            printf 'endpoint cleanup: saved pid %s is live but exact starttime/cmdline custody does not match; not signaling\n' \
+                "$ENDPOINT_PID" >>"$CLEANUP_LOG"
         fi
         for attempt in $(seq 1 20); do
             endpoint_pid_is_owned || break
             sleep 0.05
         done
         if endpoint_pid_is_owned; then
-            kill -KILL "$ENDPOINT_PID" >>"$CLEANUP_LOG" 2>&1 || failed=1
+            if kill -KILL "$ENDPOINT_PID" >>"$CLEANUP_LOG" 2>&1; then
+                :
+            else
+                delete_status=$?
+                printf 'endpoint cleanup: KILL status=%s pid=%s\n' \
+                    "$delete_status" "$ENDPOINT_PID" >>"$CLEANUP_LOG"
+            fi
         fi
-        # Waiting is harmless even if the numeric PID was recycled: Bash waits
-        # on its child job table, not an arbitrary same-numbered process.
-        wait "$ENDPOINT_PID" 2>>"$CLEANUP_LOG" || true
-        ENDPOINT_PROCESS_STARTED="false"
-    fi
-    if endpoint_pid_is_owned; then
-        failed=1
+        # Never let EXIT block in wait(1): a failed signal or a process that
+        # changed identity after the last check must remain a reported leak.
+        # Bash reaps a terminated background child when the shell exits.
+        if endpoint_pid_is_owned; then
+            printf 'endpoint cleanup: exact process still live after signals pid=%s\n' \
+                "$ENDPOINT_PID" >>"$CLEANUP_LOG"
+        else
+            ENDPOINT_PROCESS_STARTED="false"
+        fi
     fi
 
-    if sudo -n ip link show "$ENDPOINT_IF" >/dev/null 2>&1; then
-        interface_present="true"
-    fi
-    if [[ "$ENDPOINT_INTERFACE_CREATED" == "true" && "$interface_present" != "true" ]]; then
-        failed=1
-    fi
-    if [[ "$interface_present" == "true" ]]; then
-        if [[ "$ENDPOINT_INTERFACE_CREATED" == "true" ]] \
-            && endpoint_interface_is_owned; then
-            sudo -n ip link delete "$ENDPOINT_IF" \
-                >>"$CLEANUP_LOG" 2>&1 || failed=1
-        else
-            # A same-name interface with different custody is foreign.
-            failed=1
+    for attempt in 1 2 3; do
+        if ! interface_state="$(endpoint_interface_presence 2>>"$CLEANUP_LOG")"; then
+            printf 'endpoint cleanup: interface presence inspection failed attempt=%s; retaining custody fingerprint\n' \
+                "$attempt" >>"$CLEANUP_LOG"
+            sleep 0.1 || true
+            continue
         fi
-    fi
-    if sudo -n ip link show "$ENDPOINT_IF" >/dev/null 2>&1; then
-        failed=1
-    else
+        if [[ "$interface_state" == "absent" ]]; then
+            break
+        fi
+        if [[ "$ENDPOINT_INTERFACE_CREATED" != "true" ]]; then
+            printf '%s\n' 'endpoint cleanup: same-name interface is present without proof creation custody; not deleting' \
+                >>"$CLEANUP_LOG"
+            break
+        fi
+        if ! endpoint_interface_is_owned; then
+            printf 'endpoint cleanup: interface fingerprint not confirmed attempt=%s; not deleting\n' \
+                "$attempt" >>"$CLEANUP_LOG"
+            sleep 0.1 || true
+            continue
+        fi
+        if sudo -n ip link delete "$ENDPOINT_IF" \
+            >>"$CLEANUP_LOG" 2>&1; then
+            printf 'endpoint cleanup: exact interface deleted on attempt=%s\n' \
+                "$attempt" >>"$CLEANUP_LOG"
+        else
+            delete_status=$?
+            printf 'endpoint cleanup: exact interface delete attempt=%s status=%s\n' \
+                "$attempt" "$delete_status" >>"$CLEANUP_LOG"
+        fi
+        if interface_state="$(endpoint_interface_presence 2>>"$CLEANUP_LOG")" \
+            && [[ "$interface_state" == "absent" ]]; then
+            break
+        fi
+        sleep 0.1 || true
+    done
+
+    if interface_state="$(endpoint_interface_presence 2>>"$CLEANUP_LOG")" \
+        && [[ "$interface_state" == "absent" ]]; then
         ENDPOINT_INTERFACE_CREATED="false"
         ENDPOINT_INTERFACE_STAGE="none"
         ENDPOINT_IFINDEX=""
         ENDPOINT_ADDRESS=""
     fi
 
-    endpoint_absent || failed=1
-    ((failed == 0))
+    for attempt in 1 2 3; do
+        if endpoint_absent; then
+            printf 'endpoint cleanup: terminal absence confirmed attempt=%s\n' \
+                "$attempt" >>"$CLEANUP_LOG"
+            return 0
+        fi
+        sleep 0.1 || true
+    done
+    log_endpoint_state "terminal-absence-failed"
+    return 1
 }
 
 start_proof_endpoint() {
@@ -716,16 +848,73 @@ discover_proof_json_ids() {
     done
 }
 
+proof_room_paths_absent() {
+    local created_room_id
+    local directory
+    local listing
+    local name
+
+    while read -r created_room_id; do
+        valid_room_id "$created_room_id" || continue
+        if ! privileged_paths_absent \
+            "$STATE_DIR/$created_room_id" \
+            "$STATE_DIR/jailer/firecracker/$created_room_id" \
+            "$STATE_DIR/restore-intents/$created_room_id.json"; then
+            printf 'terminal room path remains: room_id=%q\n' \
+                "$created_room_id" >>"$CLEANUP_LOG"
+            return 1
+        fi
+    done < <(sort -u "$CREATED_IDS_FILE")
+
+    # A failed batch can create an id before stdout is published. Scan both
+    # authoritative room-directory locations rather than trusting only the ids
+    # harvested from machine output.
+    for directory in "$STATE_DIR" "$STATE_DIR/jailer/firecracker"; do
+        if privileged_paths_absent "$directory"; then
+            continue
+        fi
+        privileged_directory "$directory" || return 1
+        listing="$(sudo -n find "$directory" -mindepth 1 -maxdepth 1 \
+            -printf '%f\n' 2>>"$CLEANUP_LOG")" || return 1
+        while read -r name; do
+            [[ -n "$name" ]] || continue
+            if valid_room_id "$name"; then
+                printf 'terminal unlisted room directory remains: directory=%q room_id=%q\n' \
+                    "$directory" "$name" >>"$CLEANUP_LOG"
+                return 1
+            fi
+        done <<<"$listing"
+    done
+    return 0
+}
+
 recover_proof_snapshots() {
+    local pending
+    local recovery_output
     local report
     local snapshot_id
-    if ! report="$(run_rooms snapshot-recover --json 2>>"$CLEANUP_LOG")"; then
+
+    if ! run_rooms_cleanup_capture \
+        report "snapshot-recover-list" snapshot-recover --json; then
         return 1
     fi
+    if ! jq -e '
+        .pending | type == "array" and
+        all(.[]; (.snapshot_id | type == "string"))
+    ' >/dev/null <<<"$report"; then
+        printf '%s\n' 'cleanup command: snapshot-recover-list returned invalid JSON schema' \
+            >>"$CLEANUP_LOG"
+        return 1
+    fi
+    pending="$(jq -r '.pending[].snapshot_id' <<<"$report")" || return 1
     while read -r snapshot_id; do
-        run_rooms snapshot-recover "$snapshot_id" --json \
-            >>"$CLEANUP_LOG" 2>&1 || return 1
-    done < <(jq -r '.pending[].snapshot_id' <<<"$report" 2>>"$CLEANUP_LOG")
+        [[ -n "$snapshot_id" ]] || continue
+        if ! run_rooms_cleanup_capture \
+            recovery_output "snapshot-recover-$snapshot_id" \
+            snapshot-recover "$snapshot_id" --json; then
+            return 1
+        fi
+    done <<<"$pending"
 }
 
 locked_terminal_slot_record() {
@@ -920,13 +1109,13 @@ cleanup_created_rooms() {
     fi
 
     if ! recover_proof_snapshots; then
-        printf '%s\n' 'cleanup check failed: initial snapshot recovery' >>"$CLEANUP_LOG"
-        failed=1
+        printf '%s\n' 'cleanup diagnostic: initial snapshot recovery command did not succeed; terminal intent/slot audits will decide cleanup' \
+            >>"$CLEANUP_LOG"
     fi
     discover_proof_json_ids
     if ! discover_proof_room_ids; then
-        printf '%s\n' 'cleanup check failed: initial room discovery' >>"$CLEANUP_LOG"
-        failed=1
+        printf '%s\n' 'cleanup diagnostic: initial room discovery did not succeed; terminal disk/resource audits will decide cleanup' \
+            >>"$CLEANUP_LOG"
     fi
 
     while read -r room_id; do
@@ -948,20 +1137,26 @@ cleanup_created_rooms() {
     run_rooms gc >>"$CLEANUP_LOG" 2>&1 || true
 
     if ! recover_proof_snapshots; then
-        printf '%s\n' 'cleanup check failed: terminal snapshot recovery' >>"$CLEANUP_LOG"
-        failed=1
+        printf '%s\n' 'cleanup diagnostic: terminal snapshot recovery command did not succeed; terminal intent/slot audits will decide cleanup' \
+            >>"$CLEANUP_LOG"
     fi
     if ! discover_proof_room_ids; then
-        printf '%s\n' 'cleanup check failed: terminal room discovery' >>"$CLEANUP_LOG"
-        failed=1
+        printf '%s\n' 'cleanup diagnostic: terminal room discovery did not succeed; terminal disk/resource audits will decide cleanup' \
+            >>"$CLEANUP_LOG"
     fi
-    if listing="$(run_rooms ls --json 2>>"$CLEANUP_LOG")"; then
-        if ! jq -e '.rooms | length == 0' >/dev/null <<<"$listing"; then
-            printf '%s\n' 'cleanup check failed: nonempty room roster' >>"$CLEANUP_LOG"
+    if run_rooms_cleanup_capture listing "rooms-ls" ls --json; then
+        if ! jq -e '.rooms | type == "array" and length == 0' \
+            >/dev/null <<<"$listing"; then
+            printf '%s\n' 'cleanup check failed: invalid or nonempty room roster' \
+                >>"$CLEANUP_LOG"
             failed=1
         fi
     else
-        printf '%s\n' 'cleanup check failed: unreadable room roster' >>"$CLEANUP_LOG"
+        printf '%s\n' 'cleanup diagnostic: room roster command did not succeed; terminal disk/resource audits will decide cleanup' \
+            >>"$CLEANUP_LOG"
+    fi
+    if ! proof_room_paths_absent; then
+        printf '%s\n' 'cleanup check failed: proof room paths remain' >>"$CLEANUP_LOG"
         failed=1
     fi
     if ! assert_terminal_proof_slot; then
@@ -1192,9 +1387,14 @@ on_exit() {
     local final_exit="$exit_code"
     IN_EXIT=1
     trap - ERR EXIT INT TERM HUP
-    set +e
+    # EXIT may have been entered from an ERR trap while errexit and errtrace
+    # were active. Cleanup is an explicit state machine: no shell option or
+    # incidental command status may abort it before the terminal audits run.
+    set +Ee
 
-    cleanup_created_rooms
+    if ! cleanup_created_rooms; then
+        :
+    fi
     if [[ "$CLEANUP_OK" != "true" ]]; then
         record_failure "cleanup" "cleanup_incomplete" \
             "one or more proof-owned rooms or intents could not be reaped"

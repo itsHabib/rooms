@@ -3442,7 +3442,7 @@ async fn run_workload(
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
     });
-    let outcome = match runner::exec(env.guest_target(), env.key, run).await {
+    let outcome = match runner::exec(env.guest_target(), env.key, run, env.config).await {
         Ok(outcome) => outcome,
         Err(e) => {
             lifecycle.emit(&Event::WorkloadFailed {

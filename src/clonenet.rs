@@ -1375,6 +1375,7 @@ fn absent_resource(stderr: &[u8]) -> bool {
     let stderr = String::from_utf8_lossy(stderr);
     let known_absence = [
         "Cannot find device",
+        "RTNETLINK answers: No such device",
         "No such file or directory",
         "Bad rule (does a matching rule exist in that chain?)",
         "No chain/target/match by that name.",
@@ -2022,6 +2023,7 @@ mod tests {
     fn teardown_only_suppresses_real_absence_errors() {
         assert!(absent_resource(b"Cannot find device \"veth-h3\""));
         assert!(absent_resource(b"Device \"veth-h3\" does not exist."));
+        assert!(absent_resource(b"RTNETLINK answers: No such device"));
         assert!(absent_resource(
             b"Cannot remove namespace file /run/netns/rooms-c3: No such file or directory"
         ));

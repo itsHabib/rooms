@@ -314,16 +314,16 @@ async fn read_bounded_line(stream: &mut tokio::net::UnixStream) -> Result<String
         let byte = stream
             .read_u8()
             .await
-            .map_err(|e| format!("read provisioning ack: {e}"))?;
+            .map_err(|e| format!("read protocol line: {e}"))?;
         if byte == b'\n' {
             break;
         }
         bytes.push(byte);
         if bytes.len() > 64 {
-            return Err("provisioning ack exceeds 64 bytes".to_owned());
+            return Err("protocol line exceeds 64 bytes".to_owned());
         }
     }
-    String::from_utf8(bytes).map_err(|e| format!("provisioning ack is not utf-8: {e}"))
+    String::from_utf8(bytes).map_err(|e| format!("protocol line is not utf-8: {e}"))
 }
 
 /// The per-restore hygiene nudge served to the resumed guest's agent.
@@ -355,6 +355,8 @@ pub struct ResumeDelivery {
     rx: oneshot::Receiver<Result<(), String>>,
     task: tokio::task::JoinHandle<()>,
     listen_path: PathBuf,
+    room_id: String,
+    progress: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl ResumeDelivery {
@@ -366,12 +368,23 @@ impl ResumeDelivery {
         match tokio::time::timeout(timeout, &mut self.rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("resume nudge task ended without a result".to_owned()),
-            Err(_) => Err(format!(
-                "no resume ack within {}s (image predates the resume agent, or hygiene failed in-guest)",
-                timeout.as_secs()
-            )),
+            Err(_) => {
+                let step = latest_resume_step(&self.progress);
+                Err(format!(
+                    "no resume ack for room {} within {}s after last successful STEP {step} (image predates the resume agent, or hygiene failed in-guest)",
+                    self.room_id,
+                    timeout.as_secs()
+                ))
+            }
         }
     }
+}
+
+fn latest_resume_step(progress: &std::sync::Mutex<Option<String>>) -> String {
+    progress.lock().map_or_else(
+        |_| "unknown".to_owned(),
+        |step| step.as_deref().unwrap_or("none").to_owned(),
+    )
 }
 
 impl Drop for ResumeDelivery {
@@ -390,6 +403,7 @@ pub fn serve_resume(
     payload: ResumePayload,
     owner: Option<(u32, u32)>,
 ) -> std::io::Result<ResumeDelivery> {
+    let room_id = payload.room_id.clone();
     let listen_path = listener_path_for(jail_root, RESUME_PORT);
     let _ = std::fs::remove_file(&listen_path);
     let listener = tokio::net::UnixListener::bind(&listen_path)?;
@@ -398,14 +412,18 @@ pub fn serve_resume(
     }
     let (tx, rx) = oneshot::channel();
     let path = listen_path.clone();
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let task_progress = std::sync::Arc::clone(&progress);
     let task = tokio::spawn(async move {
-        let result = serve_resume_inner(listener, &path, payload).await;
+        let result = serve_resume_inner(listener, &path, payload, &task_progress).await;
         let _ = tx.send(result);
     });
     Ok(ResumeDelivery {
         rx,
         task,
         listen_path,
+        room_id,
+        progress,
     })
 }
 
@@ -431,51 +449,107 @@ async fn serve_resume_inner(
     listener: tokio::net::UnixListener,
     listen_path: &Path,
     payload: ResumePayload,
+    progress: &std::sync::Mutex<Option<String>>,
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
+    let room_id = payload.room_id.clone();
     let (mut stream, _) = listener
         .accept()
         .await
-        .map_err(|e| format!("accept resume agent: {e}"))?;
+        .map_err(|error| format!("resume protocol for room {room_id}: accept agent: {error}"))?;
+    let connected_at = std::time::Instant::now();
     drop(listener);
-    std::fs::remove_file(listen_path).map_err(|e| format!("retire resume endpoint: {e}"))?;
-    tracing::debug!("resume: agent connected");
+    std::fs::remove_file(listen_path)
+        .map_err(|error| format!("resume protocol for room {room_id}: retire endpoint: {error}"))?;
+    tracing::debug!(room = %room_id, elapsed_ms = 0, "resume: agent connected");
 
-    let preface = read_bounded_line(&mut stream).await?;
+    let preface = read_bounded_line(&mut stream)
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
     if preface != "ROOMS-RESUME/1" {
-        return Err(format!("resume preface malformed: {preface:?}"));
+        return Err(format!(
+            "resume protocol for room {room_id}: preface malformed: {preface:?}"
+        ));
     }
-    tracing::debug!("resume: preface ok, sending nudge frames");
-    write_typed_frame(&mut stream, "ENTROPY", &payload.entropy).await?;
+    tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+        "resume: preface ok, sending nudge frames");
+    write_typed_frame(&mut stream, "ENTROPY", &payload.entropy)
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
     stream
         .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
         .await
-        .map_err(|e| format!("write identity: {e}"))?;
+        .map_err(|error| format!("resume protocol for room {room_id}: write identity: {error}"))?;
     stream
         .write_all(format!("CLOCK {}\n", payload.epoch_secs).as_bytes())
         .await
-        .map_err(|e| format!("write clock: {e}"))?;
-    write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0).await?;
-    write_typed_frame(&mut stream, "END", &[]).await?;
-    tracing::debug!("resume: frames sent, awaiting hygiene steps + ack");
+        .map_err(|error| format!("resume protocol for room {room_id}: write clock: {error}"))?;
+    write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0)
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
+    write_typed_frame(&mut stream, "END", &[])
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
+    tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+        "resume: frames sent, awaiting hygiene steps + ack");
     // The guest streams `STEP <name>` progress lines as it applies each
     // hygiene action, then the terminal `ACK resume`. Logging the steps gives
     // host-side visibility a snapshot-resumed guest's detached serial can't.
     // Bounded so a chatty/looping peer can't stream forever.
+    let mut last_step: Option<String> = None;
     for _ in 0..64 {
-        let line = read_bounded_line(&mut stream).await?;
+        let line = match read_bounded_line(&mut stream).await {
+            Ok(line) => line,
+            Err(error) => {
+                let step = last_step.as_deref().unwrap_or("none");
+                tracing::warn!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+                    last_step = step, %error,
+                    "resume: guest stream ended before ack");
+                return Err(format!(
+                    "resume protocol for room {room_id} ended after last successful STEP {step}: {error}"
+                ));
+            }
+        };
         if line == "ACK resume" {
-            tracing::debug!("resume: ack received");
+            let step = last_step.as_deref().unwrap_or("none");
+            tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+                last_step = step, "resume: ack received");
             return Ok(());
         }
+        if let Some(error) = line.strip_prefix("ERR ").filter(|value| !value.is_empty()) {
+            let step = last_step.as_deref().unwrap_or("none");
+            tracing::warn!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+                last_step = step, guest_error = error,
+                "resume: guest hygiene failed");
+            return Err(format!(
+                "resume guest error for room {room_id} after last successful STEP {step}: {error}"
+            ));
+        }
         if let Some(step) = line.strip_prefix("STEP ") {
-            tracing::debug!(step, "resume: guest hygiene step");
+            if step.is_empty() {
+                return Err(format!(
+                    "resume protocol for room {room_id}: empty STEP after {:?}",
+                    last_step.as_deref().unwrap_or("none")
+                ));
+            }
+            tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+                step, "resume: guest hygiene step");
+            if let Ok(mut latest) = progress.lock() {
+                *latest = Some(step.to_owned());
+            }
+            last_step = Some(step.to_owned());
             continue;
         }
-        return Err(format!("resume protocol: unexpected line {line:?}"));
+        return Err(format!(
+            "resume protocol for room {room_id}: unexpected line {line:?} after last successful STEP {}",
+            last_step.as_deref().unwrap_or("none")
+        ));
     }
-    Err("resume protocol: too many lines without an ack".to_owned())
+    Err(format!(
+        "resume protocol for room {room_id}: too many lines without an ack after last successful STEP {}",
+        last_step.as_deref().unwrap_or("none")
+    ))
 }
 
 /// Bind `listen_path` and serve `payload` to the first connection ever made.
@@ -713,10 +787,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_nudge_surfaces_guest_error_with_room_and_last_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let room_id = "01resumeroomidresumeroomid";
+        let payload = ResumePayload {
+            room_id: room_id.to_owned(),
+            epoch_secs: 1_700_000_000,
+            entropy: vec![7_u8; 64],
+            secrets: SecretsPayload::encode(&[]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        let _ = read_typed_frame(&mut guest).await;
+        let _ = read_line(&mut guest).await;
+        let _ = read_line(&mut guest).await;
+        let _ = read_typed_frame(&mut guest).await;
+        let _ = read_typed_frame(&mut guest).await;
+        guest
+            .write_all(b"STEP reseeded\nSTEP identity\nERR hostkeys key generation failed\n")
+            .await
+            .unwrap();
+        drop(guest);
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("an explicit guest error must fail the handshake");
+        assert!(error.contains(room_id), "{error}");
+        assert!(error.contains("last successful STEP identity"), "{error}");
+        assert!(error.contains("hostkeys key generation failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_eof_surfaces_room_and_last_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let room_id = "01resumeroomidresumeroomid";
+        let payload = ResumePayload {
+            room_id: room_id.to_owned(),
+            epoch_secs: 1_700_000_000,
+            entropy: vec![7_u8; 64],
+            secrets: SecretsPayload::encode(&[]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        let _ = read_typed_frame(&mut guest).await;
+        let _ = read_line(&mut guest).await;
+        let _ = read_line(&mut guest).await;
+        let _ = read_typed_frame(&mut guest).await;
+        let _ = read_typed_frame(&mut guest).await;
+        guest.write_all(b"STEP reseeded\n").await.unwrap();
+        drop(guest);
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("guest EOF before ack must fail the handshake");
+        assert!(error.contains(room_id), "{error}");
+        assert!(error.contains("last successful STEP reseeded"), "{error}");
+        assert!(error.contains("unexpected end of file"), "{error}");
+    }
+
+    #[tokio::test]
     async fn resume_nudge_without_ack_is_a_delivery_failure() {
         let dir = tempfile::tempdir().unwrap();
+        let room_id = "01resumeroomidresumeroomid";
         let payload = ResumePayload {
-            room_id: "01resumeroomidresumeroomid".to_owned(),
+            room_id: room_id.to_owned(),
             epoch_secs: 1,
             entropy: vec![0_u8; 64],
             secrets: SecretsPayload::encode(&[]),
@@ -725,13 +867,23 @@ mod tests {
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
         guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        // Read the nudge but never ack — hygiene "failed" in-guest.
+        let _ = read_typed_frame(&mut guest).await;
         let _ = read_line(&mut guest).await;
+        let _ = read_line(&mut guest).await;
+        let _ = read_typed_frame(&mut guest).await;
+        let _ = read_typed_frame(&mut guest).await;
+        // Report progress but never ack — hygiene stalled in-guest.
+        guest
+            .write_all(b"STEP reseeded\nSTEP hostkeys\n")
+            .await
+            .unwrap();
         let err = delivery
             .await_acked(Duration::from_millis(300))
             .await
             .expect_err("no ack must fail the delivery");
         assert!(err.contains("no resume ack"), "got: {err}");
+        assert!(err.contains(room_id), "got: {err}");
+        assert!(err.contains("last successful STEP hostkeys"), "got: {err}");
         drop(guest);
     }
 

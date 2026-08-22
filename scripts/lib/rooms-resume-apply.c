@@ -54,6 +54,7 @@
 #define RESUME_PORT 5003U
 #define RESUME_CONNECT_MS 100
 #define RESUME_IO_TIMEOUT_SECONDS 120
+#define PROTOCOL_ERROR_LINE_MAX 64U
 
 static const char sudo_grant[] = "rooms ALL=(ALL) NOPASSWD: ALL\n";
 static const char repo_include[] = "\n[include]\n\tpath = rooms-identity\n";
@@ -116,6 +117,8 @@ struct paths {
 };
 
 static struct payload sensitive_payload;
+static bool resume_stream_attached;
+static const char *protocol_stage = "handshake";
 
 static void scrub(void *data, size_t length)
 {
@@ -138,18 +141,6 @@ static void scrub_payload(void)
     sensitive_payload.secrets_len = 0U;
 }
 
-static int fail(const char *message)
-{
-    dprintf(STDERR_FILENO, "ERR %s\n", message);
-    return -1;
-}
-
-static int fail_path(const char *message, const char *path)
-{
-    dprintf(STDERR_FILENO, "ERR %s: %s\n", message, path);
-    return -1;
-}
-
 static int write_all(int fd, const void *data, size_t length)
 {
     const unsigned char *cursor = data;
@@ -165,6 +156,40 @@ static int write_all(int fd, const void *data, size_t length)
         length -= (size_t)written;
     }
     return 0;
+}
+
+static void set_protocol_stage(const char *stage)
+{
+    protocol_stage = stage;
+}
+
+static void send_protocol_error(const char *message)
+{
+    if (!resume_stream_attached) return;
+
+    /* read_bounded_line accepts at most 64 bytes before the newline. Keep the
+     * complete guest error record within that bound even when a defensive
+     * check carries a long path or diagnostic. Delivery is best effort: the
+     * transport itself may be the failing component. */
+    char line[PROTOCOL_ERROR_LINE_MAX + 1U];
+    int count = snprintf(line, sizeof(line), "ERR %.12s %.46s\n",
+                         protocol_stage, message);
+    if (count <= 0 || (size_t)count >= sizeof(line)) return;
+    (void)write_all(STDOUT_FILENO, line, (size_t)count);
+}
+
+static int fail(const char *message)
+{
+    dprintf(STDERR_FILENO, "ERR %s\n", message);
+    send_protocol_error(message);
+    return -1;
+}
+
+static int fail_path(const char *message, const char *path)
+{
+    dprintf(STDERR_FILENO, "ERR %s: %s\n", message, path);
+    send_protocol_error(message);
+    return -1;
 }
 
 static int protocol_line(const char *line)
@@ -444,6 +469,7 @@ static int attach_resume_stream(void)
         return fail("cannot attach retained resume transport");
     }
     if (fd > STDOUT_FILENO) close(fd);
+    resume_stream_attached = true;
     return 0;
 }
 
@@ -1270,7 +1296,9 @@ static int prepare_control_paths(const struct paths *paths,
 static int apply_payload(const struct paths *paths, struct payload *payload,
                          uid_t rooms_uid, gid_t rooms_gid)
 {
+    set_protocol_stage("clock");
     if (step_clock(payload->epoch) < 0 || protocol_line("STEP clock\n") < 0) return -1;
+    set_protocol_stage("identity");
     if (prepare_control_paths(paths, rooms_uid, rooms_gid) < 0) return -1;
     if (stage_identity(paths, payload->room_id, 0U, 0U) < 0 ||
         stage_secrets(paths, payload, rooms_uid, rooms_gid) < 0 ||
@@ -1278,31 +1306,38 @@ static int apply_payload(const struct paths *paths, struct payload *payload,
         protocol_line("STEP identity\n") < 0) return -1;
     scrub(payload->secrets, payload->secrets_len);
 
+    set_protocol_stage("hostkeys");
     if (generate_host_key(paths) < 0 ||
         canonical_sshd_config_is_safe(paths, 0U, 0U) < 0 ||
         ensure_directory(paths->sshd_runtime, 0U, 0U, 0755) < 0 ||
         effective_sshd_config_is_safe(paths) < 0 ||
         protocol_line("STEP hostkeys\n") < 0) return -1;
 
+    set_protocol_stage("privilege");
     if (restore_sudo(paths, rooms_uid, rooms_gid) < 0 ||
         protocol_line("STEP privilege\n") < 0) return -1;
+    set_protocol_stage("sshd");
     if (launch_sshd(paths) < 0 || protocol_line("STEP sshd\n") < 0) return -1;
+    set_protocol_stage("complete");
     return protocol_line("ACK resume\n");
 }
 
 static int resume_session(const struct paths *paths)
 {
+    set_protocol_stage("entropy");
     if (protocol_line("ROOMS-RESUME/1\n") < 0 ||
-        parse_entropy_frame(&sensitive_payload) < 0 ||
-        reseed(sensitive_payload.entropy) < 0) {
+        parse_entropy_frame(&sensitive_payload) < 0) {
         return -1;
     }
+    set_protocol_stage("reseed");
+    if (reseed(sensitive_payload.entropy) < 0) return -1;
     scrub(sensitive_payload.entropy, sizeof(sensitive_payload.entropy));
     if (protocol_line("STEP reseeded\n") < 0) return -1;
 
     /* Defer even libc account lookup until after the forced reseed. The
      * retained pre-snapshot steady state is only socket/poll/nanosleep and
      * owns no allocator-initialized random cookie or userspace DRBG. */
+    set_protocol_stage("payload");
     struct passwd *rooms = getpwnam("rooms");
     if (rooms == NULL) return fail("cannot resolve rooms user");
     if (parse_payload(&sensitive_payload) < 0) return -1;
@@ -1364,6 +1399,13 @@ static int test_config(const char *root)
     if (init_paths(&paths, root) < 0 || lstat(paths.sshd_config, &status) < 0) return 1;
     return canonical_sshd_config_is_safe(&paths, status.st_uid, status.st_gid) < 0 ? 1 : 0;
 }
+
+static int test_protocol_error(void)
+{
+    resume_stream_attached = true;
+    set_protocol_stage("hostkeys");
+    return fail("this deliberately overlong diagnostic is truncated at the protocol boundary");
+}
 #endif
 
 int main(int argc, char **argv)
@@ -1374,6 +1416,7 @@ int main(int argc, char **argv)
 
 #ifdef ROOMS_RESUME_TEST
     if (argc == 2 && strcmp(argv[1], "--test-parse") == 0) return test_parse_only();
+    if (argc == 2 && strcmp(argv[1], "--test-error") == 0) return test_protocol_error();
     if (argc == 4 && strcmp(argv[1], "--test-stage") == 0) return test_stage(argv[2], argv[3]);
     if (argc == 3 && strcmp(argv[1], "--test-config") == 0) return test_config(argv[2]);
 #endif

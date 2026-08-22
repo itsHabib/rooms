@@ -907,6 +907,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn native_resume_failure_emits_one_bounded_protocol_error() {
+        let (_build, binary) = compile_resume_helper();
+        let output = std::process::Command::new(binary)
+            .arg("--test-error")
+            .output()
+            .expect("emit native resume protocol error");
+        assert!(!output.status.success());
+
+        let stdout = String::from_utf8(output.stdout).expect("protocol error is utf-8");
+        assert!(stdout.ends_with('\n'), "{stdout:?}");
+        assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+        let line = stdout.trim_end_matches('\n');
+        assert!(line.starts_with("ERR hostkeys "), "{line:?}");
+        assert!(line.len() <= 64, "protocol error is {} bytes", line.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn native_resume_requires_the_exact_safe_reachable_sshd_policy() {
         use std::os::unix::fs::PermissionsExt as _;
 

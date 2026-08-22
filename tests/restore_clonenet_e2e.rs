@@ -574,7 +574,7 @@ async fn exercise_scoped_workload(
          test \"$internet\" = blocked && test \"$host\" = blocked",
         net.host_ip
     );
-    let outcome = runner::exec(target, key, &Runner::Command(workload)).await?;
+    let outcome = runner::exec(target, key, &Runner::Command(workload), config).await?;
     ensure!(
         outcome.exit_code == 0,
         "blocked workload exited {}",
