@@ -1213,10 +1213,12 @@ impl RestoreSourceIdentity {
     }
 }
 
-/// Metadata that changes under ordinary file replacement or mutation. On
-/// Unix, device + inode establishes object identity while length, mode,
-/// mtime, and ctime detect writes and metadata changes without re-hashing a
-/// 512 MiB image for every clone.
+/// Metadata that changes under file replacement or observable metadata drift.
+/// On Unix, device + inode establishes object identity while length, mode,
+/// mtime, and ctime cheaply detect ordinary drift without re-hashing a 512 MiB
+/// image for every clone. This stamp is not a content digest: production
+/// in-place write exclusion comes from the immutable seal that preparation and
+/// every revalidation require. The copied vmstate has a separate SHA-256 gate.
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RestoreSourceStamp {
@@ -1552,17 +1554,26 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn replace_same_length(path: &Path, bytes: &[u8]) {
+        let original_len = std::fs::metadata(path).unwrap().len();
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, bytes).unwrap();
+        assert_eq!(std::fs::metadata(&replacement).unwrap().len(), original_len);
+        std::fs::rename(replacement, path).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn prepared_source_rejects_same_length_image_mutation() {
+    fn prepared_source_rejects_same_length_image_replacement() {
         let root = tempfile::tempdir().unwrap();
         let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
         let prepared =
             prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
-        std::fs::write(&image, b"rootfs-b").unwrap();
+        replace_same_length(&image, b"rootfs-b");
         let error = prepared
             .identity
             .revalidate()
-            .expect_err("in-place image mutation must invalidate preparation");
+            .expect_err("same-length image substitution must invalidate preparation");
         assert!(error.to_string().contains("backing image"), "{error}");
         assert!(
             error.to_string().contains("changed after preparation"),
@@ -1572,17 +1583,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prepared_source_rejects_same_length_snapshot_mutation() {
+    fn prepared_source_rejects_same_length_snapshot_replacement() {
         let root = tempfile::tempdir().unwrap();
         let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
         let prepared =
             prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
-        std::fs::write(snapshot_dir.join(SNAPSHOT_VMSTATE_FILE), b"vmstate-b").unwrap();
+        let prepared_vmstate = prepared
+            .identity
+            .stamped("snapshot vmstate")
+            .expect("prepared vmstate identity")
+            .clone();
+        replace_same_length(&snapshot_dir.join(SNAPSHOT_VMSTATE_FILE), b"vmstate-b");
+        assert_ne!(
+            prepared_vmstate,
+            prepared_vmstate
+                .recapture()
+                .expect("replacement vmstate identity")
+        );
         let error = prepared
             .identity
             .revalidate()
-            .expect_err("in-place vmstate mutation must invalidate preparation");
-        assert!(error.to_string().contains("snapshot vmstate"), "{error}");
+            .expect_err("same-length vmstate substitution must invalidate preparation");
+        assert!(
+            error.to_string().contains("snapshot directory")
+                || error.to_string().contains("snapshot vmstate"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("changed after preparation"),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
