@@ -20,17 +20,55 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      # write, not read: the attestation step below posts a comment with the
+      # repository's own Actions token. Claude's own review comments come from
+      # the claude[bot] app and never needed this.
+      pull-requests: write
       issues: read
       id-token: write
       actions: read
     steps:
+      # The action diffs via `git hash-object <path>`, so files a PR adds must
+      # exist in the working tree — a main checkout has none of them, at any
+      # fetch depth. Check out the PR head instead, but ONLY when the head
+      # lives in this repo: in-repo branches require push access, so their
+      # content is as trusted as the commenter the job already gates on. A
+      # fork head never replaces the trusted workspace.
+      #
+      # This also gives the attestation step below a truthful anchor: the tree
+      # the reviewer actually ran against, resolved once, before it runs.
+      - name: Resolve review ref (PR head for same-repo PRs)
+        id: review_ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: >-
+            ${{
+              (github.event_name == 'issue_comment' && github.event.issue.pull_request
+                && github.event.issue.number)
+              || ((github.event_name == 'pull_request_review'
+                  || github.event_name == 'pull_request_review_comment')
+                && github.event.pull_request.number)
+              || ''
+            }}
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          if [ -n "${PR_NUMBER}" ]; then
+            same_repo=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '.head.repo.full_name == .base.repo.full_name')
+            if [ "${same_repo}" = "true" ]; then
+              ref="refs/pull/${PR_NUMBER}/head"
+            fi
+          fi
+          echo "resolved review ref: ${ref}"
+          echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Full history: the action's tag-mode diff (git hash-object) needs
-          # PR-branch blobs that a depth-1 checkout of main lacks, so a shallow
-          # fetch kills @claude review on any PR that adds files.
+          ref: ${{ steps.review_ref.outputs.ref }}
+          # Full history: the action's tag-mode diff needs the merge base, so a
+          # shallow fetch kills @claude review on any PR past the first commit.
           fetch-depth: 0
 
       - name: Run Claude Code
@@ -46,3 +84,77 @@ jobs:
           claude_args: "--model claude-sonnet-4-6"
           additional_permissions: |
             actions: read
+
+      # Gate counts a reviewer only against evidence bound to the exact judged
+      # head: classifyPanel in gate's cmd/gate/internal/evidence/panel.go wants a
+      # formal GitHub review with User.Type=Bot, a COMMENTED/APPROVED/
+      # CHANGES_REQUESTED state, and commit_id == head. claude[bot] publishes its
+      # review as an issue comment, which carries no commit anchor and satisfies
+      # none of that, so every rooms PR parked on
+      # `review panel incomplete: missing=[claude]` while a thorough review sat
+      # right there in the thread. codex clears the panel only through a bespoke
+      # comment-regex exemption; claude has no such carve-out.
+      #
+      # The `claude` check run on the PR is not the missing evidence and never
+      # was. An @claude review runs on `issue_comment`, whose run is bound to the
+      # default branch, so its check never appears on the PR at all; the `claude
+      # skipping` line in `gh pr checks` is a *different* run — the one a bot's
+      # own review submission triggers, correctly skipped because that review
+      # body holds no `@claude`. No `if:` change can turn that into review
+      # evidence.
+      #
+      # This step is the authority instead. The checkout above resolved a
+      # specific ref and the reviewer ran against exactly that tree, so the
+      # workflow can state the reviewed head as fact, in the fixed shape gate
+      # parses (workflowAttestation in that same file) — the same structural
+      # role the Codex connector's "Reviewed commit:" line plays. Asking the
+      # model to publish a formal review instead cannot work here: gate refuses
+      # provider prose as authority on principle, and a `gh pr review` posted
+      # with the Actions token would carry the github-actions[bot] identity
+      # rather than claude's.
+      #
+      # Attest only for a review request that succeeded: `@claude fix the typo`
+      # runs this same job and must never clear a review panel.
+      - name: Attest the reviewed head for gate's review panel
+        if: >-
+          steps.claude.outcome == 'success'
+          && github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && contains(github.event.comment.body, '@claude')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REVIEW_REF: ${{ steps.review_ref.outputs.ref }}
+          # Read as data, never interpolated into the script: a comment body is
+          # attacker-controlled on a public repo.
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          # The trigger must be a review *request*, not any comment containing
+          # the word. `@claude how do I review permissions?` and `@claude the
+          # code-review tool is broken` both run this job and must not attest,
+          # so match the request verb anchored at the start of the comment —
+          # something an Actions `contains()` cannot express.
+          #
+          # This is precision over recall on purpose. `@claude could you review`
+          # and `Hey @claude review this` are real review requests that do not
+          # match, and they are supposed to not match: a missed attestation
+          # leaves the panel incomplete and gate parks for judgment, which is
+          # merely today's behaviour, while a false one credits a review that
+          # never happened. Widen this pattern only toward forms that cannot
+          # also match a comment merely discussing reviews.
+          if ! grep -Eqi '^[[:space:]]*@claude[[:space:]]+(please[[:space:]]+)?review\b' <<<"${COMMENT_BODY}"; then
+            echo "not a review request — no attestation"
+            exit 0
+          fi
+          # A fork PR keeps the main checkout by design, so HEAD is not the
+          # reviewed head and there is nothing truthful to attest.
+          if [ "${REVIEW_REF}" != "refs/pull/${PR_NUMBER}/head" ]; then
+            echo "reviewed ${REVIEW_REF}, not the PR head — no attestation"
+            exit 0
+          fi
+          head_sha="$(git rev-parse HEAD)"
+          echo "attesting claude review of ${head_sha}"
+          printf '%s\n**Reviewer:** claude\n**Reviewed commit:** `%s`\n' \
+            '<!-- gate:review-attestation -->' "${head_sha}" \
+            | gh pr comment "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --body-file -

@@ -131,6 +131,8 @@ Weights: production source **1.0×**, tests + fixtures **0.5×**, lockfiles/conf
 
 Per PR: Copilot, comment `@codex review`, comment `@claude review`, comment `@cursor review`. Ship-driven runs use `.ship.json` to trigger this panel. CI green before merge.
 
+**Trigger the Claude reviewer with a comment that *starts* with `@claude review`.** The wording is load-bearing, not style. [`.github/workflows/claude.yml`](.github/workflows/claude.yml) attests the reviewed head to gate only when the comment matches `^\s*@claude\s+(please\s+)?review\b`, so `@claude` mid-sentence, or the request phrased any other way, still gets a review but no attestation — and gate then parks the PR on `review panel incomplete: missing=[claude]`. The match is narrow on purpose: `@claude the code-review tool is broken` must never clear a panel.
+
 ## How rooms fits
 
 - **ship (v0.1):** `backend: "rooms"` in `mcp__ship__ship`; `RoomCursorRunner` in ship's `packages/cursor-runner` calls `rooms run` / primitives. Rooms repo does not import ship.
@@ -179,6 +181,8 @@ Adapted from ship's workflow:
 ## Merge authorization (gate)
 
 Rooms PRs merge through **gate** (the governed boundary — see the workbench map): `gate grant -repo itsHabib/rooms -action merge` → `gate gate -pr N -grant <id>` → judge → run the head-pinned `gh pr merge` gate prints. Gate parks the typical rooms PR at *"no review decision reported by GitHub"* — the AI reviewers comment rather than APPROVE — plus the bot-comment consolidation.
+
+**The `claude` panel slot is cleared by a workflow attestation, not by the `claude` check.** Gate counts a reviewer only against evidence bound to the exact judged head, and claude[bot] publishes its review as an issue comment, which carries no commit anchor. [`.github/workflows/claude.yml`](.github/workflows/claude.yml) therefore checks out the PR head and, on a successful review, posts a `<!-- gate:review-attestation -->` comment as `github-actions[bot]` naming the reviewer and that 40-hex head — the shape gate's `workflowAttestation` parses. The `claude  skipping` line in `gh pr checks` is unrelated and expected: an `@claude review` runs on `issue_comment`, whose run binds to the default branch and never surfaces on the PR at all, while the skipped check comes from a *different* run — the one a bot's own review submission triggers, correctly skipped because that review body holds no `@claude`.
 
 **When the driver authored the PR, resolve that park with `gate judge -auto`, not `-decision pass`.** `-auto` sends the decision to an independent frontier model (opus, high effort) that rules from the recorded artifacts alone — a genuine second party — whereas the author asserting `-decision pass` is self-approval and defeats two-party review (the auto-mode classifier blocks it). Reserve `-decision pass` for a PR you did not author, or an explicit operator override.
 

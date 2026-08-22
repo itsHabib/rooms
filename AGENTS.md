@@ -27,6 +27,14 @@ cargo run -- doctor   # stub
 cargo run -- run --help   # for the full argument list
 ```
 
+### Triggering the reviewer panel
+
+Per PR: Copilot, plus a comment each for `@codex review`, `@claude review`, `@cursor review` (`.ship.json` declares the panel; `require` lists the three gate insists on).
+
+**The Claude trigger comment must *start* with `@claude review`.** [`.github/workflows/claude.yml`](.github/workflows/claude.yml) checks out the PR head, runs the reviewer, and then attests that head to gate as a `<!-- gate:review-attestation -->` comment — but only when the trigger matches `^\s*@claude\s+(please\s+)?review\b`. Phrase it any other way and the review still happens while the attestation does not, so gate parks the PR on `review panel incomplete: missing=[claude]`. The match is narrow on purpose: `@claude the code-review tool is broken` must never clear a panel.
+
+That attestation, not the `claude` check run, is what gate counts. A `claude  skipping` line in `gh pr checks` is expected and harmless — an `@claude review` runs on `issue_comment`, whose run binds to the default branch and never surfaces on the PR, while the skipped check comes from the run a bot's own review submission triggers.
+
 <!-- BEGIN dev-workbench (managed by /dev-workbench skill - re-run to refresh; hand-edits inside this block will be overwritten) -->
 ## Dev workbench
 
