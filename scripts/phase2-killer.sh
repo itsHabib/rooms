@@ -2953,7 +2953,10 @@ mkfifo -m 600 -- "$FLAT_RESTORE_GATE" \
 exec {FLAT_RESTORE_GATE_FD}<>"$FLAT_RESTORE_GATE"
 FLAT_RESTORE_LAUNCH_STAGE="armed"
 set -m
-bash -c '
+/usr/bin/env -i \
+    LC_ALL=C \
+    PATH="$ROOMS_ROOT_PATH" \
+    /bin/bash --noprofile --norc -c '
     gate="$1"
     keeper_fd="$2"
     ready="$3"
