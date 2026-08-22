@@ -10,12 +10,27 @@ on:
   pull_request_review:
     types: [submitted]
 
-# One run per PR/issue at a time: the attestation's evidence check looks for
-# claude[bot] output postdating the triggering request, and overlapping runs
-# on the same thread could credit one request with another job's completion
-# comment. Serializing removes the race; queued runs still execute.
+# Serialize the runs that can attest, and ONLY those. The attestation's
+# evidence check looks for claude[bot] output postdating this job's start, so
+# two overlapping review runs on one thread could credit one request with the
+# other's completion comment.
+#
+# The group must exclude every run that cannot attest, because GitHub keeps a
+# single pending run per group and cancels the older one — and this workflow
+# feeds its own group: claude[bot]'s completion comment and the attestation
+# from github-actions[bot] are both issue_comment events on the same thread.
+# A blanket `claude-<n>` group lets those evict a queued review that then
+# never runs, silently, on exactly the path the group exists to protect.
+# Anything that cannot attest therefore gets a run-unique group.
 concurrency:
-  group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  group: >-
+    ${{
+      (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && contains(github.event.comment.body, '@claude'))
+      && format('claude-{0}', github.event.issue.number)
+      || format('claude-run-{0}', github.run_id)
+    }}
   cancel-in-progress: false
 
 jobs:
@@ -97,9 +112,10 @@ jobs:
       # original comment timestamp, so "postdates the request" would accept a
       # PREVIOUS serialized run's output; "postdates this job's own start"
       # cannot — under the per-thread concurrency group, nothing else claude
-      # runs on this thread between here and the attestation. The group is
-      # load-bearing, not hygiene: without it two overlapping runs race and the
-      # one whose own review stubbed can attest on the other's comment.
+      # runs on this thread between here and the attestation — the group covers
+      # exactly the attesting runs. It is load-bearing, not hygiene: without it
+      # two overlapping runs race and the one whose own review stubbed can
+      # attest on the other's comment.
       - name: Open the evidence window
         id: attest_window
         run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
