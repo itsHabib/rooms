@@ -131,7 +131,7 @@ Weights: production source **1.0×**, tests + fixtures **0.5×**, lockfiles/conf
 
 Per PR: Copilot, comment `@codex review`, comment `@claude review`, comment `@cursor review`. Ship-driven runs use `.ship.json` to trigger this panel. CI green before merge.
 
-**Trigger the Claude reviewer with a comment that *starts* with `@claude review`.** The wording is load-bearing, not style. [`.github/workflows/claude.yml`](.github/workflows/claude.yml) attests the reviewed head to gate only when the comment matches `^\s*@claude\s+(please\s+)?review\b`, so `@claude` mid-sentence, or the request phrased any other way, still gets a review but no attestation — and gate then parks the PR on `review panel incomplete: missing=[claude]`. The match is narrow on purpose: `@claude the code-review tool is broken` must never clear a panel.
+**Post `@claude review` as the entire comment body — nothing else in it.** The wording is load-bearing, not style. [`.github/workflows/claude.yml`](.github/workflows/claude.yml) attests the reviewed head to gate only when the *whole* comment is a bare review request: `@claude review`, optionally `please`, optionally trailed by `this` / `this PR` / `the PR` and a `.` or `!`. Anything else — `@claude` mid-sentence, a scoped ask like `@claude review the failing CI logs`, or a valid first line followed by further instructions — still gets a review but no attestation, and gate then parks the PR on `review panel incomplete: missing=[claude]`. The match is narrow on purpose: `@claude the code-review tool is broken` must never clear a panel, and a bare request is the only phrasing whose scope is unambiguously "this PR's diff".
 
 ## How rooms fits
 

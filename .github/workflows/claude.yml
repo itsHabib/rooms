@@ -24,7 +24,11 @@ jobs:
       # repository's own Actions token. Claude's own review comments come from
       # the claude[bot] app and never needed this.
       pull-requests: write
-      issues: read
+      # `gh pr comment` hits the issues-comments endpoint, which GitHub gates on
+      # Issues-write for issues and Pull-requests-write for PRs. Rather than bet
+      # the whole mechanism on that reading, match the two repos where this
+      # attestation demonstrably lands — workbench and roxiq both grant it.
+      issues: write
       id-token: write
       actions: read
     steps:
@@ -33,7 +37,8 @@ jobs:
       # fetch depth. Check out the PR head instead, but ONLY when the head
       # lives in this repo: in-repo branches require push access, so their
       # content is as trusted as the commenter the job already gates on. A
-      # fork head never replaces the trusted workspace.
+      # fork head never replaces the trusted workspace — fork PRs keep the
+      # default-branch checkout.
       #
       # This also gives the attestation step below a truthful anchor: the tree
       # the reviewer actually ran against, resolved once, before it runs.
@@ -41,6 +46,7 @@ jobs:
         id: review_ref
         env:
           GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PR_NUMBER: >-
             ${{
               (github.event_name == 'issue_comment' && github.event.issue.pull_request
@@ -52,10 +58,17 @@ jobs:
             }}
         run: |
           set -euo pipefail
-          ref="${GITHUB_REF}"
+          # The fallback is the trusted default branch, never GITHUB_REF: on
+          # fork pull_request_review* events GITHUB_REF is refs/pull/<n>/merge
+          # — the fork's untrusted merge tree — and it must not survive into
+          # the checkout just because the head lives elsewhere.
+          ref="refs/heads/${DEFAULT_BRANCH}"
           if [ -n "${PR_NUMBER}" ]; then
+            # A transient lookup failure degrades to the trusted ref instead
+            # of killing the job — Claude still runs, it just reviews from
+            # the default-branch workspace and never attests.
             same_repo=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
-              --jq '.head.repo.full_name == .base.repo.full_name')
+              --jq '.head.repo.full_name == .base.repo.full_name' || echo "false")
             if [ "${same_repo}" = "true" ]; then
               ref="refs/pull/${PR_NUMBER}/head"
             fi
@@ -67,9 +80,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.review_ref.outputs.ref }}
-          # Full history: the action's tag-mode diff needs the merge base, so a
-          # shallow fetch kills @claude review on any PR past the first commit.
+          # Full history: the action's tag-mode diff (git hash-object) needs
+          # PR-branch blobs that a depth-1 checkout lacks, so a shallow fetch
+          # kills @claude review on any PR that adds files.
           fetch-depth: 0
+
+      - name: Open the evidence window
+        id: attest_window
+        run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
       - name: Run Claude Code
         id: claude
@@ -125,7 +143,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.issue.number }}
           REVIEW_REF: ${{ steps.review_ref.outputs.ref }}
-          # Read as data, never interpolated into the script: a comment body is
+          # This job's own start time, not the request's timestamp: a queued
+          # request predates the previous serialized run's output, so anchoring
+          # on it would let this job attest on that run's evidence.
+          WINDOW_STARTED_AT: ${{ steps.attest_window.outputs.started }}
+          # Read as data, never interpolated into the script: the body is
           # attacker-controlled on a public repo.
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
@@ -141,19 +163,61 @@ jobs:
           # match, and they are supposed to not match: a missed attestation
           # leaves the panel incomplete and gate parks for judgment, which is
           # merely today's behaviour, while a false one credits a review that
-          # never happened. Widen this pattern only toward forms that cannot
-          # also match a comment merely discussing reviews.
-          if ! grep -Eqi '^[[:space:]]*@claude[[:space:]]+(please[[:space:]]+)?review\b' <<<"${COMMENT_BODY}"; then
+          # never happened. The request must END at the verb (modulo a few
+          # no-op tails), because `@claude review permissions` and `@claude
+          # review the failing CI logs` start the same way and are not PR code
+          # reviews. The WHOLE body is validated as one string — bash =~, not
+          # grep, whose ^/$ anchor per line — so a `@claude review` first line
+          # followed by countermanding instructions does not attest either.
+          # Widen this pattern only toward forms that cannot also match such
+          # a request.
+          shopt -s nocasematch
+          re='^[[:space:]]*@claude[[:space:]]+(please[[:space:]]+)?review([[:space:]]+(this([[:space:]]+pr)?|the[[:space:]]+pr))?[[:space:]]*[.!]?[[:space:]]*$'
+          if [[ ! "${COMMENT_BODY}" =~ $re ]]; then
             echo "not a review request — no attestation"
             exit 0
           fi
-          # A fork PR keeps the main checkout by design, so HEAD is not the
-          # reviewed head and there is nothing truthful to attest.
+          # A fork PR keeps the default-branch checkout by design, so HEAD is
+          # not the reviewed head and there is nothing truthful to attest.
           if [ "${REVIEW_REF}" != "refs/pull/${PR_NUMBER}/head" ]; then
             echo "reviewed ${REVIEW_REF}, not the PR head — no attestation"
             exit 0
           fi
+          # A push between checkout and now would make the attestation credit
+          # a head Claude never saw. Attest only while the live PR head still
+          # IS the checked-out commit; a moved head means gate parks, which is
+          # the correct failure mode.
           head_sha="$(git rev-parse HEAD)"
+          live_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            --jq '.head.sha' || echo "")
+          if [ "${live_sha}" != "${head_sha}" ]; then
+            echo "PR head moved to ${live_sha:-unknown} since checkout ${head_sha} — no attestation"
+            exit 0
+          fi
+          # steps.claude.outcome == 'success' proves the action exited 0, not
+          # that a review exists: a quota error, a setup failure, or a "I
+          # could not inspect the diff" reply all exit 0 — this repo has already
+          # shipped a stub review from exactly that path. Require published
+          # evidence from claude[bot], created inside this job's own evidence
+          # window: either a formal review, or an issue comment whose task list
+          # is fully checked ("working…" stubs and error replies have unchecked
+          # boxes or none at all). Missing evidence skips the attestation —
+          # precision over recall, same as the trigger match above.
+          reviews=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            | jq -s --arg since "${WINDOW_STARTED_AT}" \
+              '[.[][] | select(.user.login == "claude[bot]" and .submitted_at > $since)] | length' \
+            || echo 0)
+          finished=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            | jq -s --arg since "${WINDOW_STARTED_AT}" \
+              '[.[][] | select(.user.login == "claude[bot]" and .created_at > $since)
+                | select((.body | contains("- [x]")) and ((.body | contains("- [ ]")) | not))] | length' \
+            || echo 0)
+          if [ "${reviews}" = "0" ] && [ "${finished}" = "0" ]; then
+            echo "no completed claude review published for this request — no attestation"
+            exit 0
+          fi
           echo "attesting claude review of ${head_sha}"
           printf '%s\n**Reviewer:** claude\n**Reviewed commit:** `%s`\n' \
             '<!-- gate:review-attestation -->' "${head_sha}" \
