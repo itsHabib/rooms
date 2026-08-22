@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Reproducible Rooms-owned Phase-2 snapshot/fork killer subgate.
 #
-# This gate is intentionally hermetic and fail-closed:
-# - it builds a fresh rootfs and rooms binary under a unique proof root;
+# This gate is intentionally fail-closed:
+# - it admits one exact source HEAD, resolves its checksummed Cargo.lock graph
+#   in an isolated bootstrap, then builds the Rust binary offline from sealed
+#   source/vendor trees under a unique proof root;
 # - it gives rooms a unique HOME/state tree, so the canonical slot reservation
 #   and existing images are never mutated;
 # - it records every created room id and only asks rooms to reap those ids;
@@ -13,6 +15,11 @@
 # only for the privileged host operations that rooms/Firecracker require.
 
 set -Eeuo pipefail
+# Monitor mode is normally disabled. The flat-restore launcher enables it only
+# around one background fork so Bash establishes that child's unique process
+# group in the parent before `$!` is exposed; cleanup can then safely address
+# the exact negative PGID even if the child is stopped before its first exec.
+set +m
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly SCRIPT_DIR
@@ -45,8 +52,29 @@ readonly CANONICAL_SLOT="$OPERATOR_HOME/.local/state/rooms/slots/1"
 readonly SOURCE_MANIFEST_BEFORE="$PROOF_ROOT/source-files.before.sha256"
 readonly SOURCE_MANIFEST_AFTER_BUILD="$PROOF_ROOT/source-files.after-build.sha256"
 readonly SOURCE_MANIFEST_FINAL="$PROOF_ROOT/source-files.final.sha256"
+readonly SOURCE_REPOSITORY_BEFORE="$PROOF_ROOT/source-repository.before.txt"
+readonly SOURCE_REPOSITORY_FINAL="$PROOF_ROOT/source-repository.final.txt"
+readonly FROZEN_REPO="$PROOF_ROOT/source.git"
+readonly FROZEN_REPOSITORY_MANIFEST="$PROOF_ROOT/frozen-repository.manifest.txt"
+readonly FROZEN_REPOSITORY_BEFORE="$PROOF_ROOT/frozen-repository.before.manifest"
+readonly FROZEN_REPOSITORY_AFTER="$PROOF_ROOT/frozen-repository.after.manifest"
+readonly FROZEN_SOURCE_ARCHIVE="$PROOF_ROOT/source-tree.tar"
+readonly FROZEN_SOURCE="$PROOF_ROOT/source-tree"
+readonly FROZEN_SOURCE_BEFORE="$PROOF_ROOT/frozen-source.before.manifest"
+readonly FROZEN_SOURCE_AFTER="$PROOF_ROOT/frozen-source.after.manifest"
+readonly BOOTSTRAP_CARGO_HOME="$PROOF_ROOT/bootstrap-cargo-home"
+readonly VENDOR_DIR="$PROOF_ROOT/vendor"
+readonly VENDOR_BEFORE="$PROOF_ROOT/vendor.before.manifest"
+readonly VENDOR_AFTER="$PROOF_ROOT/vendor.after.manifest"
+readonly PROOF_CARGO_HOME="$PROOF_ROOT/cargo-home"
+readonly PROOF_CARGO_CONFIG="$PROOF_CARGO_HOME/config.toml"
+readonly CARGO_BUILD_CWD="$PROOF_ROOT/cargo-build-cwd"
 readonly PROTECTED_BEFORE="$PROOF_ROOT/protected-canonical.before.tsv"
 readonly PROTECTED_AFTER="$PROOF_ROOT/protected-canonical.after.tsv"
+readonly SEALED_BEFORE="$PROOF_ROOT/sealed-proof.before.tsv"
+readonly SEALED_AFTER="$PROOF_ROOT/sealed-proof.after.tsv"
+readonly HOST_SUBSTRATE_BEFORE="$PROOF_ROOT/host-substrate.before.txt"
+readonly HOST_SUBSTRATE_AFTER="$PROOF_ROOT/host-substrate.after.txt"
 readonly SUN_LEN_BYTES=108
 readonly WORST_CASE_ROOM_ID="00000000000000000000000000"
 readonly WORST_CASE_UDS_PATH="$STATE_DIR/jailer/firecracker/$WORST_CASE_ROOM_ID/root/v.sock_5003"
@@ -63,8 +91,9 @@ readonly ENDPOINT_PORT_FILE="$PROOF_ROOT/endpoint.port"
 readonly ENDPOINT_REQUESTS="$PROOF_ROOT/endpoint-requests.ndjson"
 readonly SSH_WALL_TIMEOUT_SECONDS=20
 readonly ROOMS_PROOF_RUST_LOG="info,rooms::vsock=debug"
+readonly ROOMS_ROOT_PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-export PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export PATH="$ROOMS_ROOT_PATH:$PATH"
 
 mkdir -p "$PROOF_HOME/.ssh" "$IMAGE_DIR" "$TARGET_DIR" "$ARTIFACT_DIR" "$LOG_DIR"
 : >"$CREATED_IDS_FILE"
@@ -116,6 +145,15 @@ ENDPOINT_IFINDEX=""
 ENDPOINT_ADDRESS=""
 ENDPOINT_INTERFACE_STAGE="none"
 ENDPOINT_RULE_INSTALLED="false"
+FLAT_RESTORE_PID=""
+FLAT_RESTORE_PID_STARTTIME=""
+FLAT_RESTORE_PGID=""
+FLAT_RESTORE_SID=""
+FLAT_RESTORE_PARENT_SID=""
+FLAT_RESTORE_LAUNCH_STAGE="idle"
+FLAT_RESTORE_GATE=""
+FLAT_RESTORE_GATE_READY=""
+FLAT_RESTORE_GATE_FD=""
 LITERAL_LATENCY_PASS="false"
 IMAGE_VERIFICATION_PASS="false"
 SNAPSHOT_PASS="false"
@@ -228,16 +266,36 @@ run_rooms() {
     fi
     if [[ -v ROOMS_PHASE2_PROBE ]]; then
         sudo -n env \
+            -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+            -u GIT_CONFIG_COUNT \
+            -u GIT_CONFIG_GLOBAL \
+            -u GIT_CONFIG_PARAMETERS \
+            -u GIT_OBJECT_DIRECTORY \
             HOME="$PROOF_HOME" \
-            PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            PATH="$ROOMS_ROOT_PATH" \
+            XDG_CONFIG_HOME="$PROOF_HOME/.config" \
+            GIT_ATTR_NOSYSTEM=1 \
+            GIT_CONFIG_NOSYSTEM=1 \
+            GIT_NO_REPLACE_OBJECTS=1 \
+            GIT_OPTIONAL_LOCKS=0 \
             RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
             ROOMS_PHASE2_PROBE="$ROOMS_PHASE2_PROBE" \
             "$ROOMS_BIN" "$@"
         return
     fi
     sudo -n env \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        -u GIT_CONFIG_COUNT \
+        -u GIT_CONFIG_GLOBAL \
+        -u GIT_CONFIG_PARAMETERS \
+        -u GIT_OBJECT_DIRECTORY \
         HOME="$PROOF_HOME" \
-        PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        PATH="$ROOMS_ROOT_PATH" \
+        XDG_CONFIG_HOME="$PROOF_HOME/.config" \
+        GIT_ATTR_NOSYSTEM=1 \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_NO_REPLACE_OBJECTS=1 \
+        GIT_OPTIONAL_LOCKS=0 \
         RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
         "$ROOMS_BIN" "$@"
 }
@@ -403,14 +461,439 @@ capture_protected_state() {
     done < <(find "$CANONICAL_IMAGES" -mindepth 1 -print0 | sort -z)
 }
 
+capture_sealed_entry() {
+    local output="$1"
+    local expected_type="$2"
+    local path="$3"
+    local digest="-"
+    local flags
+    local metadata
+
+    case "$expected_type" in
+        file)
+            privileged_regular_file "$path" || return 1
+            [[ "$(sudo -n stat -c '%h' -- "$path")" == "1" ]] || return 1
+            digest="$(sudo -n sha256sum -- "$path" | awk '{print $1}')" \
+                || return 1
+            ;;
+        directory)
+            privileged_directory "$path" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    flags="$(sudo -n lsattr -d -- "$path" | awk 'NR == 1 {print $1}')" \
+        || return 1
+    [[ "$flags" == *i* ]] || return 1
+    metadata="$(sudo -n stat -c '%d:%i:%h:%s:%y:%z:%a:%u:%g' -- "$path")" \
+        || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$expected_type" "$path" "$metadata" "$flags" "$digest" >>"$output"
+}
+
+capture_sealed_state() {
+    local output="$1"
+    local snapshot_members
+
+    snapshot_members="$(sudo -n find "$SNAPSHOT_DIR" \
+        -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)" || return 1
+    [[ "$snapshot_members" == $'snapshot.json\nsnapshot.mem\nsnapshot.vmstate' ]] \
+        || return 1
+    : >"$output"
+    capture_sealed_entry "$output" file "$IMAGE" || return 1
+    capture_sealed_entry "$output" file "$FROZEN_SOURCE_ARCHIVE" || return 1
+    capture_sealed_entry "$output" file "$PROOF_CARGO_CONFIG" || return 1
+    capture_sealed_entry "$output" directory "$SNAPSHOT_DIR" || return 1
+    capture_sealed_entry "$output" file "$SNAPSHOT_DIR/snapshot.json" || return 1
+    capture_sealed_entry "$output" file "$SNAPSHOT_DIR/snapshot.mem" || return 1
+    capture_sealed_entry "$output" file "$SNAPSHOT_DIR/snapshot.vmstate" || return 1
+    capture_sealed_entry "$output" file "$SNAPSHOT_ATTESTATION" || return 1
+}
+
+capture_host_substrate() {
+    local output="$1"
+    local pending="$output.tmp.$$"
+
+    : >"$pending" || return 1
+    printf '%s\n' '[iptables-save]' >>"$pending" || return 1
+    sudo -n iptables-save \
+        | sed -E \
+            -e '/^# Generated by iptables-save /d' \
+            -e '/^# Completed on /d' \
+            -e '/^:/ s/ \[[0-9]+:[0-9]+\]$/ [0:0]/' \
+        >>"$pending" || return 1
+    printf '%s\n' '[network-namespaces]' >>"$pending" || return 1
+    sudo -n ip netns list >>"$pending" || return 1
+    printf '%s\n' '[links]' >>"$pending" || return 1
+    sudo -n ip -o link show >>"$pending" || return 1
+    printf '%s\n' '[ipv4-addresses]' >>"$pending" || return 1
+    sudo -n ip -j -4 address show \
+        | jq -S '[.[] | {
+            ifindex, ifname, flags, mtu, operstate,
+            addr_info: [.addr_info[] | {
+                family, local, prefixlen, broadcast, scope, label
+            }]
+        }]' >>"$pending" || return 1
+    printf '%s\n' '[ipv4-rules]' >>"$pending" || return 1
+    sudo -n ip -4 rule show >>"$pending" || return 1
+    printf '%s\n' '[ipv4-routes]' >>"$pending" || return 1
+    sudo -n ip -4 route show table all >>"$pending" || return 1
+    mv -- "$pending" "$output" || return 1
+}
+
+git_sanitized() {
+    env \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        -u GIT_COMMON_DIR \
+        -u GIT_CONFIG \
+        -u GIT_CONFIG_COUNT \
+        -u GIT_CONFIG_GLOBAL \
+        -u GIT_CONFIG_KEY_0 \
+        -u GIT_CONFIG_PARAMETERS \
+        -u GIT_CONFIG_SYSTEM \
+        -u GIT_CONFIG_VALUE_0 \
+        -u GIT_DIR \
+        -u GIT_GRAFT_FILE \
+        -u GIT_INDEX_FILE \
+        -u GIT_NAMESPACE \
+        -u GIT_OBJECT_DIRECTORY \
+        -u GIT_REPLACE_REF_BASE \
+        -u GIT_SHALLOW_FILE \
+        -u GIT_WORK_TREE \
+        GIT_ATTR_NOSYSTEM=1 \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_NO_REPLACE_OBJECTS=1 \
+        GIT_OPTIONAL_LOCKS=0 \
+        GIT_TERMINAL_PROMPT=0 \
+        HOME="$PROOF_HOME" \
+        XDG_CONFIG_HOME="$PROOF_HOME/.config" \
+        git "$@"
+}
+
+cargo_hermetic() {
+    local cargo_home="$1"
+    shift
+
+    env -i \
+        CARGO_HOME="$cargo_home" \
+        CARGO_INCREMENTAL=0 \
+        CARGO_NET_OFFLINE=true \
+        CARGO_TARGET_DIR="$TARGET_DIR" \
+        CARGO_TERM_COLOR=never \
+        HOME="$PROOF_HOME" \
+        PATH="$ROOMS_ROOT_PATH" \
+        RUSTUP_HOME="$OPERATOR_HOME/.rustup" \
+        TMPDIR="$PROOF_ROOT/tmp" \
+        cargo "$@"
+}
+
+cargo_bootstrap() {
+    local cargo_home="$1"
+    shift
+
+    env -i \
+        CARGO_HOME="$cargo_home" \
+        CARGO_INCREMENTAL=0 \
+        CARGO_TARGET_DIR="$TARGET_DIR" \
+        CARGO_TERM_COLOR=never \
+        HOME="$PROOF_HOME" \
+        PATH="$ROOMS_ROOT_PATH" \
+        RUSTUP_HOME="$OPERATOR_HOME/.rustup" \
+        TMPDIR="$PROOF_ROOT/tmp" \
+        cargo "$@"
+}
+
 source_manifest() {
     local output="$1"
     (
         cd "$REPO_ROOT"
-        git ls-files -co --exclude-standard -z \
+        git_sanitized ls-files -co --exclude-standard -z \
             | sort -z \
             | xargs -0 -r sha256sum
     ) >"$output"
+}
+
+source_repository_manifest() {
+    local repository="$1"
+    local output="$2"
+    local pending="$output.tmp.$$"
+
+    : >"$pending" || return 1
+    printf '%s\n' '[head]' >>"$pending" || return 1
+    git_sanitized -C "$repository" rev-parse HEAD >>"$pending" || return 1
+    printf '%s\n' '[refs]' >>"$pending" || return 1
+    git_sanitized -C "$repository" for-each-ref \
+        --format='%(refname)%09%(objectname)%09%(objecttype)' \
+        | LC_ALL=C sort >>"$pending" || return 1
+    printf '%s\n' '[reachable-objects]' >>"$pending" || return 1
+    git_sanitized -C "$repository" rev-list --objects --all \
+        | LC_ALL=C sort >>"$pending" || return 1
+    mv -- "$pending" "$output" || return 1
+}
+
+frozen_repository_is_self_contained() {
+    local dangerous_config
+    local promisor_pack
+    local replacement_refs
+
+    for path in \
+        "$FROZEN_REPO/info/grafts" \
+        "$FROZEN_REPO/objects/info/alternates" \
+        "$FROZEN_REPO/objects/info/http-alternates" \
+        "$FROZEN_REPO/shallow"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || return 1
+    done
+    promisor_pack="$(find "$FROZEN_REPO/objects/pack" \
+        -maxdepth 1 -type f -name '*.promisor' -print -quit)" || return 1
+    [[ -z "$promisor_pack" ]] || return 1
+    dangerous_config="$(
+        git_sanitized -C "$FROZEN_REPO" config --local --name-only --list \
+            | awk '
+                {
+                    key = tolower($0)
+                    if (key ~ /^extensions\.partialclone$/ ||
+                        key ~ /^remote\..*\.promisor$/ ||
+                        key ~ /^remote\..*\.partialclonefilter$/ ||
+                        key ~ /^include\.path$/ ||
+                        key ~ /^includeif\..*\.path$/ ||
+                        key ~ /^core\.alternaterefscommand$/) {
+                        print
+                    }
+                }
+            '
+    )" || return 1
+    [[ -z "$dangerous_config" ]] || return 1
+    replacement_refs="$(
+        git_sanitized -C "$FROZEN_REPO" for-each-ref \
+            --format='%(refname)' refs/replace/
+    )" || return 1
+    [[ -z "$replacement_refs" ]] || return 1
+    git_sanitized -C "$FROZEN_REPO" fsck --full --strict >/dev/null 2>&1
+}
+
+capture_immutable_tree_state() {
+    local root="$1"
+    local output="$2"
+    local pending="$output.tmp.$$"
+
+    privileged_directory "$root" || return 1
+    python3 - "$root" "$pending" <<'PY' || return 1
+import array
+import fcntl
+import hashlib
+import os
+import stat
+import sys
+
+FS_IOC_GETFLAGS = 0x80086601
+FS_IMMUTABLE_FL = 0x00000010
+root = os.fsencode(os.path.realpath(sys.argv[1]))
+output = os.fsencode(sys.argv[2])
+records = []
+
+
+def visit(path, relative):
+    before = os.lstat(path)
+    if stat.S_ISDIR(before.st_mode):
+        kind = b"directory"
+        open_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY
+    elif stat.S_ISREG(before.st_mode):
+        kind = b"file"
+        open_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        if before.st_nlink != 1:
+            raise RuntimeError(f"frozen repository file has {before.st_nlink} links")
+    else:
+        raise RuntimeError("frozen repository contains a symlink or special file")
+
+    descriptor = os.open(path, open_flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError("frozen repository path changed during capture")
+        flags = array.array("I", [0])
+        fcntl.ioctl(descriptor, FS_IOC_GETFLAGS, flags, True)
+        if flags[0] & FS_IMMUTABLE_FL == 0:
+            raise RuntimeError("frozen repository entry is not immutable")
+        digest = b"-"
+        if kind == b"file":
+            hasher = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+            digest = hasher.hexdigest().encode("ascii")
+        after = os.fstat(descriptor)
+        stable = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_nlink,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+            opened.st_mode,
+            opened.st_uid,
+            opened.st_gid,
+        )
+        if stable != (
+            after.st_dev,
+            after.st_ino,
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_mode,
+            after.st_uid,
+            after.st_gid,
+        ):
+            raise RuntimeError("frozen repository entry changed during capture")
+        metadata = (
+            f"{opened.st_dev}:{opened.st_ino}:{opened.st_nlink}:"
+            f"{opened.st_size}:{opened.st_mtime_ns}:{opened.st_ctime_ns}:"
+            f"{stat.S_IMODE(opened.st_mode)}:{opened.st_uid}:{opened.st_gid}:"
+            f"{flags[0]}"
+        ).encode("ascii")
+        records.append((relative, kind, metadata, digest))
+    finally:
+        os.close(descriptor)
+
+    if kind == b"directory":
+        for name in sorted(os.listdir(path)):
+            child_relative = name if relative == b"." else relative + b"/" + name
+            visit(os.path.join(path, name), child_relative)
+
+
+visit(root, b".")
+records.sort(key=lambda record: record[0])
+with open(output, "wb") as manifest:
+    for relative, kind, metadata, digest in records:
+        for field in (relative, kind, metadata, digest):
+            manifest.write(field)
+            manifest.write(b"\0")
+PY
+    mv -- "$pending" "$output" || return 1
+}
+
+capture_frozen_repository_state() {
+    local output="$1"
+    local semantic="$output.semantic"
+
+    frozen_repository_is_self_contained || return 1
+    source_repository_manifest "$FROZEN_REPO" "$semantic" || return 1
+    cmp -s "$SOURCE_REPOSITORY_BEFORE" "$semantic" || return 1
+    capture_immutable_tree_state "$FROZEN_REPO" "$output"
+}
+
+seal_immutable_tree() {
+    local linked
+    local root="$1"
+    local special
+
+    privileged_directory "$root" || return 1
+    special="$(find "$root" -xdev ! -type f ! -type d -print -quit)" \
+        || return 1
+    [[ -z "$special" ]] || return 1
+    linked="$(find "$root" -xdev -type f ! -links 1 -print -quit)" \
+        || return 1
+    [[ -z "$linked" ]] || return 1
+    sudo -n find "$root" -xdev -type f -exec chattr +i -- {} + \
+        || return 1
+    sudo -n find "$root" -xdev -depth -type d -exec chattr +i -- {} + \
+        || return 1
+}
+
+source_checkout_matches_frozen_tree() {
+    local expected_paths="$PROOF_ROOT/source-tree.paths"
+    local live_paths="$PROOF_ROOT/source-checkout.paths"
+    local path
+
+    git_sanitized -C "$FROZEN_REPO" ls-tree -r --name-only -z HEAD \
+        | LC_ALL=C sort -z >"$expected_paths" || return 1
+    git_sanitized -C "$REPO_ROOT" ls-files -z \
+        | LC_ALL=C sort -z >"$live_paths" || return 1
+    cmp -s "$expected_paths" "$live_paths" || return 1
+    while IFS= read -r -d '' path; do
+        [[ -f "$REPO_ROOT/$path" && ! -L "$REPO_ROOT/$path" ]] || return 1
+        [[ -f "$FROZEN_SOURCE/$path" && ! -L "$FROZEN_SOURCE/$path" ]] \
+            || return 1
+        cmp -s "$REPO_ROOT/$path" "$FROZEN_SOURCE/$path" || return 1
+        if [[ -x "$REPO_ROOT/$path" && ! -x "$FROZEN_SOURCE/$path" ]] \
+            || [[ ! -x "$REPO_ROOT/$path" && -x "$FROZEN_SOURCE/$path" ]]; then
+            return 1
+        fi
+    done <"$expected_paths"
+}
+
+frozen_source_matches_repository_head() {
+    local entries="$PROOF_ROOT/source-tree.entries"
+    local expected_blob="$PROOF_ROOT/source-tree.expected-blob"
+    local expected_paths="$PROOF_ROOT/source-tree.expected-paths"
+    local header
+    local mode
+    local object_id
+    local object_type
+    local path
+
+    git_sanitized -C "$FROZEN_REPO" ls-tree -r --name-only -z HEAD \
+        >"$expected_paths" || return 1
+    python3 - "$expected_paths" "$FROZEN_SOURCE" <<'PY' || return 1
+import os
+import stat
+import sys
+
+expected_path_file = os.fsencode(sys.argv[1])
+root = os.fsencode(os.path.realpath(sys.argv[2]))
+with open(expected_path_file, "rb") as source:
+    expected_files = set(source.read().split(b"\0"))
+expected_files.discard(b"")
+expected_directories = {b"."}
+for path in expected_files:
+    parent = os.path.dirname(path)
+    while parent:
+        expected_directories.add(parent)
+        parent = os.path.dirname(parent)
+
+actual_files = set()
+actual_directories = set()
+for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+    current_relative = os.path.relpath(current, root)
+    actual_directories.add(current_relative)
+    for name in directories:
+        path = os.path.join(current, name)
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            raise RuntimeError("immutable source contains a non-directory child")
+    for name in files:
+        path = os.path.join(current, name)
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise RuntimeError("immutable source contains a non-regular file")
+        actual_files.add(os.path.relpath(path, root))
+
+if actual_files != expected_files or actual_directories != expected_directories:
+    raise RuntimeError("immutable source membership differs from repository HEAD")
+PY
+    git_sanitized -C "$FROZEN_REPO" ls-tree -r -z HEAD >"$entries" \
+        || return 1
+    while IFS= read -r -d '' entry; do
+        header="${entry%%$'\t'*}"
+        path="${entry#*$'\t'}"
+        read -r mode object_type object_id <<<"$header"
+        [[ "$object_type" == "blob" \
+            && ( "$mode" == "100644" || "$mode" == "100755" ) \
+            && -f "$FROZEN_SOURCE/$path" \
+            && ! -L "$FROZEN_SOURCE/$path" ]] || return 1
+        if [[ "$mode" == "100644" ]]; then
+            [[ "$(stat -c '%a' -- "$FROZEN_SOURCE/$path")" == "644" ]] \
+                || return 1
+        else
+            [[ "$(stat -c '%a' -- "$FROZEN_SOURCE/$path")" == "755" ]] \
+                || return 1
+        fi
+        git_sanitized -C "$FROZEN_REPO" cat-file blob "$object_id" \
+            >"$expected_blob" || return 1
+        cmp -s "$expected_blob" "$FROZEN_SOURCE/$path" || return 1
+    done <"$entries"
+    : >"$expected_blob"
 }
 
 endpoint_pid_is_owned() {
@@ -1385,9 +1868,24 @@ write_summary() {
            },
            evidence: {
              provenance: "provenance.txt",
+             source_repository_before: "source-repository.before.txt",
+             source_repository_final: "source-repository.final.txt",
+             frozen_repository_manifest: "frozen-repository.manifest.txt",
+             frozen_repository_before: "frozen-repository.before.manifest",
+             frozen_repository_after: "frozen-repository.after.manifest",
+             frozen_source_archive: "source-tree.tar",
+             frozen_source_before: "frozen-source.before.manifest",
+             frozen_source_after: "frozen-source.after.manifest",
+             vendor_before: "vendor.before.manifest",
+             vendor_after: "vendor.after.manifest",
+             cargo_config: "cargo-home/config.toml",
              build_hashes: "build-artifacts.sha256",
              native_resume_artifacts: "native-resume-artifacts.tsv",
              snapshot_hashes: "snapshot-artifacts.sha256",
+             sealed_artifacts_before: "sealed-proof.before.tsv",
+             sealed_artifacts_after: "sealed-proof.after.tsv",
+             host_substrate_before: "host-substrate.before.txt",
+             host_substrate_after: "host-substrate.after.txt",
              flat_restore_record: "flat-restore.json",
              flat_restore_result: "artifacts/flat-restore/result.json",
              flat_restore_resource_audit: "flat-restore-resource-audit.tsv",
@@ -1420,8 +1918,254 @@ write_summary() {
     mv "$summary_tmp" "$SUMMARY_FILE"
 }
 
+close_flat_restore_gate() {
+    if [[ "$FLAT_RESTORE_GATE_FD" =~ ^[0-9]+$ ]]; then
+        eval "exec ${FLAT_RESTORE_GATE_FD}>&-"
+    fi
+    FLAT_RESTORE_GATE_FD=""
+    if [[ -n "$FLAT_RESTORE_GATE" ]]; then
+        [[ "$FLAT_RESTORE_GATE" == "$PROOF_ROOT/flat-restore.launch.fifo" ]] \
+            || return 1
+        rm -f -- "$FLAT_RESTORE_GATE" || return 1
+    fi
+    FLAT_RESTORE_GATE=""
+    if [[ -n "$FLAT_RESTORE_GATE_READY" ]]; then
+        [[ "$FLAT_RESTORE_GATE_READY" \
+            == "$PROOF_ROOT/flat-restore.launch.ready" ]] \
+            || return 1
+        rm -f -- \
+            "$FLAT_RESTORE_GATE_READY" \
+            "$FLAT_RESTORE_GATE_READY.pending" \
+            || return 1
+    fi
+    FLAT_RESTORE_GATE_READY=""
+}
+
+flat_restore_group_members() {
+    local pgid="$1"
+    local sid="$2"
+
+    [[ "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ ]] || return 1
+    ps -eo pid=,pgid=,sid= \
+        | awk -v pgid="$pgid" -v sid="$sid" \
+            '$2 == pgid && $3 == sid { print $1 }'
+}
+
+flat_restore_job_is_running() {
+    local match_status
+    local pid="$1"
+    local roster="$PROOF_ROOT/flat-restore.jobs"
+
+    # Tri-state result: 0 means active, 1 means definitely absent, and 2 means
+    # the current shell could not prove either state. Callers may only wait on
+    # an exact 1; treating an audit error as absence can block forever.
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 2
+    jobs -pr >"$roster" || return 2
+    jobs -ps >>"$roster" || return 2
+    if grep -Fxq "$pid" "$roster"; then
+        return 0
+    else
+        match_status=$?
+    fi
+    [[ "$match_status" -eq 1 ]] && return 1
+    return 2
+}
+
+terminate_flat_restore_group() {
+    local job_status
+    local members
+    local mode="${4:-graceful}"
+    local pgid="$2"
+    local pid="$1"
+    local sid="$3"
+    local state
+
+    [[ "$mode" == "graceful" || "$mode" == "force" ]] || return 1
+    members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+    [[ -n "$members" ]] || return 0
+    if [[ "$mode" == "force" ]]; then
+        sudo -n kill -KILL -- "-$pgid" 2>/dev/null || true
+    else
+        sudo -n kill -TERM -- "-$pgid" 2>/dev/null || true
+        sudo -n kill -CONT -- "-$pgid" 2>/dev/null || true
+        for _attempt in $(seq 1 20); do
+            state="$(process_state "$pid")" || state=""
+            if [[ "$state" == "Z" ]]; then
+                wait "$pid" 2>/dev/null || true
+            fi
+            members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+            [[ -z "$members" ]] && break
+            sleep 0.1
+        done
+        members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+        if [[ -n "$members" ]]; then
+            sudo -n kill -KILL -- "-$pgid" 2>/dev/null || true
+        fi
+    fi
+    for _attempt in $(seq 1 20); do
+        state="$(process_state "$pid")" || state=""
+        if [[ "$state" == "Z" ]]; then
+            wait "$pid" 2>/dev/null || true
+        fi
+        members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+        [[ -z "$members" ]] && break
+        sleep 0.1
+    done
+    members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+    [[ -z "$members" ]] || return 1
+    if flat_restore_job_is_running "$pid"; then
+        return 1
+    else
+        job_status=$?
+    fi
+    [[ "$job_status" -eq 1 ]] || return 1
+    wait "$pid" 2>/dev/null || true
+}
+
+clear_flat_restore_identity() {
+    FLAT_RESTORE_PID=""
+    FLAT_RESTORE_PID_STARTTIME=""
+    FLAT_RESTORE_PGID=""
+    FLAT_RESTORE_SID=""
+    FLAT_RESTORE_PARENT_SID=""
+    FLAT_RESTORE_LAUNCH_STAGE="idle"
+}
+
+quiesce_flat_restore_driver() {
+    local current_group_session
+    local current_starttime
+    local gate_path="$FLAT_RESTORE_GATE"
+    local identity_complete="true"
+    local job_status
+    local last_background_pid="${!:-}"
+    local launch_stage="$FLAT_RESTORE_LAUNCH_STAGE"
+    local leader_absent_owned="false"
+    local members
+    local parent_sid="$FLAT_RESTORE_PARENT_SID"
+    local pid="$FLAT_RESTORE_PID"
+    local pgid="$FLAT_RESTORE_PGID"
+    local sid="$FLAT_RESTORE_SID"
+    local termination_mode="force"
+
+    # Gate artifact cleanup is retried after process cleanup. A read-only/full
+    # proof directory must not veto an independently proven safe group kill.
+    close_flat_restore_gate || true
+    if [[ -z "$pid" \
+        && "$gate_path" == "$PROOF_ROOT/flat-restore.launch.fifo" \
+        && ( "$launch_stage" == "armed" \
+            || "$launch_stage" == "pid-recorded" \
+            || "$launch_stage" == "isolated" \
+            || "$launch_stage" == "wrapper-ready" \
+            || "$launch_stage" == "running" ) \
+        && "$last_background_pid" =~ ^[0-9]+$ ]]; then
+        pid="$last_background_pid"
+    fi
+    if [[ -n "$pid" && ( -z "$pgid" || -z "$sid" ) ]]; then
+        if current_group_session="$(process_group_session "$pid")"; then
+            read -r pgid sid <<<"$current_group_session"
+        fi
+    fi
+    if [[ -z "$pid" ]]; then
+        close_flat_restore_gate
+        return
+    fi
+    if ! [[ "$pid" =~ ^[0-9]+$ \
+        && "$FLAT_RESTORE_PID_STARTTIME" =~ ^[0-9]+$ \
+        && "$pgid" == "$pid" \
+        && "$parent_sid" =~ ^[0-9]+$ \
+        && "$sid" == "$parent_sid" ]]; then
+        for _attempt in $(seq 1 20); do
+            if flat_restore_job_is_running "$pid"; then
+                sleep 0.1
+                continue
+            else
+                job_status=$?
+            fi
+            if [[ "$job_status" -eq 1 ]]; then
+                wait "$pid" 2>/dev/null || true
+                clear_flat_restore_identity
+                close_flat_restore_gate
+                return
+            fi
+            # A roster audit error forbids wait, but it does not weaken the
+            # independent PGID/SID/member proof used by the kill path below.
+            break
+        done
+        [[ "$pgid" == "$pid" \
+            && "$parent_sid" =~ ^[0-9]+$ \
+            && "$sid" == "$parent_sid" ]] || return 1
+        current_group_session="$(process_group_session "$pid")" || return 1
+        [[ "$current_group_session" == "$pgid $sid" ]] || return 1
+        members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+        [[ "$members" == "$pid" ]] || return 1
+        if ! terminate_flat_restore_group "$pid" "$pgid" "$sid" force; then
+            close_flat_restore_gate || true
+            return 1
+        fi
+        clear_flat_restore_identity
+        close_flat_restore_gate
+        return
+    fi
+
+    if current_starttime="$(process_starttime "$pid")"; then
+        if [[ "$current_starttime" != "$FLAT_RESTORE_PID_STARTTIME" ]]; then
+            identity_complete="false"
+        else
+            current_group_session="$(process_group_session "$pid")" || return 1
+            [[ "$current_group_session" == "$pgid $sid" ]] || return 1
+        fi
+    elif sudo -n test ! -e "/proc/$pid"; then
+        # A live member keeps this pinned PGID allocated even after its leader
+        # exits. Require the direct Bash job to be provably absent before
+        # treating the remaining group as the same proof-owned descendant set.
+        if flat_restore_job_is_running "$pid"; then
+            return 1
+        else
+            job_status=$?
+        fi
+        [[ "$job_status" -eq 1 ]] || return 1
+        leader_absent_owned="true"
+    else
+        identity_complete="false"
+    fi
+
+    members="$(flat_restore_group_members "$pgid" "$sid")" || return 1
+    if [[ -z "$members" ]]; then
+        if flat_restore_job_is_running "$pid"; then
+            return 1
+        else
+            job_status=$?
+        fi
+        [[ "$job_status" -eq 1 ]] || return 1
+        wait "$pid" 2>/dev/null || true
+        clear_flat_restore_identity
+        close_flat_restore_gate
+        return
+    fi
+    if [[ "$identity_complete" != "true" \
+        && "$leader_absent_owned" != "true" ]]; then
+        return 1
+    fi
+
+    # Only the separately pinned process group/session is ever signalled.
+    # There is deliberately no positive-PID signal after leader identity loss.
+    if [[ "$launch_stage" == "wrapper-ready" \
+        || "$launch_stage" == "running" ]]; then
+        termination_mode="graceful"
+    fi
+    if ! terminate_flat_restore_group \
+        "$pid" "$pgid" "$sid" "$termination_mode"; then
+        close_flat_restore_gate || true
+        return 1
+    fi
+    clear_flat_restore_identity
+    close_flat_restore_gate
+}
+
 on_exit() {
     local exit_code="$?"
+    local final_source_head=""
+    local final_source_status=""
     local final_exit="$exit_code"
     IN_EXIT=1
     trap - ERR EXIT INT TERM HUP
@@ -1429,7 +2173,13 @@ on_exit() {
     # were active. Cleanup is an explicit state machine: no shell option or
     # incidental command status may abort it before the terminal audits run.
     set +Ee
+    set +m
 
+    if ! quiesce_flat_restore_driver; then
+        record_failure "cleanup" "flat_restore_driver_not_quiesced" \
+            "the proof-owned flat restore driver could not be stopped before cleanup"
+        final_exit=1
+    fi
     if ! cleanup_created_rooms; then
         :
     fi
@@ -1440,19 +2190,88 @@ on_exit() {
     fi
 
     if [[ -f "$PROTECTED_BEFORE" ]]; then
-        capture_protected_state "$PROTECTED_AFTER"
-        if ! cmp -s "$PROTECTED_BEFORE" "$PROTECTED_AFTER"; then
+        if ! capture_protected_state "$PROTECTED_AFTER" \
+            || ! cmp -s "$PROTECTED_BEFORE" "$PROTECTED_AFTER"; then
             record_failure "hard" "canonical_state_changed" \
                 "canonical slot or existing image fingerprint changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+    fi
+
+    if [[ -f "$HOST_SUBSTRATE_BEFORE" ]]; then
+        if ! capture_host_substrate "$HOST_SUBSTRATE_AFTER" \
+            || ! cmp -s "$HOST_SUBSTRATE_BEFORE" "$HOST_SUBSTRATE_AFTER"; then
+            record_failure "hard" "host_substrate_changed" \
+                "the permanent firewall, RPDB, or route substrate changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+    fi
+
+    if [[ -f "$SEALED_BEFORE" ]]; then
+        if ! capture_sealed_state "$SEALED_AFTER" \
+            || ! cmp -s "$SEALED_BEFORE" "$SEALED_AFTER"; then
+            record_failure "hard" "sealed_artifact_changed" \
+                "a proof rootfs, snapshot, or attestation changed type, inode, flags, metadata, or bytes"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+    fi
+
+    if [[ -f "$FROZEN_REPOSITORY_BEFORE" ]]; then
+        if ! capture_frozen_repository_state "$FROZEN_REPOSITORY_AFTER" \
+            || ! cmp -s "$FROZEN_REPOSITORY_BEFORE" "$FROZEN_REPOSITORY_AFTER"; then
+            record_failure "hard" "frozen_repository_changed" \
+                "the self-contained immutable guest repository input changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+    fi
+
+    if [[ -f "$FROZEN_SOURCE_BEFORE" ]]; then
+        if ! frozen_source_matches_repository_head \
+            || ! capture_immutable_tree_state "$FROZEN_SOURCE" "$FROZEN_SOURCE_AFTER" \
+            || ! cmp -s "$FROZEN_SOURCE_BEFORE" "$FROZEN_SOURCE_AFTER"; then
+            record_failure "hard" "frozen_source_changed" \
+                "the immutable build tree exported from the admitted HEAD changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+    fi
+
+    if [[ -f "$VENDOR_BEFORE" ]]; then
+        if ! capture_immutable_tree_state "$VENDOR_DIR" "$VENDOR_AFTER" \
+            || ! cmp -s "$VENDOR_BEFORE" "$VENDOR_AFTER"; then
+            record_failure "hard" "vendor_tree_changed" \
+                "the immutable locked Rust dependency tree changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
             final_exit=1
         fi
     fi
 
     if [[ -f "$SOURCE_MANIFEST_BEFORE" ]]; then
-        source_manifest "$SOURCE_MANIFEST_FINAL"
-        if ! cmp -s "$SOURCE_MANIFEST_BEFORE" "$SOURCE_MANIFEST_FINAL"; then
+        if ! source_manifest "$SOURCE_MANIFEST_FINAL" \
+            || ! cmp -s "$SOURCE_MANIFEST_BEFORE" "$SOURCE_MANIFEST_FINAL"; then
             record_failure "hard" "source_changed_during_gate" \
                 "the source tree changed after the proof build began"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+        if ! source_repository_manifest "$REPO_ROOT" "$SOURCE_REPOSITORY_FINAL" \
+            || ! cmp -s "$SOURCE_REPOSITORY_BEFORE" "$SOURCE_REPOSITORY_FINAL"; then
+            record_failure "hard" "source_repository_changed" \
+                "the source refs or reachable Git object graph changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
+            final_exit=1
+        fi
+        if ! final_source_head="$(git_sanitized -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)" \
+            || ! final_source_status="$(git_sanitized -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all 2>/dev/null)" \
+            || [[ "$final_source_head" != "$SOURCE_HEAD" \
+                || -n "$final_source_status" ]]; then
+            record_failure "hard" "source_identity_changed" \
+                "the source checkout HEAD or clean-worktree identity changed during the gate"
+            FINAL_LEAK_AUDIT_PASS="false"
             final_exit=1
         fi
     fi
@@ -1487,6 +2306,24 @@ process_starttime() {
     # comm is parenthesized and may contain spaces, so strip through its final
     # closing parenthesis before counting: starttime is field 20 of the tail.
     awk '{print $20}' <<<"${stat_line##*) }"
+}
+
+process_state() {
+    local pid="$1"
+    local stat_line
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    stat_line="$(sudo -n cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    awk '{print $1}' <<<"${stat_line##*) }"
+}
+
+process_group_session() {
+    local pid="$1"
+    local stat_line
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    stat_line="$(sudo -n cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    awk '{print $3, $4}' <<<"${stat_line##*) }"
 }
 
 read_pss_metrics() {
@@ -1574,20 +2411,33 @@ kill_batch_exact() {
 assert_batch_owned_paths_absent() {
     local json_file="$1"
     local failed=0
+    local host_veth
     local index
+    local link_dump
+    local namespace
+    local netns_dump
     local records
     local room_id
 
-    records="$(jq -er '.clones[] | [.room_id,.clone_net_index] | @tsv' "$json_file")" \
+    records="$(jq -er '.clones[] | [.room_id,.clone_net_index,.namespace,.host_veth] | @tsv' "$json_file")" \
         || return 1
     [[ -n "$records" ]] || return 1
-    while IFS=$'\t' read -r room_id index; do
+    netns_dump="$(sudo -n ip netns list)" || return 1
+    link_dump="$(sudo -n ip -o link show)" || return 1
+    while IFS=$'\t' read -r room_id index namespace host_veth; do
         if ! privileged_paths_absent \
             "$STATE_DIR/$room_id" \
             "$STATE_DIR/jailer/firecracker/$room_id" \
             "$STATE_DIR/restore-intents/$room_id.json" \
             "$STATE_DIR/snapshot-intents/$room_id.json" \
             "$STATE_DIR/clonenets/$index"; then
+            failed=1
+        fi
+        if awk '{print $1}' <<<"$netns_dump" | grep -Fxq "$namespace"; then
+            failed=1
+        fi
+        if awk -F': ' '{sub(/@.*/, "", $2); print $2}' <<<"$link_dump" \
+            | grep -Fxq "$host_veth"; then
             failed=1
         fi
     done <<<"$records"
@@ -1682,8 +2532,8 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 
 for command_name in \
-    awk cargo cat chattr cksum cmp cp curl cut date debugfs find findmnt firecracker flock git grep head \
-    ip iptables jailer jq lsattr mkfs.ext4 mount pgrep python3 readelf readlink rm rustc sed seq sha256sum \
+    awk bash cargo cat chattr cksum cmp cp curl cut date debugfs env find findmnt firecracker flock git grep head \
+    ip iptables iptables-save jailer jq lsattr mkfifo mkfs.ext4 mount pgrep ps python3 readelf readlink rm rustc sed seq sha256sum \
     sh sleep sort ssh ssh-keygen stat sudo tar tcpdump timeout tr truncate umount wc xargs; do
     require_command "$command_name"
 done
@@ -1713,19 +2563,166 @@ fi
 if ! audit_global_clone_absence; then
     fatal "host_resources_busy" "slot-1 or clone resources 1..8 are not globally free"
 fi
+source_checkout_status=""
+if ! source_checkout_status="$(git_sanitized -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all)"; then
+    fatal "source_checkout_unreadable" \
+        "the killer could not inspect the source checkout identity"
+fi
+if [[ -n "$source_checkout_status" ]]; then
+    fatal "source_checkout_dirty" \
+        "the killer must run from a clean committed checkout so its source HEAD is exact"
+fi
+SOURCE_HEAD="$(git_sanitized -C "$REPO_ROOT" rev-parse HEAD)" \
+    || fatal "source_head_unreadable" "the killer could not resolve the source HEAD"
 
 capture_protected_state "$PROTECTED_BEFORE"
+capture_host_substrate "$HOST_SUBSTRATE_BEFORE" \
+    || fatal "host_substrate_capture_failed" \
+        "the permanent firewall, RPDB, and route substrate could not be captured"
 cp --reflink=auto --preserve=mode "$CANONICAL_IMAGES/vmlinux.bin" "$IMAGE_DIR/vmlinux.bin"
 ssh-keygen -q -t ed25519 -N '' -f "$PROOF_HOME/.ssh/id_rooms"
 PROOF_KEY_FINGERPRINT="$(ssh-keygen -lf "$PROOF_HOME/.ssh/id_rooms.pub" -E sha256 | awk '{print $2}')"
 
-SOURCE_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-source_manifest "$SOURCE_MANIFEST_BEFORE"
+source_manifest "$SOURCE_MANIFEST_BEFORE" \
+    || fatal "source_manifest_unreadable" \
+        "the killer could not fingerprint the tracked and untracked source files"
+source_repository_manifest "$REPO_ROOT" "$SOURCE_REPOSITORY_BEFORE" \
+    || fatal "source_repository_unreadable" \
+        "the killer could not fingerprint the source refs and reachable object graph"
 SOURCE_MANIFEST_SHA256="$(sha256sum "$SOURCE_MANIFEST_BEFORE" | awk '{print $1}')"
+
+PHASE="freeze-source-repository"
+log "freezing an exact self-contained repository mirror for the guest"
+git_sanitized clone --mirror --no-hardlinks "$REPO_ROOT" "$FROZEN_REPO" \
+    >"$LOG_DIR/frozen-repository.stdout" \
+    2>"$LOG_DIR/frozen-repository.stderr" \
+    || fatal "frozen_repository_clone_failed" \
+        "the proof could not clone an independent mirror of the admitted source repository"
+frozen_repository_is_self_contained \
+    || fatal "frozen_repository_not_self_contained" \
+        "the guest repository mirror contains alternates, promisor state, replacements, or invalid objects"
+source_repository_manifest "$FROZEN_REPO" "$FROZEN_REPOSITORY_MANIFEST" \
+    || fatal "frozen_repository_unreadable" \
+        "the proof could not fingerprint its independent guest repository mirror"
+cmp -s "$SOURCE_REPOSITORY_BEFORE" "$FROZEN_REPOSITORY_MANIFEST" \
+    || fatal "frozen_repository_identity_mismatch" \
+        "the independent guest repository mirror does not match the admitted HEAD, refs, and object graph"
+seal_immutable_tree "$FROZEN_REPO" \
+    || fatal "frozen_repository_seal_failed" \
+        "the guest repository must contain only single-linked files and directories sealed immutable"
+capture_frozen_repository_state "$FROZEN_REPOSITORY_BEFORE" \
+    || fatal "frozen_repository_capture_failed" \
+        "the guest repository mirror did not remain exact, self-contained, single-linked, and immutable"
+
+log "exporting an immutable build tree from the admitted repository HEAD"
+frozen_tree_mode="$(
+    git_sanitized -C "$FROZEN_REPO" ls-tree -r HEAD \
+        | awk '$1 != "100644" && $1 != "100755" { print $1; exit }'
+)" || fatal "frozen_source_mode_unreadable" \
+    "the proof could not validate the admitted source tree modes"
+[[ -z "$frozen_tree_mode" ]] \
+    || fatal "frozen_source_mode_unsupported" \
+        "the admitted source tree contains a symlink, submodule, or non-regular mode"
+git_sanitized -C "$FROZEN_REPO" archive \
+    --format=tar \
+    --output="$FROZEN_SOURCE_ARCHIVE.pending" \
+    HEAD \
+    || fatal "frozen_source_archive_failed" \
+        "the proof could not export the admitted source tree"
+archive_head="$(git_sanitized get-tar-commit-id <"$FROZEN_SOURCE_ARCHIVE.pending")" \
+    || fatal "frozen_source_archive_unreadable" \
+        "the proof could not read the exported source archive identity"
+[[ "$archive_head" == "$SOURCE_HEAD" ]] \
+    || fatal "frozen_source_archive_identity_mismatch" \
+        "the exported source archive does not identify the admitted HEAD"
+mv -- "$FROZEN_SOURCE_ARCHIVE.pending" "$FROZEN_SOURCE_ARCHIVE"
+sudo -n chattr +i -- "$FROZEN_SOURCE_ARCHIVE" \
+    || fatal "frozen_source_archive_seal_failed" \
+        "the proof could not make the admitted source archive immutable"
+mkdir -p "$FROZEN_SOURCE"
+(
+    umask 022
+    tar --extract \
+        --no-same-permissions \
+        --file "$FROZEN_SOURCE_ARCHIVE" \
+        --directory "$FROZEN_SOURCE"
+) \
+    || fatal "frozen_source_extract_failed" \
+        "the proof could not materialize the admitted source archive"
+seal_immutable_tree "$FROZEN_SOURCE" \
+    || fatal "frozen_source_seal_failed" \
+        "the build tree must contain only single-linked files and directories sealed immutable"
+capture_immutable_tree_state "$FROZEN_SOURCE" "$FROZEN_SOURCE_BEFORE" \
+    || fatal "frozen_source_capture_failed" \
+        "the proof could not fingerprint the immutable admitted build tree"
+frozen_source_matches_repository_head \
+    || fatal "frozen_source_identity_mismatch" \
+        "the sealed build tree membership, modes, or bytes do not match the sealed repository HEAD"
+source_checkout_matches_frozen_tree \
+    || fatal "source_checkout_head_mismatch" \
+        "the live proof harness checkout does not exactly match the admitted frozen HEAD tree"
+
+PHASE="freeze-cargo-dependencies"
+log "vendoring the locked Rust dependency graph under an isolated Cargo configuration"
+mkdir -p \
+    "$BOOTSTRAP_CARGO_HOME" \
+    "$PROOF_CARGO_HOME" \
+    "$CARGO_BUILD_CWD" \
+    "$PROOF_ROOT/tmp"
+privileged_directory "$OPERATOR_HOME/.cargo/registry" \
+    || fatal "cargo_registry_cache_missing" \
+        "the rooms-host Cargo registry cache is required for the offline proof build"
+cp -a --reflink=auto \
+    "$OPERATOR_HOME/.cargo/registry" \
+    "$BOOTSTRAP_CARGO_HOME/registry" \
+    || fatal "cargo_registry_copy_failed" \
+        "the proof could not copy the operator Cargo registry cache"
+: >"$BOOTSTRAP_CARGO_HOME/.package-cache"
+: >"$BOOTSTRAP_CARGO_HOME/.package-cache-mutate"
+sudo -n chattr +i -- "$CARGO_BUILD_CWD" \
+    || fatal "cargo_build_cwd_seal_failed" \
+        "the config-free Cargo working directory could not be sealed"
+(
+    cd "$CARGO_BUILD_CWD"
+    cargo_bootstrap "$BOOTSTRAP_CARGO_HOME" vendor \
+        --locked \
+        --manifest-path "$FROZEN_SOURCE/Cargo.toml" \
+        "$VENDOR_DIR"
+) >"$PROOF_ROOT/vendor-config.generated.toml" \
+    2>"$LOG_DIR/cargo-vendor.stderr" \
+    || fatal "cargo_vendor_failed" \
+        "the proof could not materialize the Cargo.lock graph under its isolated bootstrap configuration"
+seal_immutable_tree "$VENDOR_DIR" \
+    || fatal "cargo_vendor_seal_failed" \
+        "the locked dependency graph must be a sealed regular tree"
+capture_immutable_tree_state "$VENDOR_DIR" "$VENDOR_BEFORE" \
+    || fatal "cargo_vendor_capture_failed" \
+        "the proof could not fingerprint the sealed locked dependency graph"
+: >"$PROOF_CARGO_HOME/.package-cache"
+: >"$PROOF_CARGO_HOME/.package-cache-mutate"
+printf '%s\n' \
+    '[source.crates-io]' \
+    'replace-with = "vendored-sources"' \
+    '[source.vendored-sources]' \
+    "directory = \"$VENDOR_DIR\"" \
+    '[net]' \
+    'offline = true' \
+    >"$PROOF_CARGO_CONFIG"
+sudo -n chattr +i -- "$PROOF_CARGO_CONFIG" "$PROOF_CARGO_HOME" \
+    || fatal "cargo_config_seal_failed" \
+        "the isolated Cargo configuration and its directory could not be sealed"
 
 {
     printf 'source_head=%s\n' "$SOURCE_HEAD"
     printf 'source_manifest_sha256=%s\n' "$SOURCE_MANIFEST_SHA256"
+    printf 'frozen_repository_manifest_sha256=%s\n' \
+        "$(sha256sum "$FROZEN_REPOSITORY_BEFORE" | awk '{print $1}')"
+    printf 'frozen_source_archive_sha256=%s\n' \
+        "$(sha256sum "$FROZEN_SOURCE_ARCHIVE" | awk '{print $1}')"
+    printf 'frozen_source_manifest_sha256=%s\n' \
+        "$(sha256sum "$FROZEN_SOURCE_BEFORE" | awk '{print $1}')"
+    printf 'vendor_manifest_sha256=%s\n' \
+        "$(sha256sum "$VENDOR_BEFORE" | awk '{print $1}')"
     printf 'worst_case_uds_path=%s\n' "$WORST_CASE_UDS_PATH"
     printf 'worst_case_uds_bytes=%s\n' "$WORST_CASE_UDS_BYTES"
     printf 'rng_scope=%s\n' "$RNG_SCOPE_NOTE"
@@ -1738,16 +2735,23 @@ SOURCE_MANIFEST_SHA256="$(sha256sum "$SOURCE_MANIFEST_BEFORE" | awk '{print $1}'
 
 PHASE="build"
 log "building release binary and fresh snapshot-capable rootfs"
-CARGO_TARGET_DIR="$TARGET_DIR" cargo build \
-    --release \
-    --bin rooms \
-    --manifest-path "$REPO_ROOT/Cargo.toml" \
-    >"$LOG_DIR/cargo-build.stdout" \
+(
+    cd "$CARGO_BUILD_CWD"
+    cargo_hermetic "$PROOF_CARGO_HOME" build \
+        --frozen \
+        --offline \
+        --release \
+        --bin rooms \
+        --manifest-path "$FROZEN_SOURCE/Cargo.toml"
+) >"$LOG_DIR/cargo-build.stdout" \
     2>"$LOG_DIR/cargo-build.stderr"
 ROOMS_BIN="$TARGET_DIR/release/rooms"
 [[ -x "$ROOMS_BIN" ]] || fatal "binary_missing" "release rooms binary was not produced"
 
-sudo -n "$SCRIPT_DIR/build-rootfs-alpine.sh" \
+sudo -n env -i \
+    HOME=/root \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    "$FROZEN_SOURCE/scripts/build-rootfs-alpine.sh" \
     --out "$IMAGE" \
     --ssh-key "$PROOF_HOME/.ssh/id_rooms.pub" \
     >"$LOG_DIR/rootfs-build.stdout" \
@@ -1760,7 +2764,7 @@ source_manifest "$SOURCE_MANIFEST_AFTER_BUILD"
 cmp "$SOURCE_MANIFEST_BEFORE" "$SOURCE_MANIFEST_AFTER_BUILD" \
     || fatal "source_changed_during_build" "source files changed while the binary/rootfs were built"
 
-SOURCE_AGENT_SHA256="$(sha256sum "$SCRIPT_DIR/lib/rooms-resume-agent.sh" | awk '{print $1}')"
+SOURCE_AGENT_SHA256="$(sha256sum "$FROZEN_SOURCE/scripts/lib/rooms-resume-agent.sh" | awk '{print $1}')"
 IMAGE_AGENT_SHA256="$(
     sudo -n debugfs -R 'cat /sbin/rooms-resume-agent' "$IMAGE" 2>/dev/null \
         | sha256sum \
@@ -1768,7 +2772,7 @@ IMAGE_AGENT_SHA256="$(
 )"
 [[ "$SOURCE_AGENT_SHA256" == "$IMAGE_AGENT_SHA256" ]] \
     || fatal "resume_agent_mismatch" "fresh image does not contain the exact source resume agent"
-SOURCE_APPLY_SHA256="$(sha256sum "$SCRIPT_DIR/lib/rooms-resume-apply.c" | awk '{print $1}')"
+SOURCE_APPLY_SHA256="$(sha256sum "$FROZEN_SOURCE/scripts/lib/rooms-resume-apply.c" | awk '{print $1}')"
 readonly IMAGE_APPLY_BINARY="$ARTIFACT_DIR/rooms-resume-apply"
 sudo -n debugfs -R 'cat /sbin/rooms-resume-apply' "$IMAGE" 2>/dev/null \
     >"$IMAGE_APPLY_BINARY"
@@ -1804,7 +2808,7 @@ PHASE="neutral-base"
 log "creating a credential-free warmed neutral base"
 run_rooms base-create \
     --image "$IMAGE" \
-    --repo "$REPO_ROOT" \
+    --repo "$FROZEN_REPO" \
     --warm "test \"\$(git -C /workspace/repo rev-parse HEAD)\" = \"$SOURCE_HEAD\" && claude --version >/dev/null" \
     --max-pool 8 \
     --json \
@@ -1924,22 +2928,110 @@ sudo -n sha256sum \
     "$SNAPSHOT_DIR/snapshot.vmstate" \
     "$SNAPSHOT_ATTESTATION" \
     >"$PROOF_ROOT/snapshot-artifacts.sha256"
+capture_sealed_state "$SEALED_BEFORE" \
+    || fatal "sealed_artifact_capture_failed" \
+        "the proof rootfs, snapshot, and attestation must be exact immutable objects"
 SNAPSHOT_PASS="true"
 
 PHASE="flat-restore-regression"
 log "proving the unchanged flat rooms restore command path"
 printf 'check\tvalue\n' >"$FLAT_RESTORE_AUDIT"
 flat_restore_status=0
-(
-    set +e
-    trap - ERR
-    run_rooms restore "$SNAPSHOT_DIR" \
-        --image "$IMAGE" \
-        --command "sleep 8 && test \"\$(git -C /workspace/repo rev-parse HEAD)\" = \"$SOURCE_HEAD\" && printf '%s\\n' flat-restore-ok > /workspace/out/flat-restore.ok" \
-        --out "$FLAT_RESTORE_OUT" \
-        --json
-) >"$FLAT_RESTORE_JSON" 2>"$LOG_DIR/flat-restore.stderr" &
-flat_restore_pid=$!
+flat_restore_parent_group_session="$(process_group_session "$$")" \
+    || fatal "flat_restore_parent_identity_failed" \
+        "the proof could not pin its own session before launching the background driver"
+read -r _flat_restore_parent_pgid FLAT_RESTORE_PARENT_SID \
+    <<<"$flat_restore_parent_group_session"
+[[ "$FLAT_RESTORE_PARENT_SID" =~ ^[0-9]+$ ]] \
+    || fatal "flat_restore_parent_identity_failed" \
+        "the proof shell did not report a valid session identity"
+FLAT_RESTORE_GATE="$PROOF_ROOT/flat-restore.launch.fifo"
+FLAT_RESTORE_GATE_READY="$PROOF_ROOT/flat-restore.launch.ready"
+mkfifo -m 600 -- "$FLAT_RESTORE_GATE" \
+    || fatal "flat_restore_gate_create_failed" \
+        "the proof could not create its background launch gate"
+exec {FLAT_RESTORE_GATE_FD}<>"$FLAT_RESTORE_GATE"
+FLAT_RESTORE_LAUNCH_STAGE="armed"
+set -m
+bash -c '
+    gate="$1"
+    keeper_fd="$2"
+    ready="$3"
+    shift 3
+    [[ "$keeper_fd" =~ ^[0-9]+$ ]] || exit 125
+    eval "exec ${keeper_fd}>&-"
+    exec {gate_reader}<"$gate" || exit 125
+    printf "%s\n" ready >"$ready.pending" || exit 125
+    mv -f -- "$ready.pending" "$ready" || exit 125
+    IFS= read -r token <&"$gate_reader" || exit 125
+    [[ "$token" == "go" ]] || exit 125
+    eval "exec ${gate_reader}<&-"
+    exec "$@"
+' rooms-flat-launch \
+    "$FLAT_RESTORE_GATE" \
+    "$FLAT_RESTORE_GATE_FD" \
+    "$FLAT_RESTORE_GATE_READY" \
+    sudo -n env \
+    HOME="$PROOF_HOME" \
+    PATH="$ROOMS_ROOT_PATH" \
+    RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
+    "$ROOMS_BIN" restore "$SNAPSHOT_DIR" \
+    --image "$IMAGE" \
+    --command "sleep 8 && test \"\$(git -C /workspace/repo rev-parse HEAD)\" = \"$SOURCE_HEAD\" && printf '%s\\n' flat-restore-ok > /workspace/out/flat-restore.ok" \
+    --out "$FLAT_RESTORE_OUT" \
+    --json \
+    >"$FLAT_RESTORE_JSON" 2>"$LOG_DIR/flat-restore.stderr" &
+FLAT_RESTORE_PID=$!
+FLAT_RESTORE_LAUNCH_STAGE="pid-recorded"
+set +m
+FLAT_RESTORE_PGID="$FLAT_RESTORE_PID"
+FLAT_RESTORE_PID_STARTTIME="$(process_starttime "$FLAT_RESTORE_PID")" \
+    || fatal "flat_restore_driver_identity_failed" \
+        "the proof could not pin the background flat restore driver"
+flat_restore_group_session="$(process_group_session "$FLAT_RESTORE_PID")" \
+    || fatal "flat_restore_driver_identity_failed" \
+        "the proof could not pin the background flat restore process group and session"
+read -r flat_restore_actual_pgid FLAT_RESTORE_SID \
+    <<<"$flat_restore_group_session"
+[[ "$flat_restore_actual_pgid" == "$FLAT_RESTORE_PGID" \
+    && "$FLAT_RESTORE_SID" == "$FLAT_RESTORE_PARENT_SID" ]] \
+    || fatal "flat_restore_driver_not_isolated" \
+        "the proof-owned flat restore driver did not enter its unique group in the pinned proof session"
+FLAT_RESTORE_LAUNCH_STAGE="isolated"
+flat_restore_gate_reader_ready="false"
+for _attempt in $(seq 1 600); do
+    if [[ -f "$FLAT_RESTORE_GATE_READY" \
+        && ! -L "$FLAT_RESTORE_GATE_READY" \
+        && "$(stat -Lc %s "$FLAT_RESTORE_GATE_READY" 2>/dev/null)" == 6 \
+        && "$(<"$FLAT_RESTORE_GATE_READY")" == "ready" ]]; then
+        flat_restore_gate_reader_ready="true"
+        break
+    fi
+    if flat_restore_job_is_running "$FLAT_RESTORE_PID"; then
+        sleep 0.1
+        continue
+    else
+        flat_restore_job_status=$?
+    fi
+    if [[ "$flat_restore_job_status" -eq 1 ]]; then
+        fatal "flat_restore_launcher_exited" \
+            "the background flat restore launcher exited before opening its release gate"
+    fi
+    fatal "flat_restore_job_audit_failed" \
+        "the proof could not audit its background flat restore launcher"
+done
+[[ "$flat_restore_gate_reader_ready" == "true" ]] \
+    || fatal "flat_restore_launcher_ready_timeout" \
+        "the background flat restore launcher did not open its release gate in time"
+FLAT_RESTORE_LAUNCH_STAGE="wrapper-ready"
+printf '%s\n' go >"$FLAT_RESTORE_GATE" \
+    || fatal "flat_restore_gate_release_failed" \
+        "the proof could not release its identity-pinned background driver"
+close_flat_restore_gate \
+    || fatal "flat_restore_gate_cleanup_failed" \
+        "the proof could not remove its background launch gate"
+FLAT_RESTORE_LAUNCH_STAGE="running"
+flat_restore_pid="$FLAT_RESTORE_PID"
 
 flat_restore_candidate=""
 for _attempt in $(seq 1 600); do
@@ -1948,10 +3040,17 @@ for _attempt in $(seq 1 600); do
         FLAT_RESTORE_ID="$flat_restore_candidate"
         break
     fi
-    if ! kill -0 "$flat_restore_pid" 2>/dev/null; then
+    if flat_restore_job_is_running "$flat_restore_pid"; then
+        sleep 0.1
+        continue
+    else
+        flat_restore_job_status=$?
+    fi
+    if [[ "$flat_restore_job_status" -eq 1 ]]; then
         break
     fi
-    sleep 0.1
+    fatal "flat_restore_job_audit_failed" \
+        "the proof could not audit its background flat restore job"
 done
 
 flat_meta_ok="false"
@@ -1995,7 +3094,43 @@ if [[ "$flat_meta_ok" == "true" \
     FLAT_RESTORE_LIVE_FLAT_PASS="true"
 fi
 
-wait "$flat_restore_pid" || flat_restore_status=$?
+flat_restore_reaped="false"
+for _attempt in $(seq 1 600); do
+    if flat_restore_job_is_running "$flat_restore_pid"; then
+        sleep 0.1
+        continue
+    else
+        flat_restore_job_status=$?
+    fi
+    if [[ "$flat_restore_job_status" -eq 1 ]]; then
+        if wait "$flat_restore_pid"; then
+            flat_restore_status=0
+        else
+            flat_restore_status=$?
+        fi
+        flat_restore_reaped="true"
+        break
+    fi
+    fatal "flat_restore_job_audit_failed" \
+        "the proof could not audit its background flat restore job"
+done
+if [[ "$flat_restore_reaped" != "true" ]]; then
+    quiesce_flat_restore_driver \
+        || fatal "flat_restore_driver_timeout_cleanup_failed" \
+            "the bounded flat restore driver could not be stopped safely"
+    fatal "flat_restore_driver_timeout" \
+        "the flat restore driver did not exit within its bounded post-observation window"
+fi
+flat_restore_members="$(
+    flat_restore_group_members "$FLAT_RESTORE_PGID" "$FLAT_RESTORE_SID"
+)" || fatal "flat_restore_driver_audit_failed" \
+    "the proof could not audit its background process group after driver exit"
+if [[ -n "$flat_restore_members" ]]; then
+    quiesce_flat_restore_driver || true
+    fatal "flat_restore_driver_descendant_leak" \
+        "the flat restore command exited while a proof-owned process-group descendant remained"
+fi
+clear_flat_restore_identity
 if ! valid_room_id "$FLAT_RESTORE_ID"; then
     flat_restore_candidate="$(jq -er '.room_id' "$FLAT_RESTORE_JSON" 2>/dev/null || true)"
     if valid_room_id "$flat_restore_candidate"; then
@@ -2193,7 +3328,9 @@ jq -e \
         .status == "kept" and
         .snapshot_id == $snapshot_id and
         .slot == 1 and
-        .guest_ip == $guest) and
+        .guest_ip == $guest and
+        .namespace == ("rooms-c" + (.clone_net_index | tostring)) and
+        .host_veth == ("veth-h" + (.clone_net_index | tostring))) and
     ([.clones[].room_id] | unique | length) == 8 and
     ([.clones[].namespace] | unique | length) == 8 and
     ([.clones[].host_veth] | unique | length) == 8 and
@@ -2520,7 +3657,6 @@ readonly GUEST_EVIDENCE="$PROOF_ROOT/fleet-guest-evidence.tsv"
 REMOTE_PROBE="$(cat <<'REMOTE'
 set -eu
 identity="$(cat /run/rooms/identity)"
-epoch="$(date +%s)"
 kernel_rng="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 host_key="$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | cut -d ' ' -f2)"
 probe=/tmp/rooms-rng-probe
@@ -2530,8 +3666,8 @@ application_key="$(ssh-keygen -lf "$probe.pub" -E sha256 | cut -d ' ' -f2)"
 rm -f "$probe" "$probe.pub"
 global_name="$(git config --global --get user.name)"
 global_email="$(git config --global --get user.email)"
-local_name="$(git -C /workspace/repo config --get user.name)"
-local_email="$(git -C /workspace/repo config --get user.email)"
+local_name="$(git -C /workspace/repo config --show-origin --get user.name | awk -F '\t' '$1 == "file:.git/rooms-identity" { print $2 }')"
+local_email="$(git -C /workspace/repo config --show-origin --get user.email | awk -F '\t' '$1 == "file:.git/rooms-identity" { print $2 }')"
 repo_head="$(git -C /workspace/repo rev-parse HEAD)"
 sudo -n /bin/true
 sudo_ready=ready
@@ -2539,6 +3675,7 @@ secret_line="$(cat /run/rooms/secrets.env)"
 rm -- /run/rooms/secrets.env
 [ ! -e /run/rooms/secrets.env ] && [ ! -L /run/rooms/secrets.env ]
 secret_consumed=absent
+epoch="$(date +%s)"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
   "$identity" "$epoch" "$kernel_rng" "$host_key" "$application_key" \
   "$global_name" "$global_email" "$local_name" "$local_email" "$repo_head" \
@@ -2704,7 +3841,9 @@ if ! jq -e \
         .exit_code == 0 and
         .snapshot_id == $snapshot_id and
         .slot == 1 and
-        .guest_ip == $guest) and
+        .guest_ip == $guest and
+        .namespace == ("rooms-c" + (.clone_net_index | tostring)) and
+        .host_veth == ("veth-h" + (.clone_net_index | tostring))) and
     ([.clones[].room_id] | unique | length) == 8 and
     ([.clones[].namespace] | unique | length) == 8 and
     ([.clones[].host_veth] | unique | length) == 8 and
@@ -2887,6 +4026,18 @@ if ! sudo -n sha256sum -c --status "$PROOF_ROOT/snapshot-artifacts.sha256"; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "snapshot_artifact_changed" \
         "one or more neutral snapshot artifacts changed after publication"
+fi
+if ! capture_sealed_state "$SEALED_AFTER" \
+    || ! cmp -s "$SEALED_BEFORE" "$SEALED_AFTER"; then
+    FINAL_LEAK_AUDIT_PASS="false"
+    hard_failure "sealed_artifact_changed" \
+        "a proof rootfs, snapshot, or attestation changed type, inode, flags, metadata, or bytes"
+fi
+if ! capture_host_substrate "$HOST_SUBSTRATE_AFTER" \
+    || ! cmp -s "$HOST_SUBSTRATE_BEFORE" "$HOST_SUBSTRATE_AFTER"; then
+    FINAL_LEAK_AUDIT_PASS="false"
+    hard_failure "host_substrate_changed" \
+        "the permanent firewall, RPDB, or route substrate changed during the gate"
 fi
 if findmnt -rn -o TARGET | grep -Fq "$STATE_DIR/jailer/"; then
     FINAL_LEAK_AUDIT_PASS="false"
