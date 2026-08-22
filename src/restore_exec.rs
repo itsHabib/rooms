@@ -20,7 +20,7 @@ use crate::room::{self, Liveness};
 use crate::slot;
 use crate::snapshot::{self, SnapshotMeta};
 use crate::snapshot_exec::{canonical_candidate, firecracker_version, overlaps, sha256_file};
-use crate::{egress, transport, vsock, witness};
+use crate::{clonenet, egress, transport, vsock, witness};
 
 const INTENT_SCHEMA_VERSION: u32 = 1;
 
@@ -47,6 +47,9 @@ struct RestoreIntent {
     tap: String,
     snapshot_dir: PathBuf,
     image: PathBuf,
+    /// Canonical clone-network allocator index. Names are always derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clone_net_index: Option<u8>,
     #[serde(default)]
     pid: Option<u32>,
     #[serde(default)]
@@ -61,10 +64,55 @@ pub struct Restored {
     pub slot: room::Slot,
     pub room_id: String,
     pub snapshot_id: String,
+    pub clone_net: Option<clonenet::CloneNet>,
+}
+
+/// One request-scoped, compatibility-checked restore source.
+///
+/// Preparing a source performs the expensive rootfs hash and parses the
+/// snapshot metadata once. The value is immutable and may be shared (for
+/// example through an `Arc`) by every member of one clone batch. It is not a
+/// global cache: each invocation must prepare its own source, and every
+/// restore cheaply revalidates the exact files before publishing an intent,
+/// after staging, and at the final pre-resume boundary.
+#[derive(Debug)]
+pub struct PreparedRestoreSource {
+    snapshot_dir: PathBuf,
+    image: PathBuf,
+    meta: SnapshotMeta,
+    ops: Vec<RestoreOp>,
+    identity: RestoreSourceIdentity,
+}
+
+impl PreparedRestoreSource {
+    /// Canonical snapshot directory whose artifacts were prepared.
+    #[must_use]
+    pub fn snapshot_dir(&self) -> &Path {
+        &self.snapshot_dir
+    }
+
+    /// Canonical backing image whose digest was compatibility-checked.
+    #[must_use]
+    pub fn image(&self) -> &Path {
+        &self.image
+    }
+
+    /// Validated metadata for the prepared snapshot.
+    #[must_use]
+    pub const fn snapshot_meta(&self) -> &SnapshotMeta {
+        &self.meta
+    }
+
+    fn revalidate(&self) -> anyhow::Result<()> {
+        require_immutable_restore_source(&self.snapshot_dir, &self.image)?;
+        self.identity.revalidate()
+    }
 }
 
 /// Inputs to [`restore`].
 pub struct RestoreRequest<'a> {
+    /// Pre-minted identity shared with an optional `CloneNet` claim.
+    pub room_id: &'a str,
     pub snapshot_dir: &'a Path,
     /// The backing rootfs; its hash must equal the snapshot's pinned hash.
     pub image: &'a Path,
@@ -84,6 +132,8 @@ pub struct RestoreRequest<'a> {
     pub out_dir: Option<&'a Path>,
     /// Bound on the guest's hygiene ack after resume.
     pub ack_timeout: std::time::Duration,
+    /// Clone-only host networking. `None` preserves the flat restore path.
+    pub clone_net: Option<clonenet::CloneNet>,
 }
 
 /// Drive a full restore: validate, spawn behind the barrier, lease the frozen
@@ -93,15 +143,157 @@ pub struct RestoreRequest<'a> {
 /// Fails closed at every step; a failure after the lease attempts full
 /// teardown and returns the lease before the intent tombstone is cleared.
 pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::Result<Restored> {
-    let meta = read_snapshot_meta(req.snapshot_dir)?;
-    let image = canonical_candidate(req.image)?;
-    let snapshot_dir = canonical_candidate(req.snapshot_dir)?;
-    validate_output_disjoint(config, req.out_dir, &image, &snapshot_dir)?;
+    if !crate::registry::is_valid_room_id(req.room_id) {
+        anyhow::bail!("restore room id is invalid");
+    }
+    let prepared = prepare_restore(config, req.snapshot_dir, req.image)?;
+    restore_prepared(config, req, &prepared).await
+}
 
+/// Canonicalize, validate, hash, and compatibility-check one restore source.
+///
+/// This is deliberately request-scoped. Call it once for a clone batch and
+/// share the returned immutable value with [`restore_prepared`]; do not retain
+/// it as a path-keyed process-global cache.
+///
+/// # Errors
+/// Refuses missing, empty, symlinked, or non-regular artifacts; malformed or
+/// incompatible metadata; and any source whose identity changes while it is
+/// being read and hashed.
+pub fn prepare_restore(
+    config: &RoomsConfig,
+    snapshot_dir: &Path,
+    image: &Path,
+) -> anyhow::Result<PreparedRestoreSource> {
+    prepare_restore_inner(config, snapshot_dir, image, true)
+}
+
+fn prepare_restore_inner(
+    config: &RoomsConfig,
+    snapshot_dir: &Path,
+    image: &Path,
+    require_immutable: bool,
+) -> anyhow::Result<PreparedRestoreSource> {
+    let snapshot_dir = canonical_candidate(snapshot_dir)?;
+    let image = canonical_candidate(image)?;
+    if require_immutable {
+        require_immutable_restore_source(&snapshot_dir, &image)?;
+    }
+    let before = RestoreSourceIdentity::capture(&snapshot_dir, &image)?;
+    let meta = read_snapshot_meta(&snapshot_dir)?;
     let host_fc = firecracker_version(config)?;
     let rootfs_hash = sha256_file(&image)?;
     let plan = restore::plan_restore(&meta, &host_fc, &rootfs_hash)?;
-    let slot_index = meta
+    let identity = RestoreSourceIdentity::capture(&snapshot_dir, &image)?;
+    before.assert_same(&identity, "changed while being prepared")?;
+    Ok(PreparedRestoreSource {
+        snapshot_dir,
+        image,
+        meta,
+        ops: plan.ops,
+        identity,
+    })
+}
+
+#[cfg(test)]
+fn prepare_unsealed_restore_fixture(
+    config: &RoomsConfig,
+    snapshot_dir: &Path,
+    image: &Path,
+) -> anyhow::Result<PreparedRestoreSource> {
+    prepare_restore_inner(config, snapshot_dir, image, false)
+}
+
+/// A restored VMM can demand-page these inodes after the API load and resume
+/// calls return. Kernel immutability, not a path-stat timing window, is the
+/// lifetime guarantee that keeps the compatibility hash and shared memory
+/// bytes stable for every live clone.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        clippy::missing_const_for_fn,
+        clippy::unnecessary_wraps,
+        reason = "the Result-shaped no-op keeps non-Linux policy tests aligned with the Linux restore API"
+    )
+)]
+fn require_immutable_restore_source(snapshot_dir: &Path, image: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        for (path, label) in [
+            (image, "backing image"),
+            (snapshot_dir, "snapshot directory"),
+            (
+                &snapshot_dir.join(snapshot::SNAPSHOT_META_FILE),
+                "snapshot metadata",
+            ),
+            (
+                &snapshot_dir.join(snapshot::SNAPSHOT_VMSTATE_FILE),
+                "snapshot vmstate",
+            ),
+            (
+                &snapshot_dir.join(snapshot::SNAPSHOT_MEM_FILE),
+                "snapshot memory",
+            ),
+        ] {
+            crate::inode_seal::require(path, label)?;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (snapshot_dir, image);
+    }
+    Ok(())
+}
+
+fn validate_prepared_request_paths(
+    config: &RoomsConfig,
+    req: &RestoreRequest<'_>,
+    prepared: &PreparedRestoreSource,
+) -> anyhow::Result<()> {
+    let requested_image = canonical_candidate(req.image)?;
+    if requested_image != prepared.image {
+        anyhow::bail!(
+            "restore request image {} differs from prepared image {}",
+            requested_image.display(),
+            prepared.image.display()
+        );
+    }
+    let requested_snapshot = canonical_candidate(req.snapshot_dir)?;
+    if requested_snapshot != prepared.snapshot_dir {
+        anyhow::bail!(
+            "restore request snapshot {} differs from prepared snapshot {}",
+            requested_snapshot.display(),
+            prepared.snapshot_dir.display()
+        );
+    }
+    validate_output_disjoint(config, req.out_dir, &prepared.image, &prepared.snapshot_dir)
+}
+
+/// Restore from a source already parsed, hashed, and compatibility-checked by
+/// [`prepare_restore`].
+///
+/// Request paths must still resolve to the prepared canonical paths. Exact
+/// source metadata is revalidated before the durable intent, after staging,
+/// and once more after `/snapshot/load` at the last boundary before resume, so
+/// a member of a long-running clone batch never silently executes substituted
+/// or in-place-mutated snapshot bytes.
+///
+/// # Errors
+/// Has the same fail-closed behavior as [`restore`], and additionally refuses
+/// a request that does not name the prepared source or whose source identity
+/// has changed since preparation.
+pub async fn restore_prepared(
+    config: &RoomsConfig,
+    req: RestoreRequest<'_>,
+    prepared: &PreparedRestoreSource,
+) -> anyhow::Result<Restored> {
+    if !crate::registry::is_valid_room_id(req.room_id) {
+        anyhow::bail!("restore room id is invalid");
+    }
+    validate_prepared_request_paths(config, &req, prepared)?;
+
+    let slot_index = prepared
+        .meta
         .slot_index
         .ok_or_else(|| anyhow::anyhow!("snapshot metadata carries no frozen slot"))?;
     if let Some(requested) = req.target_slot {
@@ -112,20 +304,32 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
         }
     }
 
-    let room_id = firecracker::mint_room_id();
+    let state = state_base(config)?;
+    let clone_net = canonical_clone_net(&state, req.room_id, req.clone_net.as_ref())?;
+    prepared.revalidate()?;
+    let room_id = req.room_id.to_owned();
     let mut intent = RestoreIntent {
         schema_version: INTENT_SCHEMA_VERSION,
         room_id: room_id.clone(),
-        snapshot_id: meta.snapshot_id.clone(),
+        snapshot_id: prepared.meta.snapshot_id.clone(),
         slot_index,
         tap: format!("tap-fc{slot_index}"),
-        snapshot_dir: snapshot_dir.clone(),
-        image: image.clone(),
+        snapshot_dir: prepared.snapshot_dir.clone(),
+        image: prepared.image.clone(),
+        clone_net_index: clone_net.as_ref().map(|net| net.index),
         pid: None,
         pid_starttime: None,
         boundary: Boundary::PreSpawn,
     };
     create_intent_exclusive(config, &intent)?;
+
+    // Narrow the intent-to-spawn substitution window as well. This second
+    // check is cheap (metadata only); if it fails, the PreSpawn tombstone owns
+    // cleanup exactly like a staging failure.
+    if let Err(error) = prepared.revalidate() {
+        clean_pre_spawn(config, &intent);
+        return Err(error);
+    }
 
     let descriptor = room::RoomDescriptor {
         command: req.label.clone(),
@@ -133,11 +337,12 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
     };
     let spawn_req = RestoreSpawnRequest {
         room_id: &room_id,
-        rootfs: &image,
-        host_vmstate: &snapshot_dir.join(snapshot::SNAPSHOT_VMSTATE_FILE),
-        host_mem: &snapshot_dir.join(snapshot::SNAPSHOT_MEM_FILE),
+        rootfs: &prepared.image,
+        host_vmstate: &prepared.snapshot_dir.join(snapshot::SNAPSHOT_VMSTATE_FILE),
+        host_mem: &prepared.snapshot_dir.join(snapshot::SNAPSHOT_MEM_FILE),
         descriptor: &descriptor,
-        snapshot_id: &meta.snapshot_id,
+        snapshot_id: &prepared.meta.snapshot_id,
+        network_namespace: clone_net.as_ref().map(|net| net.netns.as_str()),
     };
     let mut launch = match firecracker::spawn_restore(&spawn_req, config).await {
         Ok(launch) => launch,
@@ -147,17 +352,38 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
             // paths, and clear the intent ONLY when that cleanup is proven
             // complete; otherwise keep the tombstone so `rooms gc` retries from
             // it, rather than orphaning a room dir GC would never touch.
-            clean_pre_spawn(config, &room_id);
+            clean_pre_spawn(config, &intent);
             return Err(e.into());
         }
     };
 
-    match drive_to_ready(config, &req, &meta, &mut intent, &mut launch, plan.ops).await {
+    // Staging opens the three prepared paths: vmstate is copied while rootfs
+    // and memory are bind-mounted. Revalidate once more while the child is
+    // still inert behind its launch barrier. A rename/substitution in the
+    // check-to-stage window is therefore detected before any lease, network,
+    // API load, or guest execution; the staged binds/copy are discarded with
+    // this launch.
+    if let Err(error) = prepared.revalidate() {
+        abort_launch(config, launch, &intent);
+        return Err(error);
+    }
+
+    match drive_to_ready(
+        config,
+        &req,
+        &mut intent,
+        &mut launch,
+        clone_net.as_ref(),
+        prepared,
+    )
+    .await
+    {
         Ok((slot, witness_capture)) => Ok(Restored {
             vm: launch.into_booted(witness_capture),
             slot,
             room_id,
-            snapshot_id: meta.snapshot_id,
+            snapshot_id: prepared.meta.snapshot_id.clone(),
+            clone_net,
         }),
         Err(e) => {
             abort_launch(config, launch, &intent);
@@ -171,34 +397,12 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
 async fn drive_to_ready(
     config: &RoomsConfig,
     req: &RestoreRequest<'_>,
-    meta: &SnapshotMeta,
     intent: &mut RestoreIntent,
     launch: &mut RestoreLaunch,
-    ops: Vec<RestoreOp>,
+    clone_net: Option<&clonenet::CloneNet>,
+    prepared: &PreparedRestoreSource,
 ) -> anyhow::Result<(room::Slot, Option<witness::Capture>)> {
-    // Durable pid/starttime before the barrier releases: a crash right here
-    // leaves an inert launcher that exits on pipe EOF, classifiable from the
-    // intent alone.
-    intent.pid = launch.pid();
-    intent.pid_starttime = intent.pid.and_then(room::starttime_of);
-    intent.boundary = Boundary::Spawned;
-    write_intent_atomic(config, intent)?;
-    launch.release_barrier().await?;
-    launch.wait_api(config.api_socket_timeout).await?;
-
-    // Lease the frozen slot only now that the room has a conclusive liveness
-    // breadcrumb. Busy or foreign leases fail closed.
-    let state = state_base(config)?;
-    let slot = slot::lease(
-        &state,
-        intent.slot_index,
-        &intent.snapshot_id,
-        &intent.room_id,
-    )?;
-    intent.boundary = Boundary::Leased;
-    write_intent_atomic(config, intent)?;
-    record_slot_on_room(config, &intent.room_id, &slot)?;
-    launch.attach_leased_slot(&slot)?;
+    let slot = establish_lease(config, intent, launch, clone_net).await?;
 
     let jail_root = config
         .jail_root_dir(&intent.room_id)
@@ -210,18 +414,30 @@ async fn drive_to_ready(
 
     let mut witness_capture = None;
     let mut resume_delivery = None;
-    for op in ops {
+    for op in prepared.ops.clone() {
         match op {
             RestoreOp::InstallCustody => {
                 if req.witness {
-                    witness_capture = Some(
-                        witness::Capture::start(&slot.tap, &room_dir)
+                    witness_capture = Some(match clone_net {
+                        Some(net) => {
+                            witness::Capture::start_in_namespace(&net.netns, &slot.tap, &room_dir)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("witness: {e}"))?
+                        }
+                        None => witness::Capture::start(&slot.tap, &room_dir)
                             .await
                             .map_err(|e| anyhow::anyhow!("witness: {e}"))?,
-                    );
+                    });
                 }
-                if req.egress.enforces() {
-                    egress::install(&slot.tap, req.egress).map_err(|e| anyhow::anyhow!(e))?;
+                match clone_net {
+                    // Observe installs no per-clone policy, but still proves
+                    // the full shared path before a clone can resume.
+                    Some(net) => egress::install_clone(&net.veth_host, req.egress)
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                    None if req.egress.enforces() => {
+                        egress::install(&slot.tap, req.egress).map_err(|e| anyhow::anyhow!(e))?;
+                    }
+                    None => {}
                 }
             }
             RestoreOp::LoadSnapshot {
@@ -251,6 +467,19 @@ async fn drive_to_ready(
                 .await?;
             }
             RestoreOp::ResumeVm => {
+                // Re-prove every enforcing interface immediately before the
+                // irreversible resume boundary. A namespace/veth removed after
+                // custody install must fail closed, never expose a flat guest.
+                verify_clone_custody(launch, &slot, clone_net)?;
+                if let Some(net) = clone_net.filter(|_| req.egress.enforces()) {
+                    egress::verify_clone(&net.veth_host, req.egress)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                }
+                // `/snapshot/load` has consumed the staged vmstate and memory,
+                // but the rootfs and memory binds still share their source
+                // inodes. Reject an in-place write made after staging/load at
+                // the last synchronous boundary before guest execution.
+                prepared.revalidate()?;
                 transport::api_patch(
                     launch.socket(),
                     "/vm",
@@ -258,7 +487,7 @@ async fn drive_to_ready(
                     config,
                 )
                 .await?;
-                info!(room = %intent.room_id, snapshot = %meta.snapshot_id, "microVM resumed from snapshot");
+                info!(room = %intent.room_id, snapshot = %intent.snapshot_id, "microVM resumed from snapshot");
             }
             RestoreOp::ApplyHygieneNudgeAndAwaitAck => {
                 let delivery = resume_delivery
@@ -272,6 +501,93 @@ async fn drive_to_ready(
         }
     }
     Ok((slot, witness_capture))
+}
+
+/// Publish process identity, cross the launch barrier, and take the exact
+/// snapshot lease before any TAP or custody resource is created.
+async fn establish_lease(
+    config: &RoomsConfig,
+    intent: &mut RestoreIntent,
+    launch: &mut RestoreLaunch,
+    clone_net: Option<&clonenet::CloneNet>,
+) -> anyhow::Result<room::Slot> {
+    // Durable pid/starttime before the barrier releases: a crash right here
+    // leaves an inert launcher that exits on pipe EOF, classifiable from the
+    // intent alone.
+    intent.pid = launch.pid();
+    intent.pid_starttime = intent.pid.and_then(room::starttime_of);
+    intent.boundary = Boundary::Spawned;
+    write_intent_atomic(config, intent)?;
+    launch.release_barrier().await?;
+    launch.wait_api(config.api_socket_timeout).await?;
+    if let Some(net) = clone_net {
+        let pid = launch
+            .pid()
+            .ok_or_else(|| anyhow::anyhow!("restore process has no pid after API readiness"))?;
+        firecracker::verify_process_network_namespace(pid, &net.netns)?;
+    }
+
+    // Lease the frozen slot only now that the room has a conclusive liveness
+    // breadcrumb. Busy or foreign leases fail closed.
+    let state = state_base(config)?;
+    let slot = match clone_net {
+        Some(_) => slot::lease_clone(
+            &state,
+            intent.slot_index,
+            &intent.snapshot_id,
+            &intent.room_id,
+        )?,
+        None => slot::lease(
+            &state,
+            intent.slot_index,
+            &intent.snapshot_id,
+            &intent.room_id,
+        )?,
+    };
+    intent.boundary = Boundary::Leased;
+    write_intent_atomic(config, intent)?;
+    record_slot_on_room(config, &intent.room_id, &slot, clone_net)?;
+    launch.attach_leased_slot(&slot)?;
+    verify_clone_custody(launch, &slot, clone_net)?;
+    Ok(slot)
+}
+
+/// Re-derive caller-provided networking and prove its exact durable owner.
+fn canonical_clone_net(
+    state: &Path,
+    room_id: &str,
+    requested: Option<&clonenet::CloneNet>,
+) -> anyhow::Result<Option<clonenet::CloneNet>> {
+    let Some(requested) = requested else {
+        return Ok(None);
+    };
+    let derived = clonenet::CloneNet::derive(requested.index)?;
+    if &derived != requested {
+        anyhow::bail!(
+            "clone network {} does not match its canonical derived identity",
+            requested.index
+        );
+    }
+    clonenet::verify_owned(state, &derived, room_id)?;
+    Ok(Some(derived))
+}
+
+/// Assert the complete clone network identity at the custody boundary.
+fn verify_clone_custody(
+    launch: &RestoreLaunch,
+    slot: &room::Slot,
+    clone_net: Option<&clonenet::CloneNet>,
+) -> anyhow::Result<()> {
+    let Some(net) = clone_net else {
+        return Ok(());
+    };
+    let pid = launch
+        .pid()
+        .ok_or_else(|| anyhow::anyhow!("restore process has no pid at custody boundary"))?;
+    firecracker::verify_process_network_namespace(pid, &net.netns)?;
+    firecracker::verify_tap_in_namespace(&net.netns, &slot.tap)?;
+    clonenet::verify_host_veth(net)?;
+    Ok(())
 }
 
 /// Build the per-restore nudge payload: identity, host clock, fresh entropy,
@@ -300,6 +616,7 @@ fn record_slot_on_room(
     config: &RoomsConfig,
     room_id: &str,
     slot: &room::Slot,
+    clone_net: Option<&clonenet::CloneNet>,
 ) -> anyhow::Result<()> {
     let room_dir = config
         .room_dir(room_id)
@@ -307,6 +624,7 @@ fn record_slot_on_room(
     let mut meta = room::read(&room_dir)?
         .ok_or_else(|| anyhow::anyhow!("restore room.json disappeared before lease"))?;
     meta.slot = Some(slot.clone());
+    meta.clone_net_index = clone_net.map(|net| net.index);
     room::write_atomic(&room_dir, &meta)?;
     Ok(())
 }
@@ -328,6 +646,7 @@ fn abort_launch(config: &RoomsConfig, mut launch: RestoreLaunch, intent: &Restor
         &intent.room_id,
         &intent.snapshot_id,
         intent.slot_index,
+        intent.clone_net_index,
     ) {
         warn!(room = %intent.room_id, error = %e, "restore abort left residue; `rooms gc` will retry from the intent tombstone");
     }
@@ -337,27 +656,15 @@ fn abort_launch(config: &RoomsConfig, mut launch: RestoreLaunch, intent: &Restor
 /// only the planned room/jail dirs can exist. Reap them room-only (never the
 /// shared slot's tap), and clear the intent only if that succeeds — a residual
 /// dir keeps the tombstone for `rooms gc`.
-fn clean_pre_spawn(config: &RoomsConfig, room_id: &str) {
-    let reaped = (|| -> anyhow::Result<()> {
-        let room_dir = config
-            .room_dir(room_id)
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve room dir"))?;
-        let jail_dir = config
-            .jail_instance_dir(room_id)
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve jail dir"))?;
-        let socket = config
-            .jail_socket(room_id)
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve socket"))?;
-        firecracker::reap_room_only(&room_dir, &jail_dir, &socket, config)?;
-        Ok(())
-    })();
-    match reaped {
-        Ok(()) => {
-            let _ = finish_index(config, room_id);
-        }
-        Err(e) => {
-            warn!(room = %room_id, error = %e, "pre-spawn restore cleanup incomplete; keeping intent tombstone for `rooms gc`");
-        }
+fn clean_pre_spawn(config: &RoomsConfig, intent: &RestoreIntent) {
+    if let Err(e) = finish_teardown(
+        config,
+        &intent.room_id,
+        &intent.snapshot_id,
+        intent.slot_index,
+        intent.clone_net_index,
+    ) {
+        warn!(room = %intent.room_id, error = %e, "pre-spawn restore cleanup incomplete; keeping intent tombstone for `rooms gc`");
     }
 }
 
@@ -371,6 +678,7 @@ pub fn finish_teardown(
     room_id: &str,
     snapshot_id: &str,
     slot_index: u8,
+    clone_net_index: Option<u8>,
 ) -> anyhow::Result<()> {
     let room_dir = config
         .room_dir(room_id)
@@ -381,7 +689,6 @@ pub fn finish_teardown(
     let socket = config
         .jail_socket(room_id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve socket"))?;
-    let tap = format!("tap-fc{slot_index}");
     let state = state_base(config)?;
     // Reap this room's OWN resources first (process/jail/room dir) — these are
     // keyed by room id and always safe. If they survive, the reap errors and
@@ -399,9 +706,23 @@ pub fn finish_teardown(
     // now and just clear our tombstone. (This is also why the RoomGuard is
     // deliberately not given tap ownership — see `attach_leased_slot`: this is
     // the sole deleter of a leased tap.)
-    match slot::hold_lease_for_teardown(&state, slot_index, snapshot_id, room_id)? {
+    let lease = slot::hold_lease_for_teardown(&state, slot_index, snapshot_id, room_id)?;
+    if let Some(index) = clone_net_index {
+        let freed = clonenet::free(&state, index, room_id)?;
+        if freed == clonenet::Freed::AlreadyReassigned {
+            warn!(
+                clone_net = index,
+                "restore teardown no longer owns this clone network; leaving reassigned resources untouched"
+            );
+        }
+    }
+    match lease {
         Some(hold) => {
-            firecracker::remove_egress_and_tap(&tap).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            if clone_net_index.is_none() {
+                let tap = format!("tap-fc{slot_index}");
+                firecracker::remove_egress_and_tap(&tap)
+                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            }
             hold.return_to_reservation()?;
         }
         None => {
@@ -421,6 +742,7 @@ pub struct PendingRestore {
     pub snapshot_id: String,
     pub boundary: String,
     pub slot: u8,
+    pub clone_net_index: Option<u8>,
 }
 
 /// All indexed restore transactions.
@@ -436,6 +758,7 @@ pub fn pending_all(config: &RoomsConfig) -> anyhow::Result<Vec<PendingRestore>> 
                 Boundary::Leased => "leased".to_owned(),
             },
             slot: intent.slot_index,
+            clone_net_index: intent.clone_net_index,
         })
         .collect())
 }
@@ -490,6 +813,7 @@ fn reconcile_one(config: &RoomsConfig, intent: &RestoreIntent) -> anyhow::Result
             &intent.room_id,
             &intent.snapshot_id,
             intent.slot_index,
+            intent.clone_net_index,
         )?;
         return Ok(Some(format!(
             "restore {}: cleared pre-spawn intent",
@@ -504,6 +828,7 @@ fn reconcile_one(config: &RoomsConfig, intent: &RestoreIntent) -> anyhow::Result
                 &intent.room_id,
                 &intent.snapshot_id,
                 intent.slot_index,
+                intent.clone_net_index,
             )?;
             Ok(Some(format!(
                 "restore {}: reaped dead restore, lease returned to snapshot {}",
@@ -586,6 +911,188 @@ fn validate_output_disjoint(
 }
 
 // --- snapshot input validation ------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreSourceKind {
+    Directory,
+    RegularNonEmpty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StampedRestorePath {
+    label: &'static str,
+    path: PathBuf,
+    kind: RestoreSourceKind,
+    stamp: RestoreSourceStamp,
+}
+
+impl StampedRestorePath {
+    fn capture(
+        label: &'static str,
+        path: PathBuf,
+        kind: RestoreSourceKind,
+    ) -> anyhow::Result<Self> {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            anyhow::anyhow!(
+                "prepared restore source {label} {}: {error}",
+                path.display()
+            )
+        })?;
+        let valid_kind = match kind {
+            RestoreSourceKind::Directory => metadata.file_type().is_dir(),
+            RestoreSourceKind::RegularNonEmpty => {
+                metadata.file_type().is_file() && metadata.len() != 0
+            }
+        };
+        if !valid_kind {
+            anyhow::bail!(
+                "prepared restore source {label} is empty, symlinked, or has the wrong type: {}",
+                path.display()
+            );
+        }
+        Ok(Self {
+            label,
+            path,
+            kind,
+            stamp: RestoreSourceStamp::capture(&metadata),
+        })
+    }
+
+    fn recapture(&self) -> anyhow::Result<Self> {
+        Self::capture(self.label, self.path.clone(), self.kind)
+    }
+}
+
+/// The complete immutable input set whose bytes decide a restore. Directory
+/// identity is included so replacing the snapshot tree around unchanged leaf
+/// names is detected as well as replacing an artifact itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestoreSourceIdentity {
+    paths: Vec<StampedRestorePath>,
+}
+
+impl RestoreSourceIdentity {
+    fn capture(snapshot_dir: &Path, image: &Path) -> anyhow::Result<Self> {
+        let paths = vec![
+            StampedRestorePath::capture(
+                "snapshot directory",
+                snapshot_dir.to_path_buf(),
+                RestoreSourceKind::Directory,
+            )?,
+            StampedRestorePath::capture(
+                "backing image",
+                image.to_path_buf(),
+                RestoreSourceKind::RegularNonEmpty,
+            )?,
+            StampedRestorePath::capture(
+                "snapshot metadata",
+                snapshot_dir.join(snapshot::SNAPSHOT_META_FILE),
+                RestoreSourceKind::RegularNonEmpty,
+            )?,
+            StampedRestorePath::capture(
+                "snapshot vmstate",
+                snapshot_dir.join(snapshot::SNAPSHOT_VMSTATE_FILE),
+                RestoreSourceKind::RegularNonEmpty,
+            )?,
+            StampedRestorePath::capture(
+                "snapshot memory",
+                snapshot_dir.join(snapshot::SNAPSHOT_MEM_FILE),
+                RestoreSourceKind::RegularNonEmpty,
+            )?,
+        ];
+        Ok(Self { paths })
+    }
+
+    fn assert_same(&self, current: &Self, reason: &str) -> anyhow::Result<()> {
+        if self.paths.len() != current.paths.len() {
+            anyhow::bail!("prepared restore source set {reason}");
+        }
+        for (expected, found) in self.paths.iter().zip(&current.paths) {
+            if expected != found {
+                anyhow::bail!(
+                    "prepared restore source {} {}: {}",
+                    expected.label,
+                    expected.path.display(),
+                    reason
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn revalidate(&self) -> anyhow::Result<()> {
+        for expected in &self.paths {
+            let found = expected.recapture()?;
+            if &found != expected {
+                anyhow::bail!(
+                    "prepared restore source {} {} changed after preparation",
+                    expected.label,
+                    expected.path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Metadata that changes under ordinary file replacement or mutation. On
+/// Unix, device + inode establishes object identity while length, mode,
+/// mtime, and ctime detect writes and metadata changes without re-hashing a
+/// 512 MiB image for every clone.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestoreSourceStamp {
+    device: u64,
+    inode: u64,
+    len: u64,
+    mode: u32,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+#[cfg(unix)]
+impl RestoreSourceStamp {
+    fn capture(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            mode: metadata.mode(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+}
+
+/// Non-Unix builds retain a conservative fallback for portability. Rooms'
+/// actual Firecracker restore substrate is Unix-only; the stronger identity
+/// above is the production path.
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestoreSourceStamp {
+    len: u64,
+    readonly: bool,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+}
+
+#[cfg(not(unix))]
+impl RestoreSourceStamp {
+    fn capture(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            readonly: metadata.permissions().readonly(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+        }
+    }
+}
 
 fn read_snapshot_meta(snapshot_dir: &Path) -> anyhow::Result<SnapshotMeta> {
     for name in [snapshot::SNAPSHOT_VMSTATE_FILE, snapshot::SNAPSHOT_MEM_FILE] {
@@ -704,6 +1211,11 @@ fn read_intents(config: &RoomsConfig) -> anyhow::Result<Vec<RestoreIntent>> {
         {
             anyhow::bail!("restore intent contains an invalid id");
         }
+        if let Some(index) = intent.clone_net_index {
+            clonenet::CloneNet::derive(index).map_err(|e| {
+                anyhow::anyhow!("restore intent carries invalid clone network: {e}")
+            })?;
+        }
         intents.push(intent);
     }
     intents.sort_by(|left, right| left.room_id.cmp(&right.room_id));
@@ -734,12 +1246,22 @@ mod tests {
         reason = "test module"
     )]
 
+    #[cfg(target_os = "linux")]
+    use super::prepare_restore;
     use super::{
-        create_intent_exclusive, finish_index, pending_all, read_intents, validate_output_disjoint,
+        canonical_clone_net, create_intent_exclusive, finish_index, pending_all,
+        prepare_unsealed_restore_fixture, read_intents, validate_output_disjoint,
         write_intent_atomic, Boundary, RestoreIntent, INTENT_SCHEMA_VERSION,
     };
+    use crate::clonenet::{CloneNet, CLONENETS_DIR};
     use crate::config::RoomsConfig;
-    use std::path::Path;
+    use crate::room::Provenance;
+    use crate::snapshot::{
+        SnapshotMeta, SNAPSHOT_MEM_FILE, SNAPSHOT_META_FILE, SNAPSHOT_SCHEMA_VERSION,
+        SNAPSHOT_VMSTATE_FILE,
+    };
+    use crate::snapshot_exec::sha256_file;
+    use std::path::{Path, PathBuf};
 
     const ROOM_ID: &str = "00000000000000000000000001";
     const SNAP_ID: &str = "00000000000000000000000002";
@@ -760,10 +1282,125 @@ mod tests {
             tap: "tap-fc3".to_owned(),
             snapshot_dir: "/tmp/snap".into(),
             image: "/tmp/image.ext4".into(),
+            clone_net_index: None,
             pid: None,
             pid_starttime: None,
             boundary: Boundary::PreSpawn,
         }
+    }
+
+    #[cfg(unix)]
+    fn prepared_fixture(
+        root: &Path,
+    ) -> (RoomsConfig, PathBuf, PathBuf, chrono::DateTime<chrono::Utc>) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let image = root.join("image.ext4");
+        std::fs::write(&image, b"rootfs-a").unwrap();
+        let snapshot_dir = root.join("snapshot");
+        std::fs::create_dir(&snapshot_dir).unwrap();
+        std::fs::write(snapshot_dir.join(SNAPSHOT_VMSTATE_FILE), b"vmstate-a").unwrap();
+        std::fs::write(snapshot_dir.join(SNAPSHOT_MEM_FILE), b"memory-a").unwrap();
+
+        let fc_version = "Firecracker v1.15.0";
+        let created_at = chrono::Utc::now();
+        let meta = SnapshotMeta {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            snapshot_id: SNAP_ID.to_owned(),
+            created_at,
+            fc_version: fc_version.to_owned(),
+            rootfs_hash: sha256_file(&image).unwrap(),
+            base_room_id: ROOM_ID.to_owned(),
+            slot_index: Some(3),
+            guest_ip: None,
+            base_repo_sha: None,
+            provenance: Provenance::Neutral,
+        };
+        std::fs::write(
+            snapshot_dir.join(SNAPSHOT_META_FILE),
+            serde_json::to_vec_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+
+        let firecracker = root.join("fake-firecracker");
+        std::fs::write(
+            &firecracker,
+            format!("#!/bin/sh\nprintf '%s\\n' '{fc_version}'\n"),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&firecracker).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&firecracker, permissions).unwrap();
+        let config = RoomsConfig {
+            state_base: Some(root.join("state")),
+            firecracker_binary: firecracker,
+            ..RoomsConfig::default()
+        };
+        (config, snapshot_dir, image, created_at)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_source_exposes_canonical_validated_input() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, created_at) = prepared_fixture(root.path());
+        let prepared =
+            prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
+        assert_eq!(
+            prepared.snapshot_dir(),
+            snapshot_dir.canonicalize().unwrap()
+        );
+        assert_eq!(prepared.image(), image.canonicalize().unwrap());
+        assert_eq!(prepared.snapshot_meta().snapshot_id, SNAP_ID);
+        assert_eq!(prepared.snapshot_meta().created_at, created_at);
+        prepared.identity.revalidate().expect("unchanged source");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_source_rejects_same_length_image_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let prepared =
+            prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
+        std::fs::write(&image, b"rootfs-b").unwrap();
+        let error = prepared
+            .identity
+            .revalidate()
+            .expect_err("in-place image mutation must invalidate preparation");
+        assert!(error.to_string().contains("backing image"), "{error}");
+        assert!(
+            error.to_string().contains("changed after preparation"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_source_rejects_same_length_snapshot_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let prepared =
+            prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
+        std::fs::write(snapshot_dir.join(SNAPSHOT_VMSTATE_FILE), b"vmstate-b").unwrap();
+        let error = prepared
+            .identity
+            .revalidate()
+            .expect_err("in-place vmstate mutation must invalidate preparation");
+        assert!(error.to_string().contains("snapshot vmstate"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_prepare_refuses_unsealed_restore_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let error = prepare_restore(&config, &snapshot_dir, &image)
+            .expect_err("mutable source artifacts must never reach Firecracker restore");
+        assert!(
+            error.to_string().contains("not kernel-immutable"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -808,6 +1445,50 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].boundary, "leased");
         assert_eq!(pending[0].slot, 3);
+        assert_eq!(pending[0].clone_net_index, None);
+    }
+
+    #[test]
+    fn clone_network_is_canonical_and_exact_owner_claimed() {
+        let state = tempfile::tempdir().unwrap();
+        let claims = state.path().join(CLONENETS_DIR);
+        std::fs::create_dir_all(&claims).unwrap();
+        std::fs::write(claims.join("3"), format!("{ROOM_ID}\n42 7\n")).unwrap();
+        let net = CloneNet::derive(3).unwrap();
+        assert_eq!(
+            canonical_clone_net(state.path(), ROOM_ID, Some(&net)).unwrap(),
+            Some(net.clone())
+        );
+        assert!(canonical_clone_net(state.path(), SNAP_ID, Some(&net)).is_err());
+
+        let mut forged = net;
+        forged.veth_host = "veth-h4".to_owned();
+        let error = canonical_clone_net(state.path(), ROOM_ID, Some(&forged))
+            .expect_err("caller-provided names must never override derivation");
+        assert!(error.to_string().contains("canonical"), "{error}");
+    }
+
+    #[test]
+    fn intent_persists_only_the_clone_allocator_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut namespaced = intent();
+        namespaced.clone_net_index = Some(7);
+        create_intent_exclusive(&config, &namespaced).unwrap();
+        let read = read_intents(&config).unwrap();
+        assert_eq!(read[0].clone_net_index, Some(7));
+        let bytes = std::fs::read(
+            config
+                .restore_intents_dir()
+                .unwrap()
+                .join(format!("{ROOM_ID}.json")),
+        )
+        .unwrap();
+        let json = String::from_utf8(bytes).unwrap();
+        assert!(json.contains("\"clone_net_index\": 7"));
+        for derived_name in ["rooms-c7", "veth-h7", "veth-g7"] {
+            assert!(!json.contains(derived_name));
+        }
     }
 
     #[test]

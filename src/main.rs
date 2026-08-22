@@ -1,7 +1,9 @@
 //! `rooms` — disposable Firecracker microVMs with specified deps.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -9,10 +11,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rooms::artifacts::{ResultJson, RunStatus};
 use rooms::lifecycle::{Event, Lifecycle, WorkloadStatus};
 use rooms::{
-    artifacts,
+    artifacts, clonenet,
     config::RoomsConfig,
     doctor, egress,
-    error::{RoomsError, SlotError},
+    error::{CloneNetError, RoomsError, SlotError},
     firecracker, registry, room, rootfs, runner, slot, snapshot_exec, vsock, witness,
 };
 use tracing::{info, warn};
@@ -219,6 +221,47 @@ enum Command {
         #[arg(long = "max-wall", value_parser = parse_max_wall, conflicts_with = "keep")]
         max_wall: Option<Duration>,
         /// Emit a machine-readable terminal record on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fork one frozen snapshot into several isolated restored rooms.
+    ///
+    /// Every clone gets a distinct host network namespace and veth identity
+    /// while reusing the snapshot's frozen guest slot. With no `--command`,
+    /// all clones are kept alive; command mode waits until the complete batch
+    /// is ready, runs the command concurrently, and tears every clone down.
+    Clone {
+        /// Completed snapshot artifact directory (from `rooms snapshot`).
+        snapshot_dir: PathBuf,
+        /// The backing rootfs image; its hash must match the snapshot's pin.
+        #[arg(long)]
+        image: PathBuf,
+        /// Number of clones to fork (bounded by the host's eight-room cap).
+        #[arg(short = 'n', long = "count", value_parser = parse_clone_count)]
+        count: u8,
+        /// Run one command in every clone concurrently, then tear all down.
+        /// Omit to keep the complete batch alive.
+        #[arg(long, value_parser = non_empty_command)]
+        command: Option<String>,
+        /// Collect each clone beneath `<dir>/<room-id>`.
+        #[arg(long = "out", requires = "command")]
+        out_dir: Option<PathBuf>,
+        /// Record each clone's namespaced egress (requires `--out`).
+        #[arg(long, requires = "out_dir")]
+        witness: bool,
+        /// Deliver a named host env var through every clone's resume nudge.
+        #[arg(long = "secret", value_parser = valid_secret_name)]
+        secret: Vec<String>,
+        /// Enforce one host-side egress policy independently per clone.
+        #[arg(long = "egress", value_parser = egress::parse)]
+        egress: Option<egress::Policy>,
+        /// Hard wall-clock cap on every concurrent command workload.
+        #[arg(long = "max-wall", value_parser = parse_max_wall, requires = "command")]
+        max_wall: Option<Duration>,
+        /// Lower the clone-network pool ceiling for this invocation.
+        #[arg(long = "max-pool", env = "ROOMS_MAX_POOL", value_parser = parse_max_pool)]
+        max_pool: Option<u8>,
+        /// Emit one machine-readable terminal batch record on stdout.
         #[arg(long)]
         json: bool,
     },
@@ -467,6 +510,23 @@ fn parse_max_pool(s: &str) -> Result<u8, String> {
     Ok(n)
 }
 
+/// Parse the bounded fan-out requested by `rooms clone -n`.
+fn parse_clone_count(s: &str) -> Result<u8, String> {
+    let count: u8 = s.trim().parse().map_err(|_| {
+        format!(
+            "invalid clone count '{s}': want an integer 1..={}",
+            slot::MAX_CLONE_LEASES
+        )
+    })?;
+    if usize::from(count) > slot::MAX_CLONE_LEASES || count == 0 {
+        return Err(format!(
+            "clone count must be in 1..={}",
+            slot::MAX_CLONE_LEASES
+        ));
+    }
+    Ok(count)
+}
+
 fn main() -> ExitCode {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -498,7 +558,9 @@ fn main() -> ExitCode {
 /// other command carries none.
 fn harvest_cli_secrets(cli: &Cli) -> Result<Option<vsock::SecretsPayload>, RoomsError> {
     match &cli.command {
-        Command::Run { secret, .. } | Command::Restore { secret, .. } => harvest_secrets(secret),
+        Command::Run { secret, .. }
+        | Command::Restore { secret, .. }
+        | Command::Clone { secret, .. } => harvest_secrets(secret),
         _ => Ok(None),
     }
 }
@@ -511,6 +573,7 @@ const fn wants_json_error_record(cli: &Cli) -> bool {
         Command::Run { json: true, .. }
             | Command::BaseCreate { json: true, .. }
             | Command::Restore { json: true, .. }
+            | Command::Clone { json: true, .. }
     )
 }
 
@@ -533,7 +596,8 @@ async fn async_main(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> ExitCod
 /// with a guest that exited 4 — the `--json` `error_kind` disambiguates).
 const fn exit_code_for_error(err: &RoomsError) -> u8 {
     match err {
-        RoomsError::Slot(SlotError::PoolFull { .. }) => 4,
+        RoomsError::Slot(SlotError::PoolFull { .. })
+        | RoomsError::CloneNet(CloneNetError::PoolFull { .. }) => 4,
         _ => 2,
     }
 }
@@ -544,8 +608,10 @@ const fn exit_code_for_error(err: &RoomsError) -> u8 {
 /// an exit code a guest could collide with.
 const fn error_kind(err: &RoomsError) -> &'static str {
     match err {
-        RoomsError::Slot(SlotError::PoolFull { .. }) => "pool_full",
+        RoomsError::Slot(SlotError::PoolFull { .. })
+        | RoomsError::CloneNet(CloneNetError::PoolFull { .. }) => "pool_full",
         RoomsError::Slot(_) => "slot",
+        RoomsError::CloneNet(_) => "clone_net",
         RoomsError::Firecracker(_) => "firecracker",
         RoomsError::Rootfs(_) => "rootfs",
         RoomsError::Transport(_) => "transport",
@@ -569,7 +635,8 @@ struct RunErrorRecord {
 /// Build the terminal record for a failed `rooms run --json`.
 fn run_error_record(err: &RoomsError) -> RunErrorRecord {
     let cap = match err {
-        RoomsError::Slot(SlotError::PoolFull { cap }) => Some(*cap),
+        RoomsError::Slot(SlotError::PoolFull { cap })
+        | RoomsError::CloneNet(CloneNetError::PoolFull { cap }) => Some(*cap),
         _ => None,
     };
     RunErrorRecord {
@@ -704,6 +771,37 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             )
             .await
         }
+        Command::Clone {
+            snapshot_dir,
+            image,
+            count,
+            command,
+            out_dir,
+            witness,
+            secret: _,
+            egress,
+            max_wall,
+            max_pool,
+            json,
+        } => {
+            clone_rooms(
+                CloneArgs {
+                    snapshot_dir,
+                    image,
+                    count,
+                    command,
+                    out_dir,
+                    witness,
+                    secrets,
+                    egress: egress.unwrap_or(egress::Policy::Observe),
+                    max_wall,
+                    max_pool,
+                    json,
+                },
+                &config,
+            )
+            .await
+        }
         Command::SnapshotRecover { id, json } => {
             snapshot_recover_cmd(id.as_deref(), json, &config).await
         }
@@ -722,6 +820,7 @@ async fn snapshot_cmd(
     json: bool,
     config: &RoomsConfig,
 ) -> Result<u8, RoomsError> {
+    validate_json_emitted_path(out, json, "snapshot --out")?;
     let result = snapshot_exec::create(config, id, out)
         .await
         .map_err(|error| RoomsError::Internal(error.to_string()))?;
@@ -927,8 +1026,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     // image — including ones without /sbin/overlay-init — still boots.
     let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
 
-    // Mint the room id BEFORE the claim, so the one value is the slot-file
-    // contents, the room dir name, and room.json.id. Then claim a pool slot and
+    // Mint the room id before the claim so it stays the canonical identity; then
     // derive the guest network from it.
     let room_id = firecracker::mint_room_id();
     // The lifecycle stream is also a fallible host-side input: create it before
@@ -994,6 +1092,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
 
     let env = PostBootEnv {
         network: &network,
+        network_namespace: None,
         key: &key,
         config,
         max_wall: args.max_wall,
@@ -1001,7 +1100,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         egress: &egress_plan,
     };
     let secrets_delivery = vm.take_secrets_delivery();
-    let outcome = post_boot(&env, &action, &mut vm, secrets_delivery).await;
+    let outcome = post_boot(&env, &action, &mut vm, secrets_delivery, None).await;
     collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
@@ -1181,6 +1280,12 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provena
 /// within seconds; the bound exists for images predating the agent.
 const RESTORE_ACK_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// Clone restore has already received the resume-agent hygiene ack before it
+/// enters the SSH barrier, so sshd should be seconds past startup. Polling at
+/// the general cold-boot cadence would add up to two avoidable seconds to an
+/// otherwise ready batch.
+const CLONE_SSH_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// Flags for `rooms restore` (a flat mirror of the CLI variant).
 #[allow(
     clippy::struct_excessive_bools,
@@ -1198,6 +1303,698 @@ struct RestoreArgs {
     egress: egress::Policy,
     max_wall: Option<Duration>,
     json: bool,
+}
+
+/// Flags for `rooms clone` (a flat mirror of the CLI variant).
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat DTO mirroring independent CLI flags 1:1"
+)]
+struct CloneArgs {
+    snapshot_dir: PathBuf,
+    image: PathBuf,
+    count: u8,
+    command: Option<String>,
+    out_dir: Option<PathBuf>,
+    witness: bool,
+    secrets: Option<vsock::SecretsPayload>,
+    egress: egress::Policy,
+    max_wall: Option<Duration>,
+    max_pool: Option<u8>,
+    json: bool,
+}
+
+/// The process signal that stopped a clone batch before its ownership handoff.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CloneTermination {
+    Interrupt,
+    #[cfg(unix)]
+    Terminate,
+}
+
+impl CloneTermination {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "SIGINT",
+            #[cfg(unix)]
+            Self::Terminate => "SIGTERM",
+        }
+    }
+
+    const fn exit_code(self) -> u8 {
+        match self {
+            Self::Interrupt => 130,
+            #[cfg(unix)]
+            Self::Terminate => 143,
+        }
+    }
+}
+
+/// Registers both termination handlers before clone effects begin and retains
+/// the first observed signal for every later stage (including command workers).
+struct CloneSignalSource {
+    receiver: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+    terminal_commit: Option<tokio::sync::oneshot::Sender<tokio::sync::oneshot::Sender<()>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CloneSignalSource {
+    #[cfg_attr(
+        not(unix),
+        allow(
+            clippy::unnecessary_wraps,
+            reason = "the cross-platform call site shares Unix's fallible registration contract"
+        )
+    )]
+    fn arm() -> Result<Self, RoomsError> {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let (terminal_commit, terminal_commit_receiver) =
+            tokio::sync::oneshot::channel::<tokio::sync::oneshot::Sender<()>>();
+        #[cfg(unix)]
+        let task = {
+            let mut interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(
+                    |error| RoomsError::Internal(format!("register clone SIGINT handler: {error}")),
+                )?;
+            let mut terminate = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            )
+            .map_err(|error| {
+                RoomsError::Internal(format!("register clone SIGTERM handler: {error}"))
+            })?;
+            tokio::spawn(async move {
+                let signal = tokio::select! {
+                    biased;
+                    _ = interrupt.recv() => Some(CloneTermination::Interrupt),
+                    _ = terminate.recv() => Some(CloneTermination::Terminate),
+                    commit = terminal_commit_receiver => {
+                        if let Ok(acknowledge) = commit {
+                            let _ = acknowledge.send(());
+                        }
+                        None
+                    }
+                };
+                let Some(signal) = signal else {
+                    return;
+                };
+                if sender.send(Some(signal)).is_err() {
+                    info!(
+                        signal = signal.name(),
+                        "clone signal arrived after batch completion"
+                    );
+                }
+            })
+        };
+        #[cfg(not(unix))]
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                result = tokio::signal::ctrl_c() => {
+                    if let Err(error) = result {
+                        warn!(%error, "clone Ctrl-C listener failed");
+                        return;
+                    }
+                    if sender.send(Some(CloneTermination::Interrupt)).is_err() {
+                        info!("clone Ctrl-C arrived after batch completion");
+                    }
+                }
+                commit = terminal_commit_receiver => {
+                    if let Ok(acknowledge) = commit {
+                        let _ = acknowledge.send(());
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            receiver,
+            terminal_commit: Some(terminal_commit),
+            task,
+        })
+    }
+
+    fn receiver(&self) -> tokio::sync::watch::Receiver<Option<CloneTermination>> {
+        self.receiver.clone()
+    }
+
+    /// Linearize terminal success or a kept-fleet handoff against the signal
+    /// listener.
+    ///
+    /// The listener's biased select acknowledges this only after any already
+    /// ready signal. Once acknowledged, later signals are after the custody
+    /// commit rather than silently racing the last pre-commit watch sample.
+    async fn commit_terminal_handoff(&mut self) -> Result<Option<CloneTermination>, RoomsError> {
+        if let Some(signal) = observed_clone_termination(&self.receiver) {
+            return Ok(Some(signal));
+        }
+        let commit = self.terminal_commit.take().ok_or_else(|| {
+            RoomsError::Internal("clone terminal handoff was already committed".to_owned())
+        })?;
+        let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
+        if commit.send(acknowledge).is_err() {
+            tokio::task::yield_now().await;
+            return observed_clone_termination(&self.receiver)
+                .map(Some)
+                .ok_or_else(|| {
+                    RoomsError::Internal(
+                        "clone signal listener exited before terminal handoff".to_owned(),
+                    )
+                });
+        }
+        acknowledged.await.map_err(|_| {
+            RoomsError::Internal(
+                "clone signal listener dropped the terminal-handoff acknowledgement".to_owned(),
+            )
+        })?;
+        Ok(observed_clone_termination(&self.receiver))
+    }
+}
+
+impl Drop for CloneSignalSource {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn observed_clone_termination(
+    receiver: &tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Option<CloneTermination> {
+    *receiver.borrow()
+}
+
+async fn wait_for_clone_termination(
+    receiver: &mut tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> CloneTermination {
+    loop {
+        let observed = *receiver.borrow_and_update();
+        if let Some(signal) = observed {
+            return signal;
+        }
+        if receiver.changed().await.is_err() {
+            return std::future::pending::<CloneTermination>().await;
+        }
+    }
+}
+
+fn validate_json_emitted_path(
+    path: Option<&Path>,
+    json: bool,
+    flag: &str,
+) -> Result<(), RoomsError> {
+    if !json {
+        return Ok(());
+    }
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.to_str().is_some() {
+        return Ok(());
+    }
+    Err(RoomsError::Internal(format!(
+        "{flag} must be valid UTF-8 when --json is set"
+    )))
+}
+
+/// A freshly allocated clone network until restore durably takes custody.
+///
+/// The synchronous drop path is deliberate: allocation precedes the spawned
+/// restore task, so cancellation or a panic must still compare-and-release the
+/// exact room's namespace claim.
+struct AllocatedClone {
+    room_id: String,
+    network: Option<clonenet::CloneNet>,
+    state_base: PathBuf,
+}
+
+impl AllocatedClone {
+    fn network(&self) -> Result<&clonenet::CloneNet, RoomsError> {
+        self.network.as_ref().ok_or_else(|| {
+            RoomsError::Internal("clone network custody was already transferred".to_owned())
+        })
+    }
+
+    fn transfer(&mut self) {
+        self.network = None;
+    }
+}
+
+impl Drop for AllocatedClone {
+    fn drop(&mut self) {
+        let Some(network) = &self.network else {
+            return;
+        };
+        if let Err(error) = clonenet::free(&self.state_base, network.index, &self.room_id) {
+            warn!(
+                room = %self.room_id,
+                clone_net = network.index,
+                %error,
+                "failed to release an untransferred clone network; reconciliation will retry"
+            );
+        }
+    }
+}
+
+/// One fully restored clone held by the batch orchestrator.
+///
+/// `Drop` is the unwind/cancellation backstop. Normal paths call
+/// [`CloneCustody::teardown`] or [`CloneCustody::preserve`]; an unexpected
+/// drop reaps the VM synchronously and completes the durable restore intent.
+struct CloneCustody {
+    restored: Option<rooms::restore_exec::Restored>,
+    out_dir: Option<PathBuf>,
+    config: RoomsConfig,
+}
+
+impl CloneCustody {
+    fn restored(&self) -> Result<&rooms::restore_exec::Restored, RoomsError> {
+        self.restored.as_ref().ok_or_else(|| {
+            RoomsError::Internal("clone restore custody was already consumed".to_owned())
+        })
+    }
+
+    fn restored_mut(&mut self) -> Result<&mut rooms::restore_exec::Restored, RoomsError> {
+        self.restored.as_mut().ok_or_else(|| {
+            RoomsError::Internal("clone restore custody was already consumed".to_owned())
+        })
+    }
+
+    fn record(
+        &self,
+        status: &'static str,
+        exit_code: Option<u8>,
+    ) -> Result<CloneRecord, RoomsError> {
+        CloneRecord::from_ready(self.restored()?, self.out_dir.clone(), status, exit_code)
+    }
+
+    fn identity(&self) -> Result<(u8, String), RoomsError> {
+        let restored = self.restored()?;
+        let index = restored.clone_net.as_ref().ok_or_else(|| {
+            RoomsError::Internal("clone restore returned no clone network".to_owned())
+        })?;
+        Ok((index.index, restored.room_id.clone()))
+    }
+
+    async fn teardown(mut self) -> Result<(), RoomsError> {
+        let restored = self.restored.take().ok_or_else(|| {
+            RoomsError::Internal("clone restore custody was already consumed".to_owned())
+        })?;
+        teardown_restored_clone(restored, &self.config).await
+    }
+
+    fn preserve(mut self) -> Result<(), RoomsError> {
+        let restored = self.restored.take().ok_or_else(|| {
+            RoomsError::Internal("clone restore custody was already consumed".to_owned())
+        })?;
+        let rooms::restore_exec::Restored {
+            mut vm, room_id, ..
+        } = restored;
+        vm.guard_mut().dismiss();
+        std::mem::forget(vm);
+        info!(room = %room_id, "clone preserved; lease and namespace held until teardown");
+        Ok(())
+    }
+}
+
+/// Cancellation-safe terminal half of clone teardown.
+///
+/// This guard is declared before the consuming `BootedVm::shutdown` future,
+/// so cancellation drops that future (and therefore the VM guard) first, then
+/// runs the exact lease/network/intention finish below. Normal completion
+/// disarms it after the same finish succeeds or records a retryable error.
+struct CloneTeardownFinalizer {
+    config: RoomsConfig,
+    room_id: String,
+    snapshot_id: String,
+    slot_index: u8,
+    clone_net_index: Option<u8>,
+    armed: bool,
+}
+
+impl CloneTeardownFinalizer {
+    fn finish(mut self) -> Result<(), RoomsError> {
+        let result = rooms::restore_exec::finish_teardown(
+            &self.config,
+            &self.room_id,
+            &self.snapshot_id,
+            self.slot_index,
+            self.clone_net_index,
+        )
+        .map_err(|error| {
+            RoomsError::Internal(format!(
+                "clone {} teardown incomplete: {error}",
+                self.room_id
+            ))
+        });
+        self.armed = false;
+        result
+    }
+}
+
+impl Drop for CloneTeardownFinalizer {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(error) = rooms::restore_exec::finish_teardown(
+            &self.config,
+            &self.room_id,
+            &self.snapshot_id,
+            self.slot_index,
+            self.clone_net_index,
+        ) {
+            warn!(room = %self.room_id, %error, "cancelled clone teardown left residue; `rooms gc` will retry");
+        }
+    }
+}
+
+impl Drop for CloneCustody {
+    fn drop(&mut self) {
+        let Some(restored) = self.restored.take() else {
+            return;
+        };
+        let rooms::restore_exec::Restored {
+            vm,
+            slot,
+            room_id,
+            snapshot_id,
+            clone_net,
+        } = restored;
+        drop(vm);
+        if let Err(error) = rooms::restore_exec::finish_teardown(
+            &self.config,
+            &room_id,
+            &snapshot_id,
+            slot.index,
+            clone_net.as_ref().map(|net| net.index),
+        ) {
+            warn!(room = %room_id, %error, "clone unwind cleanup incomplete; `rooms gc` will retry");
+        }
+    }
+}
+
+/// Machine-readable identity and terminal state for one member of a clone
+/// batch. Records are sorted by clone-network index before emission.
+#[derive(Clone, Debug, serde::Serialize)]
+struct CloneRecord {
+    room_id: String,
+    snapshot_id: String,
+    slot: u8,
+    guest_ip: String,
+    clone_net_index: u8,
+    namespace: String,
+    host_veth: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    out_dir: Option<PathBuf>,
+}
+
+impl CloneRecord {
+    fn from_ready(
+        restored: &rooms::restore_exec::Restored,
+        out_dir: Option<PathBuf>,
+        status: &'static str,
+        exit_code: Option<u8>,
+    ) -> Result<Self, RoomsError> {
+        let clone_net = restored.clone_net.as_ref().ok_or_else(|| {
+            RoomsError::Internal("clone restore returned no clone network".to_owned())
+        })?;
+        Ok(Self {
+            room_id: restored.room_id.clone(),
+            snapshot_id: restored.snapshot_id.clone(),
+            slot: restored.slot.index,
+            guest_ip: restored.slot.guest.to_string(),
+            clone_net_index: clone_net.index,
+            namespace: clone_net.netns.clone(),
+            host_veth: clone_net.veth_host.clone(),
+            status,
+            exit_code,
+            out_dir,
+        })
+    }
+}
+
+/// A per-member batch failure, keyed independently of task completion order.
+struct CloneFailure {
+    clone_net_index: u8,
+    room_id: String,
+    out_dir: Option<PathBuf>,
+    error: RoomsError,
+}
+
+impl CloneFailure {
+    fn new(clone_net_index: u8, room_id: &str, error: RoomsError) -> Self {
+        Self {
+            clone_net_index,
+            room_id: room_id.to_owned(),
+            out_dir: None,
+            error,
+        }
+    }
+
+    fn with_output(
+        clone_net_index: u8,
+        room_id: &str,
+        out_dir: Option<PathBuf>,
+        error: RoomsError,
+    ) -> Self {
+        Self {
+            clone_net_index,
+            room_id: room_id.to_owned(),
+            out_dir,
+            error,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CloneFailureRecord {
+    clone_net_index: u8,
+    room_id: String,
+    status: &'static str,
+    error_kind: &'static str,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    out_dir: Option<PathBuf>,
+}
+
+impl From<CloneFailure> for CloneFailureRecord {
+    fn from(failure: CloneFailure) -> Self {
+        Self {
+            clone_net_index: failure.clone_net_index,
+            room_id: failure.room_id,
+            status: "failed",
+            error_kind: error_kind(&failure.error),
+            message: failure.error.to_string(),
+            out_dir: failure.out_dir,
+        }
+    }
+}
+
+struct CloneCommandBatchFailure {
+    clones: Vec<CloneRecord>,
+    failures: Vec<CloneFailureRecord>,
+    task_failures: Vec<String>,
+}
+
+impl CloneCommandBatchFailure {
+    fn new(
+        mut clones: Vec<CloneRecord>,
+        mut failures: Vec<CloneFailure>,
+        mut task_failures: Vec<String>,
+    ) -> Self {
+        clones.sort_by_key(|record| record.clone_net_index);
+        failures.sort_by_key(|failure| failure.clone_net_index);
+        task_failures.sort();
+        Self {
+            clones,
+            failures: failures.into_iter().map(CloneFailureRecord::from).collect(),
+            task_failures,
+        }
+    }
+
+    fn summary(&self) -> String {
+        format!(
+            "clone command batch failed for {} member(s) and {} task(s)",
+            self.failures.len(),
+            self.task_failures.len()
+        )
+    }
+
+    fn into_cancellation(self, signal: CloneTermination) -> CloneCancellation {
+        let mut cleanup_failures = self.task_failures;
+        cleanup_failures.extend(self.failures.into_iter().map(|failure| {
+            format!(
+                "net {} room {} did not reach a clean cancellation boundary: {}",
+                failure.clone_net_index, failure.room_id, failure.message
+            )
+        }));
+        cleanup_failures.sort();
+        CloneCancellation::with_clones(signal, self.clones, cleanup_failures)
+    }
+}
+
+struct CloneCancellation {
+    signal: CloneTermination,
+    clones: Vec<CloneRecord>,
+    cleanup_failures: Vec<String>,
+}
+
+impl CloneCancellation {
+    const fn clean(signal: CloneTermination) -> Self {
+        Self {
+            signal,
+            clones: Vec::new(),
+            cleanup_failures: Vec::new(),
+        }
+    }
+
+    fn with_clones(
+        signal: CloneTermination,
+        mut clones: Vec<CloneRecord>,
+        cleanup_failures: Vec<String>,
+    ) -> Self {
+        for clone in &mut clones {
+            if clone.exit_code == Some(signal.exit_code()) {
+                clone.status = "cancelled";
+            }
+        }
+        Self {
+            signal,
+            clones,
+            cleanup_failures,
+        }
+    }
+
+    const fn exit_code(&self) -> u8 {
+        if self.cleanup_failures.is_empty() {
+            return self.signal.exit_code();
+        }
+        2
+    }
+}
+
+enum CloneRunError {
+    Standard(RoomsError),
+    CommandBatch(CloneCommandBatchFailure),
+    Cancelled(CloneCancellation),
+}
+
+impl From<RoomsError> for CloneRunError {
+    fn from(error: RoomsError) -> Self {
+        Self::Standard(error)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CloneCommandFailureEnvelope<'a> {
+    status: &'static str,
+    error_kind: &'static str,
+    clones: &'a [CloneRecord],
+    failures: &'a [CloneFailureRecord],
+    task_failures: &'a [String],
+}
+
+#[derive(serde::Serialize)]
+struct CloneCancellationEnvelope<'a> {
+    status: &'static str,
+    error_kind: &'static str,
+    signal: &'static str,
+    exit_code: u8,
+    cleanup_complete: bool,
+    #[serde(skip_serializing_if = "clone_record_slice_is_empty")]
+    clones: &'a [CloneRecord],
+    #[serde(skip_serializing_if = "string_slice_is_empty")]
+    cleanup_failures: &'a [String],
+}
+
+const fn clone_record_slice_is_empty(values: &[CloneRecord]) -> bool {
+    values.is_empty()
+}
+
+const fn string_slice_is_empty(values: &[String]) -> bool {
+    values.is_empty()
+}
+
+#[derive(serde::Serialize)]
+struct CloneBatchEnvelope<'a> {
+    clones: &'a [CloneRecord],
+}
+
+fn clone_command_failure_json(
+    failure: &CloneCommandBatchFailure,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&CloneCommandFailureEnvelope {
+        status: "failed",
+        error_kind: "clone_batch",
+        clones: &failure.clones,
+        failures: &failure.failures,
+        task_failures: &failure.task_failures,
+    })
+}
+
+fn emit_clone_command_failure(failure: &CloneCommandBatchFailure) -> Result<(), RoomsError> {
+    let line = clone_command_failure_json(failure)
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    #[allow(
+        clippy::print_stdout,
+        reason = "clone --json terminal failure record; stdout is the documented contract"
+    )]
+    {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn emit_clone_cancellation(cancellation: &CloneCancellation) -> Result<(), RoomsError> {
+    let line = serde_json::to_string(&CloneCancellationEnvelope {
+        status: "cancelled",
+        error_kind: "cancelled",
+        signal: cancellation.signal.name(),
+        exit_code: cancellation.exit_code(),
+        cleanup_complete: cancellation.cleanup_failures.is_empty(),
+        clones: &cancellation.clones,
+        cleanup_failures: &cancellation.cleanup_failures,
+    })
+    .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    #[allow(
+        clippy::print_stdout,
+        reason = "clone --json cancellation record; stdout is the documented contract"
+    )]
+    {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn collapse_clone_failures(stage: &str, mut failures: Vec<CloneFailure>) -> Option<RoomsError> {
+    if failures.is_empty() {
+        return None;
+    }
+    failures.sort_by_key(|failure| failure.clone_net_index);
+    let evidence = failures
+        .into_iter()
+        .map(|failure| {
+            format!(
+                "net {} room {}: {}",
+                failure.clone_net_index, failure.room_id, failure.error
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(RoomsError::Internal(format!(
+        "clone {stage} failed: {evidence}"
+    )))
+}
+
+fn clone_join_error_kind(error: &tokio::task::JoinError) -> &'static str {
+    if error.is_panic() {
+        return "panicked";
+    }
+    if error.is_cancelled() {
+        return "was cancelled";
+    }
+    "failed"
 }
 
 /// `rooms restore`: lease the frozen slot, resume the snapshot, gate on the
@@ -1231,10 +2028,12 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     let egress_plan = egress::resolve(&args.egress).map_err(RoomsError::Internal)?;
     warn_egress_without_witness(&egress_plan, args.witness);
     let key = key_path()?;
+    let requested_room_id = firecracker::mint_room_id();
 
     let restored = rooms::restore_exec::restore(
         config,
         rooms::restore_exec::RestoreRequest {
+            room_id: &requested_room_id,
             snapshot_dir: &args.snapshot_dir,
             image: &args.image,
             target_slot: args.slot,
@@ -1245,6 +2044,7 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
             secrets: args.secrets,
             out_dir: args.out_dir.as_deref(),
             ack_timeout: RESTORE_ACK_TIMEOUT,
+            clone_net: None,
         },
     )
     .await
@@ -1255,6 +2055,7 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
         slot,
         room_id,
         snapshot_id,
+        clone_net,
     } = restored;
     let network = network_config_for(&slot);
     emit_restored(&room_id, &snapshot_id, &slot, args.json);
@@ -1275,6 +2076,7 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     let lifecycle = Lifecycle::disabled();
     let env = PostBootEnv {
         network: &network,
+        network_namespace: clone_net.as_ref().map(|net| net.netns.as_str()),
         key: &key,
         config,
         max_wall: args.max_wall,
@@ -1288,7 +2090,7 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     let action = Action::Exec(runner::Runner::Command(command));
     // Secrets arrived through the acked resume nudge, not the vsock one-shot,
     // so the workload gate has no delivery to await here.
-    let outcome = post_boot(&env, &action, &mut vm, None).await;
+    let outcome = post_boot(&env, &action, &mut vm, None, None).await;
     collect_run_artifacts(&env, &action, &slot, args.out_dir.as_deref(), &mut vm).await;
 
     if let Err(e) = vm.shutdown().await {
@@ -1296,9 +2098,831 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     }
     // The reap-clean gate + lease return: any residue keeps the intent
     // tombstone for `rooms gc` and surfaces here as an error.
-    rooms::restore_exec::finish_teardown(config, &room_id, &snapshot_id, slot.index)
-        .map_err(|e| RoomsError::Internal(format!("restore teardown incomplete: {e}")))?;
+    rooms::restore_exec::finish_teardown(
+        config,
+        &room_id,
+        &snapshot_id,
+        slot.index,
+        clone_net.as_ref().map(|net| net.index),
+    )
+    .map_err(|e| RoomsError::Internal(format!("restore teardown incomplete: {e}")))?;
     outcome
+}
+
+/// `rooms clone`: allocate distinct host-network identities, restore the whole
+/// batch concurrently, then either preserve all rooms or execute in parallel.
+async fn clone_rooms(args: CloneArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    let json = args.json;
+    match clone_rooms_inner(args, config).await {
+        Ok(code) => Ok(code),
+        Err(CloneRunError::Standard(error)) => {
+            if json {
+                emit_run_error_json(&error);
+            }
+            Err(error)
+        }
+        Err(CloneRunError::CommandBatch(failure)) => {
+            if json {
+                emit_clone_command_failure(&failure)?;
+            }
+            Err(RoomsError::Internal(failure.summary()))
+        }
+        Err(CloneRunError::Cancelled(cancellation)) => {
+            let code = cancellation.exit_code();
+            if json {
+                emit_clone_cancellation(&cancellation)?;
+            }
+            warn!(
+                signal = cancellation.signal.name(),
+                cleanup_complete = cancellation.cleanup_failures.is_empty(),
+                "clone batch cancelled"
+            );
+            Ok(code)
+        }
+    }
+}
+
+async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, CloneRunError> {
+    info!(
+        snapshot_dir = ?args.snapshot_dir,
+        image = ?args.image,
+        count = args.count,
+        keep = args.command.is_none(),
+        "rooms clone"
+    );
+    validate_json_emitted_path(args.out_dir.as_deref(), args.json, "clone --out")?;
+    let mut cancellation = CloneSignalSource::arm()?;
+    ensure_witness_available(args.witness)?;
+    if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
+        return Err(RoomsError::Internal(remediation).into());
+    }
+    let egress_plan = egress::resolve(&args.egress).map_err(RoomsError::Internal)?;
+    warn_egress_without_witness(&egress_plan, args.witness);
+    let key = key_path()?;
+    let state_base = config.resolved_state_base().ok_or_else(|| {
+        RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
+    })?;
+    let cap = config.effective_max_pool(args.max_pool);
+    validate_clone_capacity(args.count, cap)?;
+    let me = clonenet::Claimer::current().ok_or_else(|| {
+        RoomsError::Internal("cannot read this process's identity for clone claims".to_owned())
+    })?;
+    let (prepared, allocations) =
+        prepare_clone_batch(&args, config, &state_base, cap, me, cancellation.receiver()).await?;
+    let restored = restore_clone_batch(
+        allocations,
+        prepared,
+        &args,
+        &egress_plan,
+        config,
+        cancellation.receiver(),
+    )
+    .await;
+    if let Some(signal) = restored.cancelled {
+        return Err(cancel_clone_custody(restored.ready, signal, restored.failure).await);
+    }
+    if let Some(error) = restored.failure {
+        return Err(cleanup_partial_restore(restored.ready, error).await.into());
+    }
+    let ready = restored.ready;
+    // The barrier applies to BOTH lifecycle modes. A kept batch is not a
+    // success until every namespaced SSH channel is usable; if any member
+    // fails readiness, exact teardown consumes the complete batch below.
+    match wait_clone_batch_ready(&ready, &key, config, cancellation.receiver()).await {
+        Ok(()) => {}
+        Err(CloneStageStop::Failed(error)) => {
+            return Err(cleanup_partial_restore(ready, error).await.into());
+        }
+        Err(CloneStageStop::Cancelled(signal)) => {
+            return Err(cancel_clone_custody(ready, signal, None).await);
+        }
+    }
+    let Some(command) = args.command.clone() else {
+        return finish_kept_clone_batch(ready, &mut cancellation, config, args.json).await;
+    };
+    let command_cancellation = cancellation.receiver();
+    let command_result = run_clone_commands(
+        ready,
+        command,
+        key,
+        args.max_wall,
+        egress_plan,
+        command_cancellation,
+    )
+    .await;
+    if let Some(signal) = cancellation.commit_terminal_handoff().await? {
+        return Err(match command_result {
+            Ok((_, clones)) => {
+                CloneRunError::Cancelled(CloneCancellation::with_clones(signal, clones, Vec::new()))
+            }
+            Err(failure) => CloneRunError::Cancelled(failure.into_cancellation(signal)),
+        });
+    }
+    let (code, records) = command_result.map_err(CloneRunError::CommandBatch)?;
+    emit_clone_records(&records, args.json)?;
+    Ok(code)
+}
+
+async fn finish_kept_clone_batch(
+    ready: Vec<CloneCustody>,
+    cancellation: &mut CloneSignalSource,
+    config: &RoomsConfig,
+    json: bool,
+) -> Result<u8, CloneRunError> {
+    if let Some(signal) = observed_clone_termination(&cancellation.receiver()) {
+        return Err(cancel_clone_custody(ready, signal, None).await);
+    }
+    let mut records = preserve_clone_batch(ready)?;
+    match cancellation.commit_terminal_handoff().await {
+        Ok(Some(signal)) => {
+            return Err(CloneRunError::Cancelled(cancel_preserved_clones(
+                &mut records,
+                config,
+                signal,
+            )));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let cleanup_failures = reap_preserved_clones(&records, config);
+            if cleanup_failures.is_empty() {
+                return Err(error.into());
+            }
+            return Err(RoomsError::Internal(format!(
+                "{error}; kept-fleet rollback incomplete: {}",
+                cleanup_failures.join("; ")
+            ))
+            .into());
+        }
+    }
+    emit_clone_records(&records, json)?;
+    Ok(0)
+}
+
+fn validate_clone_capacity(count: u8, cap: u8) -> Result<(), RoomsError> {
+    if count <= cap {
+        return Ok(());
+    }
+    Err(CloneNetError::PoolFull { cap }.into())
+}
+
+async fn prepare_clone_batch(
+    args: &CloneArgs,
+    config: &RoomsConfig,
+    state_base: &Path,
+    cap: u8,
+    me: clonenet::Claimer,
+    mut cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<
+    (
+        Arc<rooms::restore_exec::PreparedRestoreSource>,
+        Vec<AllocatedClone>,
+    ),
+    CloneRunError,
+> {
+    if let Some(signal) = observed_clone_termination(&cancellation) {
+        return Err(CloneRunError::Cancelled(CloneCancellation::clean(signal)));
+    }
+    // Source hashing/compatibility and host-network construction are both
+    // request-wide blocking work. Own both tasks until they finish so a signal
+    // can never detach a late allocation result containing live guards.
+    let prepare_config = config.clone();
+    let prepare_snapshot = args.snapshot_dir.clone();
+    let prepare_image = args.image.clone();
+    let prepared_task = tokio::task::spawn_blocking(move || {
+        rooms::restore_exec::prepare_restore(&prepare_config, &prepare_snapshot, &prepare_image)
+    });
+    let allocation_state = state_base.to_path_buf();
+    let count = args.count;
+    let allocation_task =
+        tokio::spawn(
+            async move { allocate_clone_networks(&allocation_state, count, cap, me).await },
+        );
+    let setup = async move {
+        let (prepared_join, allocations_join) = tokio::join!(prepared_task, allocation_task);
+        let prepared = prepared_join
+            .map_err(|error| {
+                RoomsError::Internal(format!("clone source preparation task failed: {error}"))
+            })?
+            .map_err(|error| RoomsError::Internal(error.to_string()))?;
+        let allocations = allocations_join.map_err(|error| {
+            RoomsError::Internal(format!("clone allocation coordinator failed: {error}"))
+        })??;
+        Ok::<_, RoomsError>((Arc::new(prepared), allocations))
+    };
+    tokio::pin!(setup);
+    tokio::select! {
+        biased;
+        signal = wait_for_clone_termination(&mut cancellation) => {
+            // Blocking source hashing and host networking are not safely
+            // abortable. Await both owned tasks, then drop any returned guards.
+            let completed = setup.await;
+            drop(completed);
+            Err(CloneRunError::Cancelled(CloneCancellation::clean(signal)))
+        }
+        result = &mut setup => result.map_err(CloneRunError::from),
+    }
+}
+
+async fn allocate_clone_networks(
+    state_base: &Path,
+    count: u8,
+    cap: u8,
+    me: clonenet::Claimer,
+) -> Result<Vec<AllocatedClone>, RoomsError> {
+    let owner_ids = (0..count)
+        .map(|_| firecracker::mint_room_id())
+        .collect::<Vec<_>>();
+    let task_state = state_base.to_path_buf();
+    let batch = tokio::task::spawn_blocking(move || {
+        clonenet::allocate_batch(&task_state, &owner_ids, me, cap).map(|batch| {
+            batch
+                .into_iter()
+                .map(|allocation| AllocatedClone {
+                    room_id: allocation.owner_id,
+                    network: Some(allocation.network),
+                    state_base: task_state.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+    })
+    .await
+    .map_err(|error| {
+        RoomsError::Internal(format!("clone network allocation task failed: {error}"))
+    })?
+    .map_err(|error| {
+        error.pool_full_cap().map_or_else(
+            || RoomsError::Internal(error.to_string()),
+            |cap| RoomsError::CloneNet(CloneNetError::PoolFull { cap }),
+        )
+    })?;
+
+    Ok(batch)
+}
+
+struct CloneRestoreBatch {
+    ready: Vec<CloneCustody>,
+    failure: Option<RoomsError>,
+    cancelled: Option<CloneTermination>,
+}
+
+enum CloneStageStop {
+    Failed(RoomsError),
+    Cancelled(CloneTermination),
+}
+
+impl From<RoomsError> for CloneStageStop {
+    fn from(error: RoomsError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+async fn restore_clone_batch(
+    allocations: Vec<AllocatedClone>,
+    prepared: Arc<rooms::restore_exec::PreparedRestoreSource>,
+    args: &CloneArgs,
+    egress_plan: &egress::Plan,
+    config: &RoomsConfig,
+    cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> CloneRestoreBatch {
+    if let Some(signal) = observed_clone_termination(&cancellation) {
+        drop(allocations);
+        return CloneRestoreBatch {
+            ready: Vec::new(),
+            failure: None,
+            cancelled: Some(signal),
+        };
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut task_identities = HashMap::new();
+    for mut allocation in allocations {
+        let task_config = config.clone();
+        let snapshot_dir = args.snapshot_dir.clone();
+        let image = args.image.clone();
+        let command = args.command.clone();
+        let witness = args.witness;
+        let plan = egress_plan.clone();
+        let secrets = args
+            .secrets
+            .as_ref()
+            .map(vsock::SecretsPayload::clone_bytes);
+        let out_dir = clone_output_dir(args.out_dir.as_deref(), &allocation.room_id);
+        let task_prepared = Arc::clone(&prepared);
+        let task_identity = (
+            allocation
+                .network
+                .as_ref()
+                .map_or(u8::MAX, |network| network.index),
+            allocation.room_id.clone(),
+        );
+        let handle = tasks.spawn(async move {
+            let network = allocation
+                .network()
+                .map_err(|error| CloneFailure::new(0, &allocation.room_id, error))?
+                .clone();
+            let clone_net_index = network.index;
+            let restored = rooms::restore_exec::restore_prepared(
+                &task_config,
+                rooms::restore_exec::RestoreRequest {
+                    room_id: &allocation.room_id,
+                    snapshot_dir: &snapshot_dir,
+                    image: &image,
+                    target_slot: None,
+                    label: command.clone().or_else(|| Some("clone".to_owned())),
+                    keep: command.is_none(),
+                    witness,
+                    egress: &plan,
+                    secrets,
+                    out_dir: out_dir.as_deref(),
+                    ack_timeout: RESTORE_ACK_TIMEOUT,
+                    clone_net: Some(network),
+                },
+                &task_prepared,
+            )
+            .await
+            .map_err(|error| {
+                CloneFailure::new(
+                    clone_net_index,
+                    &allocation.room_id,
+                    RoomsError::Internal(error.to_string()),
+                )
+            })?;
+            allocation.transfer();
+            Ok::<CloneCustody, CloneFailure>(CloneCustody {
+                restored: Some(restored),
+                out_dir,
+                config: task_config,
+            })
+        });
+        task_identities.insert(handle.id(), task_identity);
+    }
+    collect_clone_restores(tasks, task_identities, cancellation).await
+}
+
+async fn collect_clone_restores(
+    mut tasks: tokio::task::JoinSet<Result<CloneCustody, CloneFailure>>,
+    mut task_identities: HashMap<tokio::task::Id, (u8, String)>,
+    mut cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> CloneRestoreBatch {
+    let mut ready = Vec::new();
+    let mut failures = Vec::new();
+    let mut cancelled = None;
+    while !tasks.is_empty() {
+        let joined = if cancelled.is_some() {
+            tasks.join_next_with_id().await
+        } else {
+            tokio::select! {
+                biased;
+                signal = wait_for_clone_termination(&mut cancellation) => {
+                    cancelled = Some(signal);
+                    // A restore future owns durable intent/lease custody. Do
+                    // not abort it: await every worker to either return a
+                    // Restored guard or run restore_prepared's normal abort
+                    // path, then tear down all returned guards below.
+                    continue;
+                }
+                result = tasks.join_next_with_id() => result,
+            }
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        match joined {
+            Ok((id, Ok(custody))) => {
+                task_identities.remove(&id);
+                ready.push(custody);
+            }
+            Ok((id, Err(failure))) => {
+                task_identities.remove(&id);
+                failures.push(failure);
+            }
+            Err(error) => {
+                let identity = task_identities
+                    .remove(&error.id())
+                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
+                if cancelled.is_some() && error.is_cancelled() {
+                    continue;
+                }
+                failures.push(CloneFailure::new(
+                    identity.0,
+                    &identity.1,
+                    RoomsError::Internal(format!(
+                        "restore worker {}",
+                        clone_join_error_kind(&error)
+                    )),
+                ));
+            }
+        }
+    }
+    ready.sort_by_key(|custody| custody.identity().map_or(u8::MAX, |identity| identity.0));
+    let failure = collapse_clone_failures("restore", failures);
+    CloneRestoreBatch {
+        ready,
+        failure,
+        cancelled,
+    }
+}
+
+async fn teardown_clone_custody(mut ready: Vec<CloneCustody>) -> Vec<String> {
+    ready.sort_by_key(|custody| custody.identity().map_or(u8::MAX, |identity| identity.0));
+    let mut cleanup_errors = Vec::new();
+    for custody in ready {
+        let identity = custody
+            .identity()
+            .unwrap_or_else(|_| (u8::MAX, "unknown".to_owned()));
+        if let Err(error) = custody.teardown().await {
+            cleanup_errors.push(format!("net {} room {}: {error}", identity.0, identity.1));
+        }
+    }
+    cleanup_errors
+}
+
+async fn cleanup_partial_restore(ready: Vec<CloneCustody>, original: RoomsError) -> RoomsError {
+    let cleanup_errors = teardown_clone_custody(ready).await;
+    if cleanup_errors.is_empty() {
+        return original;
+    }
+    RoomsError::Internal(format!(
+        "{original}; partial clone cleanup incomplete: {}",
+        cleanup_errors.join("; ")
+    ))
+}
+
+async fn cancel_clone_custody(
+    ready: Vec<CloneCustody>,
+    signal: CloneTermination,
+    prior_failure: Option<RoomsError>,
+) -> CloneRunError {
+    let mut cleanup_failures = teardown_clone_custody(ready).await;
+    if let Some(error) = prior_failure {
+        cleanup_failures.push(format!(
+            "restore worker failed while cancellation was draining: {error}"
+        ));
+    }
+    CloneRunError::Cancelled(CloneCancellation {
+        signal,
+        clones: Vec::new(),
+        cleanup_failures,
+    })
+}
+
+fn clone_output_dir(root: Option<&Path>, room_id: &str) -> Option<PathBuf> {
+    root.map(|dir| dir.join(room_id))
+}
+
+fn preserve_clone_batch(ready: Vec<CloneCustody>) -> Result<Vec<CloneRecord>, RoomsError> {
+    let mut records = ready
+        .iter()
+        .map(|custody| custody.record("kept", None))
+        .collect::<Result<Vec<_>, _>>()?;
+    for custody in ready {
+        custody.preserve()?;
+    }
+    records.sort_by_key(|record| record.clone_net_index);
+    Ok(records)
+}
+
+fn reap_preserved_clones(records: &[CloneRecord], config: &RoomsConfig) -> Vec<String> {
+    let mut failures = Vec::new();
+    for record in records {
+        match registry::kill(config, &record.room_id) {
+            Ok(report) if report.outcomes.is_empty() => {}
+            Ok(report) => {
+                for outcome in report.outcomes {
+                    if outcome.disposition == registry::KillDisposition::Killed {
+                        continue;
+                    }
+                    failures.push(format!(
+                        "net {} room {} rollback was {}: {}",
+                        record.clone_net_index,
+                        record.room_id,
+                        outcome.disposition.exit_code(),
+                        outcome.reason
+                    ));
+                }
+            }
+            Err(error) => failures.push(format!(
+                "net {} room {} rollback failed: {error}",
+                record.clone_net_index, record.room_id
+            )),
+        }
+    }
+    failures.sort();
+    failures
+}
+
+fn cancel_preserved_clones(
+    records: &mut [CloneRecord],
+    config: &RoomsConfig,
+    signal: CloneTermination,
+) -> CloneCancellation {
+    let cleanup_failures = reap_preserved_clones(records, config);
+    for record in &mut *records {
+        record.status = "cancelled";
+        record.exit_code = Some(signal.exit_code());
+    }
+    CloneCancellation::with_clones(signal, records.to_vec(), cleanup_failures)
+}
+
+async fn wait_clone_batch_ready(
+    ready: &[CloneCustody],
+    key: &Path,
+    config: &RoomsConfig,
+    mut cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<(), CloneStageStop> {
+    if let Some(signal) = observed_clone_termination(&cancellation) {
+        return Err(CloneStageStop::Cancelled(signal));
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut task_identities = HashMap::new();
+    for custody in ready {
+        let restored = custody.restored()?;
+        let room_id = restored.room_id.clone();
+        let guest_ip = restored.slot.guest.to_string();
+        let clone_net = restored.clone_net.as_ref().ok_or_else(|| {
+            RoomsError::Internal("clone restore returned no clone network".to_owned())
+        })?;
+        let clone_net_index = clone_net.index;
+        let namespace = clone_net.netns.clone();
+        let task_key = key.to_path_buf();
+        let mut task_config = config.clone();
+        task_config.guest_reach_poll_interval = CLONE_SSH_POLL_INTERVAL;
+        let task_identity = (clone_net_index, room_id.clone());
+        let handle = tasks.spawn(async move {
+            runner::wait_for_ssh(
+                runner::GuestTarget::new(&guest_ip, Some(&namespace)),
+                &task_key,
+                &task_config,
+            )
+            .await
+            .map_err(|error| {
+                CloneFailure::new(clone_net_index, &room_id, RoomsError::Firecracker(error))
+            })
+        });
+        task_identities.insert(handle.id(), task_identity);
+    }
+    let mut failures = Vec::new();
+    let mut cancelled = None;
+    while !tasks.is_empty() {
+        let joined = if cancelled.is_some() {
+            tasks.join_next_with_id().await
+        } else {
+            tokio::select! {
+                biased;
+                signal = wait_for_clone_termination(&mut cancellation) => {
+                    cancelled = Some(signal);
+                    tasks.abort_all();
+                    continue;
+                }
+                result = tasks.join_next_with_id() => result,
+            }
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        match joined {
+            Ok((id, Ok(()))) => {
+                task_identities.remove(&id);
+            }
+            Ok((id, Err(failure))) => {
+                task_identities.remove(&id);
+                failures.push(failure);
+            }
+            Err(error) => {
+                let identity = task_identities
+                    .remove(&error.id())
+                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
+                if cancelled.is_some() && error.is_cancelled() {
+                    continue;
+                }
+                failures.push(CloneFailure::new(
+                    identity.0,
+                    &identity.1,
+                    RoomsError::Internal(format!(
+                        "readiness worker {}",
+                        clone_join_error_kind(&error)
+                    )),
+                ));
+            }
+        }
+    }
+    if let Some(signal) = cancelled {
+        return Err(CloneStageStop::Cancelled(signal));
+    }
+    let error = collapse_clone_failures("readiness", failures);
+    error.map_or(Ok(()), |error| Err(CloneStageStop::Failed(error)))
+}
+
+struct CloneCommandOutcome {
+    record: CloneRecord,
+    exit_code: u8,
+}
+
+async fn run_clone_commands(
+    ready: Vec<CloneCustody>,
+    command: String,
+    key: PathBuf,
+    max_wall: Option<Duration>,
+    egress_plan: egress::Plan,
+    cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<(u8, Vec<CloneRecord>), CloneCommandBatchFailure> {
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut task_identities = HashMap::new();
+    for custody in ready {
+        let task_identity = custody
+            .identity()
+            .unwrap_or_else(|_| (u8::MAX, "unknown".to_owned()));
+        let handle = tasks.spawn(execute_clone_command(
+            custody,
+            command.clone(),
+            key.clone(),
+            max_wall,
+            egress_plan.clone(),
+            cancellation.clone(),
+        ));
+        task_identities.insert(handle.id(), task_identity);
+    }
+    let mut outcomes = Vec::new();
+    let mut failures = Vec::new();
+    let mut join_failures = Vec::new();
+    while let Some(joined) = tasks.join_next_with_id().await {
+        match joined {
+            Ok((id, Ok(outcome))) => {
+                task_identities.remove(&id);
+                outcomes.push(outcome);
+            }
+            Ok((id, Err(failure))) => {
+                task_identities.remove(&id);
+                failures.push(failure);
+            }
+            Err(error) => {
+                let identity = task_identities
+                    .remove(&error.id())
+                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
+                join_failures.push(format!(
+                    "net {} room {}: command worker {}",
+                    identity.0,
+                    identity.1,
+                    clone_join_error_kind(&error)
+                ));
+            }
+        }
+    }
+    outcomes.sort_by_key(|outcome| outcome.record.clone_net_index);
+    let code = outcomes
+        .iter()
+        .find(|outcome| outcome.exit_code != 0)
+        .map_or(0, |outcome| outcome.exit_code);
+    let records = outcomes.into_iter().map(|outcome| outcome.record).collect();
+    if !failures.is_empty() || !join_failures.is_empty() {
+        return Err(CloneCommandBatchFailure::new(
+            records,
+            failures,
+            join_failures,
+        ));
+    }
+    Ok((code, records))
+}
+
+async fn execute_clone_command(
+    custody: CloneCustody,
+    command: String,
+    key: PathBuf,
+    max_wall: Option<Duration>,
+    egress_plan: egress::Plan,
+    cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<CloneCommandOutcome, CloneFailure> {
+    let out_dir = custody.out_dir.clone();
+    let restored = custody
+        .restored()
+        .map_err(|error| CloneFailure::with_output(0, "unknown", out_dir.clone(), error))?;
+    let room_id = restored.room_id.clone();
+    let clone_net_index = restored.clone_net.as_ref().map_or(0, |net| net.index);
+    execute_clone_command_inner(custody, command, key, max_wall, egress_plan, cancellation)
+        .await
+        .map_err(|error| CloneFailure::with_output(clone_net_index, &room_id, out_dir, error))
+}
+
+async fn execute_clone_command_inner(
+    mut custody: CloneCustody,
+    command: String,
+    key: PathBuf,
+    max_wall: Option<Duration>,
+    egress_plan: egress::Plan,
+    cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<CloneCommandOutcome, RoomsError> {
+    let cancellation_observer = cancellation.clone();
+    let config = custody.config.clone();
+    let out_dir = custody.out_dir.clone();
+    let lifecycle = Lifecycle::disabled();
+    let action = Action::Exec(runner::Runner::Command(command));
+    let outcome = {
+        let restored = custody.restored_mut()?;
+        let network = network_config_for(&restored.slot);
+        let env = PostBootEnv {
+            network: &network,
+            network_namespace: restored.clone_net.as_ref().map(|net| net.netns.as_str()),
+            key: &key,
+            config: &config,
+            max_wall,
+            lifecycle: &lifecycle,
+            egress: &egress_plan,
+        };
+        let outcome = post_boot(&env, &action, &mut restored.vm, None, Some(cancellation)).await;
+        collect_run_artifacts(
+            &env,
+            &action,
+            &restored.slot,
+            out_dir.as_deref(),
+            &mut restored.vm,
+        )
+        .await;
+        outcome
+    };
+    let record = match &outcome {
+        Ok(code) => {
+            let status = if observed_clone_termination(&cancellation_observer).is_some() {
+                "cancelled"
+            } else {
+                "exited"
+            };
+            Some(custody.record(status, Some(*code))?)
+        }
+        Err(_) => None,
+    };
+    let teardown = custody.teardown().await;
+    teardown?;
+    let exit_code = outcome?;
+    let record = record.ok_or_else(|| {
+        RoomsError::Internal("clone command completed without a result record".to_owned())
+    })?;
+    Ok(CloneCommandOutcome { record, exit_code })
+}
+
+async fn teardown_restored_clone(
+    restored: rooms::restore_exec::Restored,
+    config: &RoomsConfig,
+) -> Result<(), RoomsError> {
+    let rooms::restore_exec::Restored {
+        vm,
+        slot,
+        room_id,
+        snapshot_id,
+        clone_net,
+    } = restored;
+    let finalizer = CloneTeardownFinalizer {
+        config: config.clone(),
+        room_id: room_id.clone(),
+        snapshot_id,
+        slot_index: slot.index,
+        clone_net_index: clone_net.as_ref().map(|net| net.index),
+        armed: true,
+    };
+    let shutdown = vm.shutdown();
+    if let Err(error) = shutdown.await {
+        warn!(room = %room_id, %error, "clone shutdown reported an error");
+    }
+    finalizer.finish()
+}
+
+fn clone_records_json(records: &[CloneRecord]) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&CloneBatchEnvelope { clones: records })
+}
+
+fn emit_clone_records(records: &[CloneRecord], json: bool) -> Result<(), RoomsError> {
+    if json {
+        let line =
+            clone_records_json(records).map_err(|error| RoomsError::Internal(error.to_string()))?;
+        #[allow(
+            clippy::print_stdout,
+            reason = "clone --json batch record; stdout is the documented contract"
+        )]
+        {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    for record in records {
+        #[allow(
+            clippy::print_stdout,
+            reason = "clone human summary; stdout is the documented contract"
+        )]
+        {
+            println!(
+                "clone: room {} from {} in {} (guest {}, net {}, host {}) {}{}",
+                record.room_id,
+                record.snapshot_id,
+                record.namespace,
+                record.guest_ip,
+                record.clone_net_index,
+                record.host_veth,
+                record.status,
+                record
+                    .exit_code
+                    .map_or_else(String::new, |code| format!(" {code}"))
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Report a restored room — a human line, or a `--json` record.
@@ -1470,14 +3094,7 @@ async fn collect_run_artifacts(
     vm: &mut firecracker::BootedVm,
 ) {
     if let Some(out_dir) = out_dir {
-        collect_and_record(
-            &env.network.guest_ip,
-            env.key,
-            action,
-            out_dir,
-            env.lifecycle,
-        )
-        .await;
+        collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await;
     }
     let witnessed = match vm.take_witness() {
         Some(capture) => Some(summarize_witness(capture, slot, env).await),
@@ -1598,7 +3215,7 @@ async fn write_out_atomic(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Resu
 /// and a wall cap fires precisely when the guest may be unresponsive, so an
 /// unbounded collect could hang teardown.
 async fn collect_and_record(
-    guest_ip: &str,
+    target: runner::GuestTarget<'_>,
     key: &Path,
     action: &Action,
     out_dir: &Path,
@@ -1610,7 +3227,7 @@ async fn collect_and_record(
         return;
     }
     lifecycle.emit(&Event::CollectionStarted);
-    let collect = collect_to_host(guest_ip, key, out_dir);
+    let collect = collect_to_host(target, key, out_dir);
     match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
         Ok(Ok(())) => lifecycle.emit(&Event::CollectionDone),
         Ok(Err(error)) => lifecycle.emit(&Event::CollectionFailed { error }),
@@ -1627,9 +3244,13 @@ async fn collect_and_record(
 /// collect is the primary artifact — its failure is the returned error; the
 /// change set stays best-effort (an absent overlay is normal on a
 /// writable-rootfs run and never affects the result).
-async fn collect_to_host(guest_ip: &str, key: &Path, out_dir: &Path) -> Result<(), String> {
-    let primary = runner::collect_out_to_host(guest_ip, key, out_dir).await;
-    match runner::collect_changeset_to_host(guest_ip, key, out_dir).await {
+async fn collect_to_host(
+    target: runner::GuestTarget<'_>,
+    key: &Path,
+    out_dir: &Path,
+) -> Result<(), String> {
+    let primary = runner::collect_out_to_host(target, key, out_dir).await;
+    match runner::collect_changeset_to_host(target, key, out_dir).await {
         Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
         Err(e) => warn!(error = %e, "collect overlay changeset failed"),
     }
@@ -1697,6 +3318,7 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
 /// bundled to stay under the argument-count cap.
 struct PostBootEnv<'a> {
     network: &'a firecracker::NetworkConfig,
+    network_namespace: Option<&'a str>,
     key: &'a Path,
     config: &'a RoomsConfig,
     max_wall: Option<Duration>,
@@ -1704,11 +3326,18 @@ struct PostBootEnv<'a> {
     egress: &'a egress::Plan,
 }
 
+impl PostBootEnv<'_> {
+    fn guest_target(&self) -> runner::GuestTarget<'_> {
+        runner::GuestTarget::new(&self.network.guest_ip, self.network_namespace)
+    }
+}
+
 async fn post_boot(
     env: &PostBootEnv<'_>,
     action: &Action,
     vm: &mut firecracker::BootedVm,
     secrets: Option<vsock::Delivery>,
+    clone_cancellation: Option<tokio::sync::watch::Receiver<Option<CloneTermination>>>,
 ) -> Result<u8, RoomsError> {
     match action {
         Action::Keep => {
@@ -1726,7 +3355,7 @@ async fn post_boot(
             drop(secrets);
             Ok(0)
         }
-        Action::Exec(run) => exec_workload(env, run, secrets).await,
+        Action::Exec(run) => exec_workload(env, run, secrets, clone_cancellation).await,
         Action::Idle => idle_linger(env, vm).await,
     }
 }
@@ -1772,13 +3401,13 @@ async fn idle_linger(
 /// Ctrl-C, never a fixed auto-shutdown timer — is unit-testable without SSH,
 /// KVM, or an OS signal. `Completed` carries the workload's own `Result` so a
 /// real exec error keeps its message; the abort arms carry no result — their
-/// exit code (130 / 124) is decided by the arm, not the workload.
+/// exit code (130 / 143 / 124) is decided by the arm, not the workload.
 #[derive(Debug)]
 enum ExecRace {
     /// The workload ran to completion; carries its own result.
     Completed(Result<u8, RoomsError>),
-    /// Ctrl-C fired first (exit 130).
-    Cancelled,
+    /// A termination signal fired first; carries its shell-compatible code.
+    Cancelled(u8),
     /// The `--max-wall` cap fired first (exit 124).
     TimedOut,
 }
@@ -1799,6 +3428,17 @@ async fn race_workload<W>(work: W, max_wall: Option<Duration>) -> ExecRace
 where
     W: std::future::Future<Output = Result<u8, RoomsError>>,
 {
+    race_workload_with_clone_cancellation(work, max_wall, None).await
+}
+
+async fn race_workload_with_clone_cancellation<W>(
+    work: W,
+    max_wall: Option<Duration>,
+    clone_cancellation: Option<tokio::sync::watch::Receiver<Option<CloneTermination>>>,
+) -> ExecRace
+where
+    W: std::future::Future<Output = Result<u8, RoomsError>>,
+{
     tokio::pin!(work);
     // Fires at the wall-clock cap, or never when there's no cap.
     let cap = async {
@@ -1808,10 +3448,18 @@ where
         }
     };
     tokio::pin!(cap);
+    let clone_signal = async move {
+        let Some(mut receiver) = clone_cancellation else {
+            return std::future::pending::<CloneTermination>().await;
+        };
+        wait_for_clone_termination(&mut receiver).await
+    };
+    tokio::pin!(clone_signal);
     tokio::select! {
         biased;
         res = &mut work => ExecRace::Completed(res),
-        _ = tokio::signal::ctrl_c() => ExecRace::Cancelled,
+        _ = tokio::signal::ctrl_c() => ExecRace::Cancelled(130),
+        signal = &mut clone_signal => ExecRace::Cancelled(signal.exit_code()),
         () = &mut cap => ExecRace::TimedOut,
     }
 }
@@ -1823,8 +3471,8 @@ async fn exec_workload(
     env: &PostBootEnv<'_>,
     run: &runner::Runner,
     secrets: Option<vsock::Delivery>,
+    clone_cancellation: Option<tokio::sync::watch::Receiver<Option<CloneTermination>>>,
 ) -> Result<u8, RoomsError> {
-    let guest_ip = env.network.guest_ip.clone();
     let lifecycle = env.lifecycle;
     // started_at captures when rooms began attempting exec (SSH probe,
     // then runner). Exec writes its own started_at into result.json on
@@ -1837,27 +3485,35 @@ async fn exec_workload(
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
     let work = run_workload(env, run, secrets, started_at);
-    match race_workload(work, env.max_wall).await {
+    let raced = match clone_cancellation {
+        Some(cancellation) => {
+            race_workload_with_clone_cancellation(work, env.max_wall, Some(cancellation)).await
+        }
+        None => race_workload(work, env.max_wall).await,
+    };
+    match raced {
         ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
         // records it BEFORE the best-effort guest write below, which can stall
         // up to its grace bound on the very guest that just went unresponsive.
-        ExecRace::Cancelled => {
-            info!("ctrl-c received during exec setup or run; aborting and shutting down");
+        ExecRace::Cancelled(exit_code) => {
+            info!(
+                "termination signal received during exec setup or run; aborting and shutting down"
+            );
             lifecycle.emit(&Event::WorkloadExited {
-                exit_code: 130,
+                exit_code: i32::from(exit_code),
                 status: WorkloadStatus::Cancelled,
             });
             record_aborted_run(
-                &guest_ip,
+                env.guest_target(),
                 env.key,
-                130,
+                i32::from(exit_code),
                 RunStatus::Cancelled,
                 started_at,
                 run.command_argv(),
             )
             .await;
-            Ok(130)
+            Ok(exit_code)
         }
         ExecRace::TimedOut => {
             warn!(max_wall = ?env.max_wall, "max wall-clock cap reached during exec; aborting and shutting down");
@@ -1866,7 +3522,7 @@ async fn exec_workload(
                 status: WorkloadStatus::TimedOut,
             });
             record_aborted_run(
-                &guest_ip,
+                env.guest_target(),
                 env.key,
                 124,
                 RunStatus::TimedOut,
@@ -1898,7 +3554,7 @@ async fn run_workload(
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
     });
-    let outcome = match runner::exec(&env.network.guest_ip, env.key, run).await {
+    let outcome = match runner::exec(env.guest_target(), env.key, run).await {
         Ok(outcome) => outcome,
         Err(e) => {
             lifecycle.emit(&Event::WorkloadFailed {
@@ -1928,7 +3584,7 @@ async fn run_workload(
 async fn wait_for_channel(env: &PostBootEnv<'_>) -> Result<(), RoomsError> {
     let lifecycle = env.lifecycle;
     let waited = runner::wait_for_ssh_observed(
-        &env.network.guest_ip,
+        env.guest_target(),
         env.key,
         env.config,
         lifecycle.is_enabled(),
@@ -1973,7 +3629,7 @@ async fn gate_on_secrets(
                 error: error.clone(),
             });
             record_aborted_run(
-                &env.network.guest_ip,
+                env.guest_target(),
                 env.key,
                 1,
                 RunStatus::Failed,
@@ -2025,7 +3681,7 @@ const PRE_TEARDOWN_GRACE: Duration = Duration::from_secs(15);
 /// guest can't block the caller's teardown; failures and the grace expiry are
 /// logged, never fatal.
 async fn record_aborted_run(
-    guest_ip: &str,
+    target: runner::GuestTarget<'_>,
     key: &Path,
     exit_code: i32,
     status: RunStatus,
@@ -2033,11 +3689,11 @@ async fn record_aborted_run(
     command_argv: Vec<String>,
 ) {
     let write = async move {
-        if let Err(err) = runner::ensure_guest_artifact_skeleton(guest_ip, key).await {
+        if let Err(err) = runner::ensure_guest_artifact_skeleton(target, key).await {
             warn!(error = %err, "failed to create aborted-run artifact skeleton");
         }
         let result = ResultJson::from_exec(exit_code, status, started_at, Utc::now(), command_argv);
-        if let Err(err) = runner::write_guest_result_json(guest_ip, key, &result).await {
+        if let Err(err) = runner::write_guest_result_json(target, key, &result).await {
             warn!(error = %err, "failed to write aborted-run result.json");
         }
     };
@@ -2398,10 +4054,17 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+
     use super::{
-        changeset_exit_code, diff_changeset, exit_code_for_error, harvest_secrets, humanize_secs,
-        parse_max_pool, parse_max_wall, race_workload, resolve_action, run_error_record,
-        truncate_label, valid_secret_name, Cli, Command, ExecRace, RoomsError, RunArgs, RunnerKind,
+        changeset_exit_code, clone_command_failure_json, clone_output_dir, clone_records_json,
+        collapse_clone_failures, diff_changeset, exit_code_for_error, harvest_secrets,
+        humanize_secs, parse_clone_count, parse_max_pool, parse_max_wall, race_workload,
+        race_workload_with_clone_cancellation, resolve_action, run_error_record, truncate_label,
+        valid_secret_name, validate_clone_capacity, validate_json_emitted_path, Cli,
+        CloneCancellation, CloneCommandBatchFailure, CloneFailure, CloneNetError, CloneRecord,
+        CloneSignalSource, CloneTermination, Command, ExecRace, RoomsError, RunArgs, RunnerKind,
         SlotError, BARE_BOOT_LINGER,
     };
     use crate::artifacts::Changeset;
@@ -2485,7 +4148,7 @@ mod tests {
                 7,
                 "a guest ready after the bare-boot window must still run its command"
             ),
-            ExecRace::Cancelled => panic!("nothing sent Ctrl-C; the race must not cancel"),
+            ExecRace::Cancelled(_) => panic!("nothing sent Ctrl-C; the race must not cancel"),
             ExecRace::TimedOut => {
                 panic!("no --max-wall was set; a fixed timer must not cut the exec")
             }
@@ -2686,6 +4349,280 @@ mod tests {
     }
 
     #[test]
+    fn clone_count_accepts_one_through_eight_only() {
+        assert_eq!(parse_clone_count("1"), Ok(1));
+        assert_eq!(parse_clone_count("8"), Ok(8));
+        for bad in ["0", "9", "abc", ""] {
+            assert!(
+                parse_clone_count(bad).is_err(),
+                "clone count {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn clone_defaults_to_keep_and_parses_the_required_surface() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "clone",
+            "/snap",
+            "--image",
+            "/image",
+            "-n",
+            "8",
+            "--egress",
+            "none",
+            "--max-pool",
+            "8",
+            "--json",
+        ])
+        .expect("clone keep batch parses");
+        match cli.command {
+            Command::Clone {
+                snapshot_dir,
+                image,
+                count,
+                command,
+                max_pool,
+                json,
+                ..
+            } => {
+                assert_eq!(snapshot_dir, PathBuf::from("/snap"));
+                assert_eq!(image, PathBuf::from("/image"));
+                assert_eq!(count, 8);
+                assert!(command.is_none(), "no command is the keep lifecycle");
+                assert_eq!(max_pool, Some(8));
+                assert!(json);
+            }
+            other => panic!("expected Clone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_command_accepts_collection_witness_and_wall_cap() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "clone",
+            "/snap",
+            "--image",
+            "/image",
+            "-n",
+            "4",
+            "--command",
+            "hostname",
+            "--out",
+            "/out",
+            "--witness",
+            "--max-wall",
+            "30s",
+        ])
+        .expect("clone command batch parses");
+        match cli.command {
+            Command::Clone {
+                count,
+                command,
+                out_dir,
+                witness,
+                max_wall,
+                ..
+            } => {
+                assert_eq!(count, 4);
+                assert_eq!(command.as_deref(), Some("hostname"));
+                assert_eq!(out_dir, Some(PathBuf::from("/out")));
+                assert!(witness);
+                assert_eq!(max_wall, Some(Duration::from_secs(30)));
+            }
+            other => panic!("expected Clone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_collection_options_require_command_mode() {
+        for flag in ["--out", "--max-wall"] {
+            let value = if flag == "--out" { "/out" } else { "30s" };
+            let parsed = Cli::try_parse_from([
+                "rooms", "clone", "/snap", "--image", "/image", "-n", "2", flag, value,
+            ]);
+            assert!(parsed.is_err(), "{flag} without --command must fail");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "rooms",
+                "clone",
+                "/snap",
+                "--image",
+                "/image",
+                "-n",
+                "2",
+                "--witness"
+            ])
+            .is_err(),
+            "--witness without --out must fail"
+        );
+    }
+
+    #[test]
+    fn clone_capacity_is_refused_before_partial_allocation() {
+        assert!(validate_clone_capacity(4, 4).is_ok());
+        match validate_clone_capacity(5, 4) {
+            Err(RoomsError::CloneNet(CloneNetError::PoolFull { cap })) => assert_eq!(cap, 4),
+            other => panic!("expected clone-network PoolFull, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_outputs_are_partitioned_by_room_identity() {
+        let root = Path::new("/out");
+        assert_eq!(
+            clone_output_dir(Some(root), "room-a"),
+            Some(PathBuf::from("/out/room-a"))
+        );
+        assert_eq!(clone_output_dir(None, "room-a"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_emitted_output_path_must_be_utf8_before_effects() {
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'o', 0xff]));
+        let error = validate_json_emitted_path(Some(&invalid), true, "clone --out")
+            .expect_err("non-UTF-8 JSON output path must fail admission");
+        assert!(
+            error
+                .to_string()
+                .contains("clone --out must be valid UTF-8"),
+            "error should identify the preflight boundary: {error}"
+        );
+        assert!(
+            validate_json_emitted_path(Some(&invalid), false, "clone --out").is_ok(),
+            "a human-only filesystem path is not a JSON value"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clone_batch_json_propagates_non_utf8_instead_of_panicking() {
+        let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'o', 0xff]));
+        let record = CloneRecord {
+            room_id: "room-one".to_owned(),
+            snapshot_id: "snapshot".to_owned(),
+            slot: 4,
+            guest_ip: "172.16.0.18".to_owned(),
+            clone_net_index: 1,
+            namespace: "rooms-c1".to_owned(),
+            host_veth: "veth-h1".to_owned(),
+            status: "exited",
+            exit_code: Some(0),
+            out_dir: Some(invalid),
+        };
+        assert!(
+            clone_records_json(&[record]).is_err(),
+            "typed serialization must return the invalid-path error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clone_sigterm_uses_the_existing_command_cancellation_arm() {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        sender
+            .send(Some(CloneTermination::Terminate))
+            .expect("command worker still owns the receiver");
+        let work = std::future::pending::<Result<u8, RoomsError>>();
+        assert!(matches!(
+            race_workload_with_clone_cancellation(work, None, Some(receiver)).await,
+            ExecRace::Cancelled(143)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clone_signal_exit_codes_distinguish_interrupt_and_terminate() {
+        assert_eq!(
+            CloneCancellation::clean(CloneTermination::Interrupt).exit_code(),
+            130
+        );
+        assert_eq!(
+            CloneCancellation::clean(CloneTermination::Terminate).exit_code(),
+            143
+        );
+        let incomplete = CloneCancellation {
+            signal: CloneTermination::Terminate,
+            clones: Vec::new(),
+            cleanup_failures: vec!["residue".to_owned()],
+        };
+        assert_eq!(incomplete.exit_code(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn clone_terminal_handoff_is_acknowledged_by_the_signal_owner() {
+        let mut source = CloneSignalSource::arm().expect("register signal owner");
+        assert_eq!(source.commit_terminal_handoff().await.unwrap(), None);
+    }
+
+    #[test]
+    fn clone_failures_are_reported_in_network_order_not_completion_order() {
+        let error = collapse_clone_failures(
+            "restore",
+            vec![
+                CloneFailure::new(7, "room-seven", RoomsError::Internal("late".to_owned())),
+                CloneFailure::new(2, "room-two", RoomsError::Internal("early".to_owned())),
+            ],
+        )
+        .expect("failures collapse");
+        let message = error.to_string();
+        let two = message.find("net 2").expect("net 2 evidence");
+        let seven = message.find("net 7").expect("net 7 evidence");
+        assert!(two < seven, "failure evidence must be canonical: {message}");
+    }
+
+    #[test]
+    fn clone_command_failure_json_retains_successes_outputs_and_all_failures() {
+        let success = CloneRecord {
+            room_id: "room-three".to_owned(),
+            snapshot_id: "snapshot".to_owned(),
+            slot: 4,
+            guest_ip: "172.16.0.18".to_owned(),
+            clone_net_index: 3,
+            namespace: "rooms-c3".to_owned(),
+            host_veth: "veth-h3".to_owned(),
+            status: "exited",
+            exit_code: Some(0),
+            out_dir: Some(PathBuf::from("/out/room-three")),
+        };
+        let batch = CloneCommandBatchFailure::new(
+            vec![success],
+            vec![
+                CloneFailure::with_output(
+                    7,
+                    "room-seven",
+                    Some(PathBuf::from("/out/room-seven")),
+                    RoomsError::Internal("late".to_owned()),
+                ),
+                CloneFailure::with_output(
+                    2,
+                    "room-two",
+                    Some(PathBuf::from("/out/room-two")),
+                    RoomsError::Internal("early".to_owned()),
+                ),
+            ],
+            vec!["task-z".to_owned(), "task-a".to_owned()],
+        );
+        let raw = clone_command_failure_json(&batch).expect("serialize batch failure");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse batch failure");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["error_kind"], "clone_batch");
+        assert_eq!(json["clones"][0]["room_id"], "room-three");
+        assert_eq!(json["clones"][0]["out_dir"], "/out/room-three");
+        assert_eq!(json["failures"][0]["clone_net_index"], 2);
+        assert_eq!(json["failures"][0]["out_dir"], "/out/room-two");
+        assert_eq!(json["failures"][1]["clone_net_index"], 7);
+        assert_eq!(json["failures"][1]["out_dir"], "/out/room-seven");
+        assert_eq!(json["task_failures"][0], "task-a");
+        assert_eq!(json["task_failures"][1], "task-z");
+    }
+
+    #[test]
     fn cleanup_residue_reports_leftovers_and_ignores_reused_slots() {
         let dir = tempdir().expect("tempdir");
         let room_dir = dir.path().join("room");
@@ -2750,6 +4687,11 @@ mod tests {
             4,
             "pool full gets its own reserved code"
         );
+        assert_eq!(
+            exit_code_for_error(&RoomsError::CloneNet(CloneNetError::PoolFull { cap: 8 })),
+            4,
+            "clone-network pool full keeps the same machine contract"
+        );
         // Every other error — including other slot errors — stays generic (2).
         assert_eq!(
             exit_code_for_error(&RoomsError::Slot(SlotError::TargetTaken { index: 5 })),
@@ -2771,6 +4713,11 @@ mod tests {
             json.contains("\"error_kind\":\"pool_full\"") && json.contains("\"cap\":8"),
             "ship keys on error_kind, with the cap alongside; got: {json}"
         );
+
+        let clone_record =
+            run_error_record(&RoomsError::CloneNet(CloneNetError::PoolFull { cap: 6 }));
+        assert_eq!(clone_record.error_kind, "pool_full");
+        assert_eq!(clone_record.cap, Some(6));
     }
 
     #[test]

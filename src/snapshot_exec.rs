@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
 use crate::firecracker::{self, KillSignalOutcome};
+use crate::inode_seal;
 use crate::room::{self, Liveness, RoomMeta};
 use crate::slot::{self, Freed, Reserved};
 use crate::snapshot::{self, FcOp, SnapshotMeta, SnapshotRequest};
@@ -172,6 +173,12 @@ pub async fn recover(
         .find(|intent| intent.snapshot_id == snapshot_id)
         .ok_or_else(|| anyhow::anyhow!("no pending snapshot transaction {snapshot_id}"))?;
     let _lock = acquire_lock(config, &intent.base_room_id)?;
+    if intent.boundary == Boundary::Pending {
+        // A crash during the immutable-capability probe may have left this
+        // transaction-owned empty directory sealed. Clear and re-prove it
+        // before either abort cleanup or normal drive touches the output.
+        inode_seal::preflight_output(&intent.out_dir)?;
+    }
     if intent.boundary < Boundary::Collected {
         let ambiguous_create =
             intent.boundary == Boundary::Paused && any_artifact_nonempty(&intent);
@@ -237,6 +244,7 @@ fn build_intent(
     let jail_root = config
         .jail_root_dir(&base.id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve jail root"))?;
+    inode_seal::require(&jail_root.join("rootfs"), "snapshot backing image")?;
     let active_vsock = active_vsock(&jail_root)?;
     let request = SnapshotRequest {
         out_dir: out_dir.clone(),
@@ -268,6 +276,10 @@ async fn drive(config: &RoomsConfig, mut intent: SnapshotIntent) -> anyhow::Resu
         return result_from(&intent);
     }
     if intent.boundary < Boundary::TargetsStaged {
+        // Prove immutable-inode support and CAP_LINUX_IMMUTABLE before the
+        // transaction can pause or consume the live base. `Pending` recovery
+        // also clears an interrupted directory-flag probe here.
+        inode_seal::preflight_output(&intent.out_dir)?;
         stage_targets(&intent)?;
         advance(config, &mut intent, Boundary::TargetsStaged)?;
     }
@@ -283,13 +295,51 @@ async fn drive(config: &RoomsConfig, mut intent: SnapshotIntent) -> anyhow::Resu
         advance(config, &mut intent, Boundary::Reaped)?;
     }
     validate_collected(&intent)?;
-    snapshot::write_meta_atomic(
-        &intent.out_dir.join(snapshot::SNAPSHOT_META_FILE),
-        &intent.meta,
-    )?;
+    ensure_snapshot_metadata(&intent)?;
+    seal_snapshot(&intent)?;
     advance(config, &mut intent, Boundary::Published)?;
     finish_index(config, &intent)?;
     result_from(&intent)
+}
+
+/// Publish metadata once, or accept the exact immutable copy left by a crash
+/// between sealing and the `Published` boundary.
+fn ensure_snapshot_metadata(intent: &SnapshotIntent) -> anyhow::Result<()> {
+    let path = intent.out_dir.join(snapshot::SNAPSHOT_META_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let observed: SnapshotMeta = serde_json::from_slice(&bytes)?;
+            if observed != intent.meta {
+                anyhow::bail!(
+                    "published snapshot metadata {} disagrees with its transaction",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            snapshot::write_meta_atomic(&path, &intent.meta)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Seal the complete published snapshot set. Files come first and the
+/// directory last: a crash at any prefix leaves a safe, idempotently
+/// recoverable partial seal, while no transaction reaches `Published` until
+/// every inode rejects writes.
+fn seal_snapshot(intent: &SnapshotIntent) -> anyhow::Result<()> {
+    let meta = intent.out_dir.join(snapshot::SNAPSHOT_META_FILE);
+    ensure_regular_nonempty(&meta)?;
+    for (path, label) in [
+        (&intent.host_vmstate, "snapshot vmstate"),
+        (&intent.host_mem, "snapshot memory"),
+        (&meta, "snapshot metadata"),
+    ] {
+        inode_seal::seal(path, label)?;
+    }
+    inode_seal::seal(&intent.out_dir, "snapshot directory")
 }
 
 async fn execute_and_collect(
@@ -1194,9 +1244,9 @@ mod tests {
 
     use super::{
         acquire_lock, canonical_candidate, create_intent_exclusive, create_output_tree,
-        ensure_output_unclaimed, op_request, overlaps, pending_for_base, pending_summary,
-        pinned_process_identity, read_intents, record_abort, resolve_output, sha256_file,
-        snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
+        ensure_output_unclaimed, ensure_snapshot_metadata, op_request, overlaps, pending_for_base,
+        pending_summary, pinned_process_identity, read_intents, record_abort, resolve_output,
+        sha256_file, snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::room::{Provenance, RoomMeta, Slot};
@@ -1380,6 +1430,26 @@ mod tests {
             out.parent().expect("parent").is_dir(),
             "missing ancestors must be created, not assumed"
         );
+    }
+
+    #[test]
+    fn metadata_publication_is_idempotent_but_never_accepts_drift() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let intent = intent(&config);
+        std::fs::create_dir_all(&intent.out_dir).expect("create output");
+
+        ensure_snapshot_metadata(&intent).expect("first publication");
+        ensure_snapshot_metadata(&intent).expect("recovery accepts exact metadata");
+
+        let path = intent.out_dir.join(crate::snapshot::SNAPSHOT_META_FILE);
+        let mut drifted = intent.meta.clone();
+        drifted.fc_version = "different".to_owned();
+        std::fs::write(&path, serde_json::to_vec(&drifted).expect("serialize"))
+            .expect("inject drift");
+        let error = ensure_snapshot_metadata(&intent)
+            .expect_err("recovery must not bless different published metadata");
+        assert!(error.to_string().contains("disagrees"), "{error}");
     }
 
     #[tokio::test]

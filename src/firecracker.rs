@@ -30,6 +30,23 @@ const JAIL_API_SOCK: &str = "api.sock";
 const JAIL_KERNEL: &str = "kernel";
 const JAIL_ROOTFS: &str = "rootfs";
 
+/// `ip netns` bind-mount directory consumed by jailer's `--netns` flag.
+const NETWORK_NAMESPACE_DIR: &str = "/run/netns";
+
+fn network_namespace_path(namespace: &str) -> PathBuf {
+    PathBuf::from(format!("{NETWORK_NAMESPACE_DIR}/{namespace}"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn process_network_namespace_path(pid: u32) -> PathBuf {
+    PathBuf::from(format!("/proc/{pid}/ns/net"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+const fn same_namespace_identity(left: (u64, u64), right: (u64, u64)) -> bool {
+    left.0 == right.0 && left.1 == right.1
+}
+
 /// Network configuration for a microVM.
 pub struct NetworkConfig {
     pub tap_name: String,
@@ -456,13 +473,8 @@ pub async fn boot(
     req: &BootRequest<'_>,
     config: &RoomsConfig,
 ) -> Result<BootedVm, FirecrackerError> {
-    ensure_root()?;
-    check_kvm()?;
-    let firecracker_binary = resolve_firecracker_binary(config)?;
-    let jailer_binary = resolve_jailer_binary(config)?;
-    let (fc_uid, fc_gid) = tokio::task::spawn_blocking(lookup_firecracker_ids)
-        .await
-        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))??;
+    let (firecracker_binary, jailer_binary, fc_uid, fc_gid) =
+        resolve_boot_dependencies(config).await?;
 
     let room_id_str = req.room_id.to_owned();
     let per_room_dir = config
@@ -500,7 +512,7 @@ pub async fn boot(
             slot.tap.clone(),
             room_id_str.clone(),
         ));
-        create_slot_tap(slot)?;
+        create_slot_tap(slot, None)?;
     } else if let Some(net) = req.network {
         guard.set_tap(net.tap_name.clone());
     }
@@ -540,6 +552,7 @@ pub async fn boot(
         fc_uid,
         fc_gid,
         layout: &jail_layout,
+        network_namespace: None,
     });
 
     let log_handles = open_log_file(&log_path).await?;
@@ -584,6 +597,19 @@ pub async fn boot(
         guard,
         child,
     })
+}
+
+async fn resolve_boot_dependencies(
+    config: &RoomsConfig,
+) -> Result<(PathBuf, PathBuf, u32, u32), FirecrackerError> {
+    ensure_root()?;
+    check_kvm()?;
+    let firecracker_binary = resolve_firecracker_binary(config)?;
+    let jailer_binary = resolve_jailer_binary(config)?;
+    let (fc_uid, fc_gid) = tokio::task::spawn_blocking(lookup_firecracker_ids)
+        .await
+        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))??;
+    Ok((firecracker_binary, jailer_binary, fc_uid, fc_gid))
 }
 
 fn bind_provisioning_listener(
@@ -660,64 +686,197 @@ fn install_egress(plan: &egress::Plan, slot: Option<&room::Slot>) -> Result<(), 
     }
 }
 
-/// Create a pool slot's tap: `ip tuntap add`, `ip addr add <gw>/<prefix>`, link
-/// up, and the per-tap forwarding sysctl — the four operations `setup-tap.sh`
-/// did per-tap, now in the boot path with the slot's values.
-#[cfg(unix)]
-fn create_slot_tap(slot: &room::Slot) -> Result<(), FirecrackerError> {
-    run_ip(&[
-        "tuntap",
-        "add",
-        &slot.tap,
-        "mode",
-        "tap",
-        "user",
-        FIRECRACKER_USER,
-    ])?;
+/// One direct host command in the frozen-slot TAP setup plan.
+#[cfg(any(unix, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TapCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+#[cfg(any(unix, test))]
+impl TapCommand {
+    const fn new(program: &'static str, args: Vec<String>) -> Self {
+        Self { program, args }
+    }
+
+    #[cfg(unix)]
+    fn display(&self) -> String {
+        format!("{} {}", self.program, self.args.join(" "))
+    }
+}
+
+/// Build the frozen-slot TAP commands. The flat plan is byte-for-byte the
+/// existing `ip` / `sysctl` argv. A clone plan executes those same commands
+/// through `ip netns exec` without invoking a shell.
+#[cfg(any(unix, test))]
+fn slot_tap_plan(slot: &room::Slot, network_namespace: Option<&str>) -> Vec<TapCommand> {
     let cidr = format!("{}/{}", slot.gateway, slot.prefix);
-    run_ip(&["addr", "add", &cidr, "dev", &slot.tap])?;
-    run_ip(&["link", "set", &slot.tap, "up"])?;
-    set_tap_forwarding(&slot.tap)?;
+    let commands = vec![
+        TapCommand::new(
+            "ip",
+            vec![
+                "tuntap".into(),
+                "add".into(),
+                slot.tap.clone(),
+                "mode".into(),
+                "tap".into(),
+                "user".into(),
+                FIRECRACKER_USER.into(),
+            ],
+        ),
+        TapCommand::new(
+            "ip",
+            vec![
+                "addr".into(),
+                "add".into(),
+                cidr,
+                "dev".into(),
+                slot.tap.clone(),
+            ],
+        ),
+        TapCommand::new(
+            "ip",
+            vec!["link".into(), "set".into(), slot.tap.clone(), "up".into()],
+        ),
+        TapCommand::new(
+            "sysctl",
+            vec![
+                "-w".into(),
+                format!("net.ipv4.conf.{}.forwarding=1", slot.tap),
+            ],
+        ),
+    ];
+    let Some(namespace) = network_namespace else {
+        return commands;
+    };
+    commands
+        .into_iter()
+        .map(|command| {
+            let mut args = vec![
+                "netns".to_owned(),
+                "exec".to_owned(),
+                namespace.to_owned(),
+                command.program.to_owned(),
+            ];
+            args.extend(command.args);
+            TapCommand::new("ip", args)
+        })
+        .collect()
+}
+
+/// Create a pool slot's tap: `ip tuntap add`, `ip addr add <gw>/<prefix>`, link
+/// up, and the per-tap forwarding sysctl — either in the default namespace or
+/// in a clone's private namespace.
+#[cfg(unix)]
+fn create_slot_tap(
+    slot: &room::Slot,
+    network_namespace: Option<&str>,
+) -> Result<(), FirecrackerError> {
+    for command in slot_tap_plan(slot, network_namespace) {
+        run_tap_command(&command)?;
+    }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn create_slot_tap(_slot: &room::Slot) -> Result<(), FirecrackerError> {
+fn create_slot_tap(
+    _slot: &room::Slot,
+    _network_namespace: Option<&str>,
+) -> Result<(), FirecrackerError> {
     Err(FirecrackerError::KvmUnavailable)
 }
 
-/// Run `ip <args>`, mapping a non-zero exit to a descriptive error.
+/// Run one direct TAP command, mapping a non-zero exit to a descriptive error.
 #[cfg(unix)]
-fn run_ip(args: &[&str]) -> Result<(), FirecrackerError> {
-    let out = std::process::Command::new("ip")
-        .args(args)
+fn run_tap_command(command: &TapCommand) -> Result<(), FirecrackerError> {
+    let out = std::process::Command::new(command.program)
+        .args(&command.args)
         .output()
         .map_err(FirecrackerError::Io)?;
     if out.status.success() {
         return Ok(());
     }
     Err(FirecrackerError::Internal(format!(
-        "ip {} failed: {}",
-        args.join(" "),
+        "{} failed: {}",
+        command.display(),
         String::from_utf8_lossy(&out.stderr).trim()
     )))
 }
 
-/// Enable per-tap IPv4 forwarding (the `sysctl` `setup-tap.sh` set per-tap).
-#[cfg(unix)]
-fn set_tap_forwarding(tap: &str) -> Result<(), FirecrackerError> {
-    let key = format!("net.ipv4.conf.{tap}.forwarding=1");
-    let out = std::process::Command::new("sysctl")
-        .args(["-w", &key])
-        .output()
-        .map_err(FirecrackerError::Io)?;
-    if out.status.success() {
+#[cfg(any(target_os = "linux", test))]
+fn tap_namespace_probe(namespace: &str, tap: &str) -> TapCommand {
+    TapCommand::new(
+        "ip",
+        vec![
+            "-n".to_owned(),
+            namespace.to_owned(),
+            "link".to_owned(),
+            "show".to_owned(),
+            "dev".to_owned(),
+            tap.to_owned(),
+        ],
+    )
+}
+
+/// Prove that `tap` exists in the named Linux network namespace.
+///
+/// # Errors
+/// Returns an error when the namespace or TAP is absent, `ip` cannot run, or
+/// the host is not Linux.
+#[cfg(target_os = "linux")]
+pub fn verify_tap_in_namespace(namespace: &str, tap: &str) -> Result<(), FirecrackerError> {
+    run_tap_command(&tap_namespace_probe(namespace, tap))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn verify_tap_in_namespace(_namespace: &str, _tap: &str) -> Result<(), FirecrackerError> {
+    Err(FirecrackerError::KvmUnavailable)
+}
+
+#[cfg(target_os = "linux")]
+fn namespace_identity(path: &Path) -> Result<(u64, u64), FirecrackerError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        FirecrackerError::Internal(format!(
+            "inspect network namespace {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// Prove that `pid` entered the requested named Linux network namespace.
+///
+/// Linux exposes both the process namespace and the `ip netns` bind mount as
+/// namespace filesystem handles. Matching device + inode is an identity proof,
+/// unlike comparing namespace names or process command lines.
+///
+/// # Errors
+/// Returns an error when either namespace handle cannot be inspected, their
+/// identities differ, or the host is not Linux.
+#[cfg(target_os = "linux")]
+pub fn verify_process_network_namespace(pid: u32, namespace: &str) -> Result<(), FirecrackerError> {
+    let expected_path = network_namespace_path(namespace);
+    let process_path = process_network_namespace_path(pid);
+    let expected = namespace_identity(&expected_path)?;
+    let actual = namespace_identity(&process_path)?;
+    if same_namespace_identity(expected, actual) {
         return Ok(());
     }
     Err(FirecrackerError::Internal(format!(
-        "sysctl -w {key} failed: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
+        "process {pid} network namespace {actual:?} does not match {} {expected:?}",
+        expected_path.display()
     )))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn verify_process_network_namespace(
+    _pid: u32,
+    _namespace: &str,
+) -> Result<(), FirecrackerError> {
+    Err(FirecrackerError::KvmUnavailable)
 }
 
 /// Free a pool slot file (compare-and-delete), logging the outcome. Best-effort:
@@ -882,6 +1041,9 @@ pub(crate) struct JailerLaunchInput<'a> {
     pub fc_uid: u32,
     pub fc_gid: u32,
     pub layout: &'a JailLayout,
+    /// Named Linux network namespace for clone restores. `None` preserves the
+    /// flat launch argv exactly.
+    pub network_namespace: Option<&'a str>,
 }
 
 fn build_jailer_launch_plan(input: &JailerLaunchInput<'_>) -> JailerLaunchPlan {
@@ -893,8 +1055,9 @@ fn build_jailer_launch_plan(input: &JailerLaunchInput<'_>) -> JailerLaunchPlan {
         fc_uid,
         fc_gid,
         layout,
+        network_namespace,
     } = input;
-    let jailer_args = vec![
+    let mut jailer_args = vec![
         "--id".to_owned(),
         (*room_id).to_owned(),
         "--uid".to_owned(),
@@ -906,6 +1069,14 @@ fn build_jailer_launch_plan(input: &JailerLaunchInput<'_>) -> JailerLaunchPlan {
         "--chroot-base-dir".to_owned(),
         chroot_base.to_string_lossy().into_owned(),
     ];
+    if let Some(namespace) = network_namespace {
+        jailer_args.extend([
+            "--netns".to_owned(),
+            network_namespace_path(namespace)
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+    }
     let firecracker_args = vec!["--api-sock".to_owned(), JAIL_API_SOCK.to_owned()];
     let kernel_path_in_jail = PathBuf::from(format!("/{JAIL_KERNEL}"));
     let rootfs_path_in_jail = PathBuf::from(format!("/{JAIL_ROOTFS}"));
@@ -1673,6 +1844,9 @@ pub struct RestoreSpawnRequest<'a> {
     pub descriptor: &'a room::RoomDescriptor,
     /// The snapshot being restored — recorded as the room's lineage.
     pub snapshot_id: &'a str,
+    /// Named Linux network namespace for clone restores. `None` keeps the
+    /// phase-1 single-restore path in the default namespace.
+    pub network_namespace: Option<&'a str>,
 }
 
 /// A spawned-but-inert restore process.
@@ -1687,6 +1861,7 @@ pub struct RestoreLaunch {
     guard: RoomGuard,
     socket: PathBuf,
     log_path: PathBuf,
+    network_namespace: Option<String>,
 }
 
 impl RestoreLaunch {
@@ -1738,7 +1913,7 @@ impl RestoreLaunch {
     /// room's own resources (process/jail/room dir); the shared slot's tap
     /// and lease are the teardown's business.
     pub fn attach_leased_slot(&mut self, slot: &room::Slot) -> Result<(), FirecrackerError> {
-        create_slot_tap(slot)?;
+        create_slot_tap(slot, self.network_namespace.as_deref())?;
         Ok(())
     }
 
@@ -1812,6 +1987,7 @@ pub async fn spawn_restore(
         fc_uid,
         fc_gid,
         layout: &layout,
+        network_namespace: req.network_namespace,
     });
     let log_handles = open_log_file(&log_path).await?;
     let mut child = spawn_barriered_jailer(&launch, log_handles)?;
@@ -1839,6 +2015,7 @@ pub async fn spawn_restore(
         guard,
         socket,
         log_path,
+        network_namespace: req.network_namespace.map(str::to_owned),
     })
 }
 
@@ -2226,8 +2403,10 @@ mod tests {
     }
 
     use super::{
-        build_boot_args, build_jailer_launch_plan, parse_getent_passwd, rootfs_drive_payload,
-        JailLayout, JailerLaunchInput, NetworkConfig, RoomGuard, FIRECRACKER_USER,
+        build_boot_args, build_jailer_launch_plan, network_namespace_path, parse_getent_passwd,
+        process_network_namespace_path, rootfs_drive_payload, same_namespace_identity,
+        slot_tap_plan, tap_namespace_probe, JailLayout, JailerLaunchInput, NetworkConfig,
+        RoomGuard, TapCommand, FIRECRACKER_USER,
     };
     use crate::config::RoomsConfig;
     use std::path::{Path, PathBuf};
@@ -2441,6 +2620,7 @@ mod tests {
             fc_uid: 995,
             fc_gid: 995,
             layout: &layout,
+            network_namespace: None,
         });
 
         assert_eq!(plan.jailer_binary, PathBuf::from("/usr/local/bin/jailer"));
@@ -2467,6 +2647,202 @@ mod tests {
         assert_eq!(plan.kernel_path_in_jail, PathBuf::from("/kernel"));
         assert_eq!(plan.rootfs_path_in_jail, PathBuf::from("/rootfs"));
         assert_eq!(FIRECRACKER_USER, "firecracker");
+    }
+
+    #[test]
+    fn jailer_launch_plan_appends_network_namespace_before_firecracker_args() {
+        let room_id = "01abc123def456";
+        let chroot_base = PathBuf::from("/tmp/rooms-jailer");
+        let jail_root = chroot_base.join("firecracker").join(room_id).join("root");
+        let layout = JailLayout {
+            instance_dir: chroot_base.join("firecracker").join(room_id),
+            host_socket: jail_root.join("api.sock"),
+        };
+        let plan = build_jailer_launch_plan(&JailerLaunchInput {
+            jailer_binary: Path::new("/usr/local/bin/jailer"),
+            firecracker_binary: Path::new("/usr/local/bin/firecracker"),
+            chroot_base: &chroot_base,
+            room_id,
+            fc_uid: 995,
+            fc_gid: 995,
+            layout: &layout,
+            network_namespace: Some("rooms-c3"),
+        });
+
+        assert_eq!(
+            plan.jailer_args,
+            vec![
+                "--id".to_owned(),
+                room_id.to_owned(),
+                "--uid".to_owned(),
+                "995".to_owned(),
+                "--gid".to_owned(),
+                "995".to_owned(),
+                "--exec-file".to_owned(),
+                "/usr/local/bin/firecracker".to_owned(),
+                "--chroot-base-dir".to_owned(),
+                "/tmp/rooms-jailer".to_owned(),
+                "--netns".to_owned(),
+                "/run/netns/rooms-c3".to_owned(),
+            ]
+        );
+        assert_eq!(
+            plan.firecracker_args,
+            vec!["--api-sock".to_owned(), "api.sock".to_owned()]
+        );
+    }
+
+    fn tap_plan_slot() -> crate::room::Slot {
+        crate::room::Slot {
+            index: 3,
+            tap: "tap-fc3".to_owned(),
+            gateway: "172.16.0.13".parse().expect("gateway"),
+            guest: "172.16.0.14".parse().expect("guest"),
+            prefix: 30,
+        }
+    }
+
+    #[test]
+    fn frozen_slot_tap_plan_flat_argv_is_unchanged() {
+        let plan = slot_tap_plan(&tap_plan_slot(), None);
+
+        assert_eq!(
+            plan,
+            vec![
+                TapCommand::new(
+                    "ip",
+                    vec![
+                        "tuntap".into(),
+                        "add".into(),
+                        "tap-fc3".into(),
+                        "mode".into(),
+                        "tap".into(),
+                        "user".into(),
+                        "firecracker".into(),
+                    ],
+                ),
+                TapCommand::new(
+                    "ip",
+                    vec![
+                        "addr".into(),
+                        "add".into(),
+                        "172.16.0.13/30".into(),
+                        "dev".into(),
+                        "tap-fc3".into(),
+                    ],
+                ),
+                TapCommand::new(
+                    "ip",
+                    vec!["link".into(), "set".into(), "tap-fc3".into(), "up".into()],
+                ),
+                TapCommand::new(
+                    "sysctl",
+                    vec!["-w".into(), "net.ipv4.conf.tap-fc3.forwarding=1".into()],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn frozen_slot_tap_plan_executes_inside_network_namespace() {
+        let plan = slot_tap_plan(&tap_plan_slot(), Some("rooms-c7"));
+
+        assert_eq!(
+            plan,
+            vec![
+                TapCommand::new(
+                    "ip",
+                    vec![
+                        "netns".into(),
+                        "exec".into(),
+                        "rooms-c7".into(),
+                        "ip".into(),
+                        "tuntap".into(),
+                        "add".into(),
+                        "tap-fc3".into(),
+                        "mode".into(),
+                        "tap".into(),
+                        "user".into(),
+                        "firecracker".into(),
+                    ],
+                ),
+                TapCommand::new(
+                    "ip",
+                    vec![
+                        "netns".into(),
+                        "exec".into(),
+                        "rooms-c7".into(),
+                        "ip".into(),
+                        "addr".into(),
+                        "add".into(),
+                        "172.16.0.13/30".into(),
+                        "dev".into(),
+                        "tap-fc3".into(),
+                    ],
+                ),
+                TapCommand::new(
+                    "ip",
+                    vec![
+                        "netns".into(),
+                        "exec".into(),
+                        "rooms-c7".into(),
+                        "ip".into(),
+                        "link".into(),
+                        "set".into(),
+                        "tap-fc3".into(),
+                        "up".into(),
+                    ],
+                ),
+                TapCommand::new(
+                    "ip",
+                    vec![
+                        "netns".into(),
+                        "exec".into(),
+                        "rooms-c7".into(),
+                        "sysctl".into(),
+                        "-w".into(),
+                        "net.ipv4.conf.tap-fc3.forwarding=1".into(),
+                    ],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn network_namespace_verification_paths_are_exact() {
+        assert_eq!(
+            network_namespace_path("rooms-c7"),
+            PathBuf::from("/run/netns/rooms-c7")
+        );
+        assert_eq!(
+            process_network_namespace_path(42),
+            PathBuf::from("/proc/42/ns/net")
+        );
+    }
+
+    #[test]
+    fn namespace_identity_requires_matching_device_and_inode() {
+        assert!(same_namespace_identity((7, 11), (7, 11)));
+        assert!(!same_namespace_identity((7, 11), (8, 11)));
+        assert!(!same_namespace_identity((7, 11), (7, 12)));
+    }
+
+    #[test]
+    fn tap_namespace_probe_uses_direct_ip_argv() {
+        assert_eq!(
+            tap_namespace_probe("rooms-c7", "tap-fc3"),
+            TapCommand::new(
+                "ip",
+                vec![
+                    "-n".into(),
+                    "rooms-c7".into(),
+                    "link".into(),
+                    "show".into(),
+                    "dev".into(),
+                    "tap-fc3".into(),
+                ],
+            )
+        );
     }
 
     #[test]

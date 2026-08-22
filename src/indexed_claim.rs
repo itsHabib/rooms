@@ -281,6 +281,26 @@ where
     }
 }
 
+/// Check exact live ownership while serialized with claim release/reconcile.
+///
+/// A malformed or reservation-shaped entry is never ownership evidence, even
+/// when its first line happens to contain the expected owner id.
+pub(crate) fn owned_by(
+    state: &Path,
+    pool: Pool,
+    index: u8,
+    expected_owner: &str,
+) -> Result<bool, std::io::Error> {
+    let path = state.join(pool.dir_name).join(index.to_string());
+    let _lock = lock_frees(state, pool)?;
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(parse_claim(&contents).is_some_and(|claim| claim.owner_id == expected_owner))
+}
+
 pub(crate) const fn valid_index(pool: Pool, index: u8) -> bool {
     index > 0 && index <= pool.max_index
 }

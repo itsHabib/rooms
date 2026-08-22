@@ -27,6 +27,10 @@ pub const CLONENETS_DIR: &str = "clonenets";
 const FREE_LOCK: &str = "clonenets.lock";
 pub const MAX_CLONENET: u8 = 63;
 pub const DEFAULT_MAX_POOL: u8 = 8;
+/// Bound every xtables lock wait rather than failing spuriously when sibling
+/// clone setup or an external host transaction briefly owns the lock.
+#[cfg(any(target_os = "linux", test))]
+const XTABLES_WAIT_SECONDS: &str = "2";
 
 const CLONENET_POOL: Pool = Pool {
     dir_name: CLONENETS_DIR,
@@ -167,20 +171,330 @@ pub fn allocate(
     allocate_with(request, &mut SystemNetworkOps)
 }
 
+/// One successful member of a concurrent clone-network allocation batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchAllocation {
+    /// Stable caller order, independent of worker completion order.
+    pub ordinal: usize,
+    /// Exact room identity that owns `network`.
+    pub owner_id: String,
+    /// The fully created namespace and veth identity.
+    pub network: CloneNet,
+}
+
+/// One deterministic failure from allocation or exact-owner rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchFailure {
+    /// Stable caller order, independent of worker completion order.
+    pub ordinal: usize,
+    /// Room identity associated with the failed operation.
+    pub owner_id: String,
+    /// Original error evidence.
+    pub detail: String,
+    /// Preserved structured capacity evidence when this worker exhausted the
+    /// configured clone-network pool.
+    pool_full_cap: Option<u8>,
+}
+
+/// A failed all-or-nothing clone-network batch.
+///
+/// Every worker has terminated before this value is returned. `failures`
+/// names the original allocation failures; `rollback_failures` names any
+/// successful allocations whose exact-owner cleanup could not finish and
+/// whose durable claims therefore remain available to reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchAllocationError {
+    /// Original allocation failures, sorted by caller ordinal.
+    pub failures: Vec<BatchFailure>,
+    /// Exact-owner cleanup failures, sorted by caller ordinal.
+    pub rollback_failures: Vec<BatchFailure>,
+}
+
+impl std::fmt::Display for BatchAllocationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let allocations = batch_failure_evidence(&self.failures);
+        if self.rollback_failures.is_empty() {
+            return write!(formatter, "clone network batch failed: {allocations}");
+        }
+        let rollbacks = batch_failure_evidence(&self.rollback_failures);
+        write!(
+            formatter,
+            "clone network batch failed: {allocations}; exact rollback incomplete: {rollbacks}"
+        )
+    }
+}
+
+impl std::error::Error for BatchAllocationError {}
+
+impl BatchAllocationError {
+    /// Return the common exhausted pool cap when capacity was the only reason
+    /// the batch failed and every successful sibling rolled back cleanly.
+    #[must_use]
+    pub fn pool_full_cap(&self) -> Option<u8> {
+        if self.failures.is_empty() || !self.rollback_failures.is_empty() {
+            return None;
+        }
+        let cap = self.failures.first()?.pool_full_cap?;
+        self.failures
+            .iter()
+            .all(|failure| failure.pool_full_cap == Some(cap))
+            .then_some(cap)
+    }
+}
+
+struct BatchWorkerError {
+    detail: String,
+    pool_full_cap: Option<u8>,
+}
+
+impl From<String> for BatchWorkerError {
+    fn from(detail: String) -> Self {
+        Self {
+            detail,
+            pool_full_cap: None,
+        }
+    }
+}
+
+impl From<CloneNetError> for BatchWorkerError {
+    fn from(error: CloneNetError) -> Self {
+        let pool_full_cap = match &error {
+            CloneNetError::PoolFull { cap } => Some(*cap),
+            _ => None,
+        };
+        Self {
+            detail: error.to_string(),
+            pool_full_cap,
+        }
+    }
+}
+
+fn batch_failure_evidence(failures: &[BatchFailure]) -> String {
+    failures
+        .iter()
+        .map(|failure| {
+            format!(
+                "#{} room {}: {}",
+                failure.ordinal, failure.owner_id, failure.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Allocate a fleet concurrently with all-or-nothing exact-owner cleanup.
+///
+/// Every worker is joined, even after a sibling fails. On any failure, every
+/// successful member is compare-and-released before the deterministic error is
+/// returned. The function is synchronous because Linux namespace setup is
+/// blocking; async callers should invoke it through `spawn_blocking`.
+///
+/// # Errors
+/// Returns all allocation failures sorted by caller ordinal. A cleanup failure
+/// is retained separately and leaves its durable claim for reconciliation.
+pub fn allocate_batch(
+    state: &Path,
+    owner_ids: &[String],
+    me: Claimer,
+    cap: u8,
+) -> Result<Vec<BatchAllocation>, BatchAllocationError> {
+    allocate_batch_with(
+        owner_ids,
+        |_, owner_id| allocate(state, owner_id, me, cap, None),
+        |allocation| match free(state, allocation.network.index, &allocation.owner_id) {
+            Ok(Freed::Removed | Freed::AlreadyFree) => Ok(()),
+            Ok(Freed::AlreadyReassigned) => Err(format!(
+                "clone network {} was reassigned before rollback",
+                allocation.network.index
+            )),
+            Err(error) => Err(error.to_string()),
+        },
+    )
+}
+
+fn allocate_batch_with<A, R, E>(
+    owner_ids: &[String],
+    allocate_one: A,
+    rollback_one: R,
+) -> Result<Vec<BatchAllocation>, BatchAllocationError>
+where
+    A: Fn(usize, &str) -> Result<CloneNet, E> + Sync,
+    R: Fn(&BatchAllocation) -> Result<(), String> + Sync,
+    E: Into<BatchWorkerError> + Send,
+{
+    let (mut allocations, mut failures) = run_allocation_workers(owner_ids, &allocate_one);
+    allocations.sort_by_key(|allocation| allocation.ordinal);
+    failures.sort_by_key(|failure| failure.ordinal);
+    if failures.is_empty() {
+        return Ok(allocations);
+    }
+    let mut rollback_failures = run_rollback_workers(&allocations, &rollback_one);
+    rollback_failures.sort_by_key(|failure| failure.ordinal);
+    Err(BatchAllocationError {
+        failures,
+        rollback_failures,
+    })
+}
+
+fn run_allocation_workers<A, E>(
+    owner_ids: &[String],
+    allocate_one: &A,
+) -> (Vec<BatchAllocation>, Vec<BatchFailure>)
+where
+    A: Fn(usize, &str) -> Result<CloneNet, E> + Sync,
+    E: Into<BatchWorkerError> + Send,
+{
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(owner_ids.len());
+        for (ordinal, owner_id) in owner_ids.iter().enumerate() {
+            let worker_owner = owner_id.clone();
+            workers.push((
+                ordinal,
+                owner_id.clone(),
+                scope.spawn(move || allocate_one(ordinal, &worker_owner)),
+            ));
+        }
+        collect_allocation_workers(workers)
+    })
+}
+
+type AllocationWorker<'scope, E> = (
+    usize,
+    String,
+    std::thread::ScopedJoinHandle<'scope, Result<CloneNet, E>>,
+);
+
+fn collect_allocation_workers<E>(
+    workers: Vec<AllocationWorker<'_, E>>,
+) -> (Vec<BatchAllocation>, Vec<BatchFailure>)
+where
+    E: Into<BatchWorkerError>,
+{
+    let mut allocations = Vec::new();
+    let mut failures = Vec::new();
+    for (ordinal, owner_id, worker) in workers {
+        match worker.join() {
+            Ok(Ok(network)) => allocations.push(BatchAllocation {
+                ordinal,
+                owner_id,
+                network,
+            }),
+            Ok(Err(error)) => {
+                let error: BatchWorkerError = error.into();
+                failures.push(BatchFailure {
+                    ordinal,
+                    owner_id,
+                    detail: error.detail,
+                    pool_full_cap: error.pool_full_cap,
+                });
+            }
+            Err(_) => failures.push(BatchFailure {
+                ordinal,
+                owner_id,
+                detail: "allocator worker panicked".to_owned(),
+                pool_full_cap: None,
+            }),
+        }
+    }
+    (allocations, failures)
+}
+
+fn run_rollback_workers<R>(allocations: &[BatchAllocation], rollback_one: &R) -> Vec<BatchFailure>
+where
+    R: Fn(&BatchAllocation) -> Result<(), String> + Sync,
+{
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(allocations.len());
+        for allocation in allocations {
+            workers.push((allocation, scope.spawn(move || rollback_one(allocation))));
+        }
+        workers
+            .into_iter()
+            .filter_map(|(allocation, worker)| match worker.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(detail)) => Some(batch_failure(allocation, detail)),
+                Err(_) => Some(batch_failure(
+                    allocation,
+                    "rollback worker panicked".to_owned(),
+                )),
+            })
+            .collect()
+    })
+}
+
+fn batch_failure(allocation: &BatchAllocation, detail: String) -> BatchFailure {
+    BatchFailure {
+        ordinal: allocation.ordinal,
+        owner_id: allocation.owner_id.clone(),
+        detail,
+        pool_full_cap: None,
+    }
+}
+
 /// Tear down an exact owner's namespace and release its durable claim.
 pub fn free(state: &Path, index: u8, expected_owner: &str) -> Result<Freed, CloneNetError> {
+    free_with_cleanup(state, index, expected_owner, |_| Ok(()))
+}
+
+/// Tear down an exact owner's policy and namespace under the claim free-lock.
+///
+/// The caller cleanup runs only after exact ownership is re-checked and before
+/// any namespace resource or claim is removed. This is the terminal gate for
+/// per-clone firewall state: a stale teardown can never race a reassignment.
+pub fn free_with_cleanup<F>(
+    state: &Path,
+    index: u8,
+    expected_owner: &str,
+    cleanup: F,
+) -> Result<Freed, CloneNetError>
+where
+    F: FnOnce(&CloneNet) -> Result<(), String>,
+{
     let net = CloneNet::derive(index)?;
     let mut ops = SystemNetworkOps;
-    let result =
-        indexed_claim::free_with(state, CLONENET_POOL, index, expected_owner, || {
-            match ops.teardown(&net, expected_owner).map_err(cleanup_detail)? {
-                ReconcileAction::Remove => Ok(()),
-                ReconcileAction::Keep => {
-                    Err("host resources are owned by another claim".to_owned())
-                }
-            }
-        });
+    let result = indexed_claim::free_with(state, CLONENET_POOL, index, expected_owner, || {
+        cleanup(&net)?;
+        match ops.teardown(&net, expected_owner).map_err(cleanup_detail)? {
+            ReconcileAction::Remove => Ok(()),
+            ReconcileAction::Keep => Err("host resources are owned by another claim".to_owned()),
+        }
+    });
     map_release(result)
+}
+
+/// Prove that `net` still carries the exact room claim supplied by the caller.
+///
+/// Restore uses this before publishing its own durable intent, so it never
+/// takes custody of caller-provided networking by index alone.
+pub fn verify_owned(
+    state: &Path,
+    net: &CloneNet,
+    expected_owner: &str,
+) -> Result<(), CloneNetError> {
+    if indexed_claim::owned_by(state, CLONENET_POOL, net.index, expected_owner)? {
+        return Ok(());
+    }
+    Err(CloneNetError::NotOwned {
+        index: net.index,
+        owner_id: expected_owner.to_owned(),
+    })
+}
+
+/// Fail closed unless the clone's root-namespace veth is present.
+///
+/// The namespace/tap/process namespace are verified by the Firecracker launch
+/// boundary; this probe anchors the host-side firewall and routing interface.
+#[cfg(target_os = "linux")]
+pub fn verify_host_veth(net: &CloneNet) -> Result<(), CloneNetError> {
+    run_command(&CommandSpec::new(
+        "ip",
+        vec!["link".into(), "show".into(), net.veth_host.clone()],
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub const fn verify_host_veth(_net: &CloneNet) -> Result<(), CloneNetError> {
+    Err(CloneNetError::UnsupportedPlatform)
 }
 
 fn cleanup_detail(error: CloneNetError) -> String {
@@ -199,6 +513,12 @@ pub fn reconcile(state: &Path) -> Vec<Reclaimed> {
 
 fn reconcile_with(state: &Path, ops: &mut impl NetworkOps) -> Vec<Reclaimed> {
     indexed_claim::reconcile(state, CLONENET_POOL, |index, owner| {
+        // The allocating CLI can exit while a kept Firecracker child remains.
+        // A durable room directory is therefore the lifecycle fence, mirroring
+        // the slot allocator: registry/restore teardown owns this allocation.
+        if state.join(owner).is_dir() {
+            return Ok(ReconcileAction::Keep);
+        }
         let net = CloneNet::derive(index).map_err(|error| error.to_string())?;
         ops.teardown(&net, owner).map_err(|error| error.to_string())
     })
@@ -437,6 +757,15 @@ impl NetworkOps for SystemNetworkOps {
             release_owner_marker(net.index, owner)?;
             return Ok(ReconcileAction::Keep);
         }
+        // A restore can leave a per-clone jump and INPUT rule behind. This
+        // teardown runs only after exact host-global ownership is established,
+        // and the caller holds the durable claim lock across it.
+        crate::egress::remove_clone_checked(&net.veth_host).map_err(|detail| {
+            CloneNetError::Command {
+                command: format!("remove clone egress for {}", net.veth_host),
+                detail,
+            }
+        })?;
         for command in teardown_plan(net) {
             run_allow_absent(&command)?;
         }
@@ -560,7 +889,11 @@ fn host_create_plan(net: &CloneNet) -> Vec<CommandSpec> {
 
 #[cfg(any(target_os = "linux", test))]
 fn source_binding_command(operation: &str, net: &CloneNet) -> CommandSpec {
-    let mut args = vec![operation.to_owned()];
+    let mut args = vec![
+        "-w".to_owned(),
+        XTABLES_WAIT_SECONDS.to_owned(),
+        operation.to_owned(),
+    ];
     if operation == "-I" {
         args.extend(["ROOMS_VETH_FWD".to_owned(), "1".to_owned()]);
     } else {
@@ -605,6 +938,8 @@ fn namespace_create_plan(net: &CloneNet) -> Vec<CommandSpec> {
             net,
             "iptables",
             [
+                "-w".to_owned(),
+                XTABLES_WAIT_SECONDS.to_owned(),
                 "-t".to_owned(),
                 "nat".to_owned(),
                 "-A".to_owned(),
@@ -1069,12 +1404,16 @@ mod tests {
 
     use std::collections::HashSet;
     use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::time::Duration;
 
     use super::{
-        absent_resource, allocate_with, claim_identity, cleanup_detail, create_plan,
-        default_policy_rule, release_claim, rollback_plan, teardown_plan, ClaimDecision,
-        ClaimRequest, Claimer, CloneNet, CloneNetError, CreateFailure, CreationStage, Freed,
-        NetworkOps, ReconcileAction, RouteClass, CLONENETS_DIR, MAX_CLONENET,
+        absent_resource, allocate_batch_with, allocate_with, claim_identity, cleanup_detail,
+        create_plan, default_policy_rule, release_claim, rollback_plan, teardown_plan,
+        BatchAllocation, ClaimDecision, ClaimRequest, Claimer, CloneNet, CloneNetError,
+        CreateFailure, CreationStage, Freed, NetworkOps, ReconcileAction, RouteClass,
+        CLONENETS_DIR, MAX_CLONENET,
     };
 
     const ME: Claimer = Claimer {
@@ -1464,6 +1803,27 @@ mod tests {
     }
 
     #[test]
+    fn ownership_requires_an_exact_well_formed_claim() {
+        let state = tempfile::tempdir().unwrap();
+        let owner = owner_id(1);
+        let net = claim_identity(state.path(), &owner, ME, 8, None).unwrap();
+        super::verify_owned(state.path(), &net, &owner).unwrap();
+        assert!(matches!(
+            super::verify_owned(state.path(), &net, &owner_id(2)),
+            Err(CloneNetError::NotOwned { index: 1, .. })
+        ));
+        std::fs::write(
+            state.path().join(CLONENETS_DIR).join("1"),
+            format!("{owner}\n"),
+        )
+        .unwrap();
+        assert!(matches!(
+            super::verify_owned(state.path(), &net, &owner),
+            Err(CloneNetError::NotOwned { index: 1, .. })
+        ));
+    }
+
+    #[test]
     fn create_plan_enumerates_forwarding_route_and_first_hop_nat() {
         let net = CloneNet::derive(3).unwrap();
         let commands: Vec<_> = create_plan(&net)
@@ -1474,7 +1834,7 @@ mod tests {
             .contains(&"ip route replace 172.17.0.12/30 dev veth-h3 src 172.17.0.13".to_owned()));
         assert!(commands.contains(&"sysctl -w net.ipv4.conf.veth-h3.forwarding=1".to_owned()));
         assert!(commands.contains(
-            &"iptables -I ROOMS_VETH_FWD 1 -i veth-h3 ! -s 172.17.0.14/32 -j DROP".to_owned()
+            &"iptables -w 2 -I ROOMS_VETH_FWD 1 -i veth-h3 ! -s 172.17.0.14/32 -j DROP".to_owned()
         ));
         assert!(
             commands.contains(&"ip netns exec rooms-c3 sysctl -w net.ipv4.ip_forward=1".to_owned())
@@ -1484,11 +1844,161 @@ mod tests {
         ));
         assert!(commands.contains(
             &concat!(
-                "ip netns exec rooms-c3 iptables -t nat -A POSTROUTING ",
+                "ip netns exec rooms-c3 iptables -w 2 -t nat -A POSTROUTING ",
                 "-s 172.16.0.0/24 -o veth-g3 -j MASQUERADE"
             )
             .to_owned()
         ));
+    }
+
+    #[test]
+    fn every_root_and_namespaced_iptables_command_waits_for_xtables() {
+        let net = CloneNet::derive(3).unwrap();
+        let mut commands = create_plan(&net);
+        commands.extend(teardown_plan(&net));
+        commands.extend(rollback_plan(&net, CreationStage::SourceRule));
+        let mut observed = 0usize;
+        for command in commands {
+            if command.program == "iptables" {
+                assert_eq!(command.args.first().map(String::as_str), Some("-w"));
+                assert_eq!(command.args.get(1).map(String::as_str), Some("2"));
+                observed += 1;
+                continue;
+            }
+            let Some(position) = command.args.iter().position(|arg| arg == "iptables") else {
+                continue;
+            };
+            assert_eq!(
+                command.args.get(position + 1).map(String::as_str),
+                Some("-w")
+            );
+            assert_eq!(
+                command.args.get(position + 2).map(String::as_str),
+                Some("2")
+            );
+            observed += 1;
+        }
+        assert_eq!(observed, 4, "all add/delete/NAT forms must be covered");
+    }
+
+    #[test]
+    fn batch_allocation_runs_concurrently_and_returns_caller_order() {
+        const COUNT: usize = 8;
+        let owners: Vec<_> = (1..=COUNT)
+            .map(|value| owner_id(u32::try_from(value).expect("test worker count fits u32")))
+            .collect();
+        let barrier = Arc::new(Barrier::new(COUNT));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let allocations = allocate_batch_with(
+            &owners,
+            {
+                let barrier = Arc::clone(&barrier);
+                let active = Arc::clone(&active);
+                let maximum = Arc::clone(&maximum);
+                move |ordinal, _| {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(now, Ordering::SeqCst);
+                    barrier.wait();
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    CloneNet::derive(u8::try_from(ordinal + 1).unwrap())
+                        .map_err(|error| error.to_string())
+                }
+            },
+            |_: &BatchAllocation| Err("rollback must not run on success".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(maximum.load(Ordering::SeqCst), COUNT);
+        assert_eq!(
+            allocations
+                .iter()
+                .map(|allocation| allocation.ordinal)
+                .collect::<Vec<_>>(),
+            (0..COUNT).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn batch_failure_joins_every_worker_and_rolls_back_every_success() {
+        const COUNT: usize = 4;
+        let owners: Vec<_> = (1..=COUNT)
+            .map(|value| owner_id(u32::try_from(value).expect("test worker count fits u32")))
+            .collect();
+        let barrier = Arc::new(Barrier::new(COUNT));
+        let released = Arc::new(Mutex::new(Vec::new()));
+        let error = allocate_batch_with(
+            &owners,
+            {
+                let barrier = Arc::clone(&barrier);
+                move |ordinal, _| {
+                    barrier.wait();
+                    let delay = u64::try_from(COUNT - ordinal).unwrap();
+                    std::thread::sleep(Duration::from_millis(delay));
+                    if matches!(ordinal, 1 | 3) {
+                        return Err(format!("injected allocation failure {ordinal}"));
+                    }
+                    CloneNet::derive(u8::try_from(ordinal + 1).unwrap())
+                        .map_err(|error| error.to_string())
+                }
+            },
+            {
+                let released = Arc::clone(&released);
+                move |allocation: &BatchAllocation| {
+                    released.lock().unwrap().push(allocation.ordinal);
+                    if allocation.ordinal == 2 {
+                        return Err("injected rollback failure".to_owned());
+                    }
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error
+                .failures
+                .iter()
+                .map(|failure| failure.ordinal)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+        assert_eq!(
+            error
+                .rollback_failures
+                .iter()
+                .map(|failure| failure.ordinal)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        let mut released = released.lock().unwrap().clone();
+        released.sort_unstable();
+        assert_eq!(released, [0, 2], "every successful member was released");
+    }
+
+    #[test]
+    fn batch_preserves_pool_full_only_when_it_is_the_complete_failure() {
+        let owners = vec![owner_id(1), owner_id(2)];
+        let full = allocate_batch_with(
+            &owners,
+            |_, _| Err(CloneNetError::PoolFull { cap: 4 }),
+            |_: &BatchAllocation| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(full.pool_full_cap(), Some(4));
+
+        let mixed = allocate_batch_with(
+            &owners,
+            |ordinal, _| {
+                if ordinal == 0 {
+                    return Err(CloneNetError::PoolFull { cap: 4 });
+                }
+                Err(CloneNetError::UnsupportedPlatform)
+            },
+            |_: &BatchAllocation| Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(mixed.pool_full_cap(), None);
     }
 
     #[test]
@@ -1503,7 +2013,7 @@ mod tests {
                 "ip netns del rooms-c3",
                 "ip link del veth-h3",
                 "ip link del veth-g3",
-                "iptables -D ROOMS_VETH_FWD -i veth-h3 ! -s 172.17.0.14/32 -j DROP"
+                "iptables -w 2 -D ROOMS_VETH_FWD -i veth-h3 ! -s 172.17.0.14/32 -j DROP"
             ]
         );
     }
@@ -1650,7 +2160,10 @@ mod tests {
             .collect();
         assert_eq!(
             through_source_rule.last(),
-            Some(&"iptables -D ROOMS_VETH_FWD -i veth-h3 ! -s 172.17.0.14/32 -j DROP".to_owned())
+            Some(
+                &"iptables -w 2 -D ROOMS_VETH_FWD -i veth-h3 ! -s 172.17.0.14/32 -j DROP"
+                    .to_owned()
+            )
         );
     }
 
@@ -1669,6 +2182,25 @@ mod tests {
         assert!(reclaimed[0].removed);
         assert_eq!(ops.torn_down.len(), 1);
         assert!(!state.path().join(CLONENETS_DIR).join("1").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_allocator_claim_is_retained_while_room_directory_exists() {
+        const DEAD: Claimer = Claimer {
+            pid: 4_194_305,
+            starttime: 1,
+        };
+        let state = tempfile::tempdir().unwrap();
+        let owner = owner_id(1);
+        claim_identity(state.path(), &owner, DEAD, 8, None).unwrap();
+        std::fs::create_dir(state.path().join(&owner)).unwrap();
+        let mut ops = FakeOps::default();
+        let reclaimed = super::reconcile_with(state.path(), &mut ops);
+        assert_eq!(reclaimed.len(), 1);
+        assert!(!reclaimed[0].removed);
+        assert!(ops.torn_down.is_empty());
+        assert!(state.path().join(CLONENETS_DIR).join("1").exists());
     }
 
     #[cfg(target_os = "linux")]

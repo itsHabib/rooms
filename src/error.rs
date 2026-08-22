@@ -3,6 +3,7 @@
 //! ```text
 //! RoomsError
 //! ├── Firecracker(FirecrackerError)
+//! ├── CloneNet(CloneNetError)
 //! ├── Rootfs(RootfsError)
 //! ├── Transport(TransportError)
 //! ├── Runner(RunnerError)
@@ -19,6 +20,8 @@ use thiserror::Error;
 pub enum RoomsError {
     #[error(transparent)]
     Firecracker(#[from] FirecrackerError),
+    #[error(transparent)]
+    CloneNet(#[from] CloneNetError),
     #[error(transparent)]
     Rootfs(#[from] RootfsError),
     #[error(transparent)]
@@ -70,6 +73,8 @@ pub enum CloneNetError {
     InvalidIndex { index: u8, max: u8 },
     #[error("target clone network {index} already claimed")]
     TargetTaken { index: u8 },
+    #[error("clone network {index} is not claimed by room {owner_id}")]
+    NotOwned { index: u8, owner_id: String },
     #[error("clone network 172.17.0.0/24 overlaps host route `{route}`")]
     RouteOverlap { route: String },
     #[error("clone networking refuses non-default IPv4 policy rule `{rule}`")]

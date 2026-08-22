@@ -103,7 +103,7 @@ TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${BUILD_ARCH}.tar.gz"
 MIRROR="${ALPINE_CDN}/${ALPINE_BRANCH}/releases/${BUILD_ARCH}"
 
 MISSING=()
-for cmd in mkfs.ext4 mount umount chroot losetup truncate curl sha256sum tar; do
+for cmd in mkfs.ext4 mount umount chroot losetup truncate curl sha256sum tar chattr lsattr; do
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("$cmd")
 done
 ((${#MISSING[@]} == 0)) || fatal "missing tools: ${MISSING[*]}; install with: apt install e2fsprogs util-linux curl coreutils tar"
@@ -389,11 +389,25 @@ MNT=""
 losetup -d "$LOOP"
 LOOP=""
 
-[[ -f "$OUT" ]] && rm -f "$OUT"
+if [[ -L "$OUT" ]]; then
+    fatal "refusing to replace symlink output: $OUT"
+fi
+if [[ -f "$OUT" ]]; then
+    # Builder-owned images are permanently sealed after publication. Rebuild
+    # is the one explicit replacement path, so it clears only this exact
+    # output's flag before replacing it atomically.
+    chattr -i -- "$OUT"
+    rm -f "$OUT"
+fi
+[[ ! -e "$OUT" ]] || fatal "refusing to replace non-regular output: $OUT"
 mv "$TMP_OUT" "$OUT"
+chmod 0644 "$OUT"
 
 DIGEST="$(sha256sum "$OUT" | awk '{print $1}')"
 ALLOC="$(du -h "$OUT" | awk '{print $1}')"
+chattr +i -- "$OUT"
+lsattr -d -- "$OUT" | awk 'NR == 1 { exit index($1, "i") == 0 }' \
+    || fatal "published rootfs did not retain FS_IMMUTABLE_FL: $OUT"
 log "done: $OUT (${ALLOC} allocated, ${SIZE} capacity)"
 log "sha256: $DIGEST"
 log "guest user: ${GUEST_USER} (uid ${GUEST_UID}); ssh as ${GUEST_USER}@<guest-ip>"

@@ -15,8 +15,8 @@ use thiserror::Error;
 /// Schema version for `room.json` (forward-compat, mirrors `result.json`).
 ///
 /// v2 adds `pid_starttime`; v3 adds the optional `slot` object; v4 adds the
-/// optional `provenance` (sealed-neutral-base lineage). Older files still read
-/// (each added field defaults to `None`).
+/// optional `provenance` (sealed-neutral-base lineage). Later additive fields
+/// remain optional so older files still read (each defaults to `None`).
 pub const ROOM_META_SCHEMA_VERSION: u32 = 4;
 
 /// Metadata file name inside a room's state dir.
@@ -134,6 +134,13 @@ pub struct RoomMeta {
     /// keep their exact shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<Slot>,
+    /// Host clone-network identity used by a namespaced snapshot restore.
+    ///
+    /// Only the bounded allocator index is persisted; namespace, veth, and
+    /// address names are derived from it so disk state cannot inject arbitrary
+    /// host resource names. `None` is the unchanged flat-room path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_net_index: Option<u8>,
     /// Sealed-neutral-base lineage (`rooms base-create`); `None` for a plain
     /// workload room or a pre-v4 `room.json`.
     ///
@@ -174,6 +181,7 @@ impl RoomMeta {
             pid_starttime,
             keep,
             slot: None,
+            clone_net_index: None,
             provenance: None,
             snapshot_lineage: None,
         }
@@ -479,10 +487,24 @@ mod tests {
     }
 
     #[test]
+    fn meta_round_trips_with_clone_network_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut meta = sample(Some(42));
+        meta.clone_net_index = Some(7);
+        write_atomic(dir.path(), &meta).expect("write");
+        let back = read(dir.path()).expect("read").expect("present");
+        assert_eq!(meta, back);
+    }
+
+    #[test]
     fn slotless_meta_serializes_without_a_slot_key() {
         // Legacy rooms must keep their exact file shape: no `"slot": null`.
         let json = serde_json::to_string(&sample(None)).expect("serialize");
         assert!(!json.contains("slot"), "absent slot must not serialize");
+        assert!(
+            !json.contains("clone_net_index"),
+            "flat room must not serialize a clone-network key"
+        );
     }
 
     #[test]
@@ -494,6 +516,7 @@ mod tests {
         std::fs::write(dir.path().join("room.json"), v2).expect("write v2");
         let back = read(dir.path()).expect("read").expect("present");
         assert_eq!(back.slot, None);
+        assert_eq!(back.clone_net_index, None);
     }
 
     #[test]

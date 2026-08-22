@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::clonenet;
 use crate::config::RoomsConfig;
 use crate::doctor;
 use crate::error::FirecrackerError;
@@ -83,6 +84,10 @@ pub struct RoomEntry {
     /// `ls --json` schema.
     #[serde(skip)]
     pub snapshot_lineage: Option<String>,
+    /// Clone-network allocator identity for namespace-aware teardown.
+    /// Internal — the v1 `ls --json` surface remains unchanged.
+    #[serde(skip)]
+    pub clone_net_index: Option<u8>,
 }
 
 /// The `ls --json` payload (schema'd, like the doctor/diff reports).
@@ -200,6 +205,7 @@ fn entry_for(config: &RoomsConfig, id: &str) -> RoomEntry {
         started_at: meta.as_ref().map(|m| m.started_at),
         keep,
         slot: meta.as_ref().and_then(|m| m.slot.clone()),
+        clone_net_index: meta.as_ref().and_then(|m| m.clone_net_index),
         snapshot_lineage: meta.and_then(|m| m.snapshot_lineage),
     }
 }
@@ -215,8 +221,14 @@ fn entry_for(config: &RoomsConfig, id: &str) -> RoomEntry {
 /// else.
 fn reap_room(config: &RoomsConfig, entry: &RoomEntry) -> Result<(), RegistryError> {
     if let (Some(snapshot_id), Some(slot)) = (&entry.snapshot_lineage, &entry.slot) {
-        return crate::restore_exec::finish_teardown(config, &entry.id, snapshot_id, slot.index)
-            .map_err(|e| RegistryError::Firecracker(FirecrackerError::Internal(e.to_string())));
+        return crate::restore_exec::finish_teardown(
+            config,
+            &entry.id,
+            snapshot_id,
+            slot.index,
+            entry.clone_net_index,
+        )
+        .map_err(|e| RegistryError::Firecracker(FirecrackerError::Internal(e.to_string())));
     }
     let (room_dir, jail_instance_dir, socket) = reap_paths(config, &entry.id)?;
     let slot = slot_release_for(config, entry)?;
@@ -279,7 +291,8 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
     // the room's own teardown. Skip the sweep on a dry-run and on a targeted
     // (`--only`) gc — both are scoped to a single room, not a pool-wide sweep.
     let pending = snapshot_exec::pending_all(config).map_err(|error| snapshot_error(&error))?;
-    if !opts.dry_run && opts.only.is_none() && pending.is_empty() {
+    let global_reconcile = should_reconcile_global_allocators(opts);
+    if global_reconcile && pending.is_empty() {
         reconcile_leaked_slots(config);
     }
     let mut rooms = list_rooms(config)?;
@@ -349,11 +362,25 @@ pub fn gc(config: &RoomsConfig, opts: &GcOptions) -> Result<GcReport, RegistryEr
             });
         }
     }
+    // Allocation precedes restore-intent creation, so a CLI killed in that
+    // window leaves only the indexed CloneNet claim and its exact host-global
+    // owner marker. Run this after room/intent teardown so allocations backed
+    // by durable room state are preserved and anything those passes removed is
+    // immediately eligible. `clonenet::reconcile` re-checks claimer liveness,
+    // room-directory custody, and the exact owner marker under its pool lock;
+    // foreign or reassigned host resources are never torn down.
+    if global_reconcile {
+        reconcile_leaked_clonenets(config);
+    }
     Ok(GcReport {
         schema_version: REGISTRY_SCHEMA_VERSION,
         dry_run: opts.dry_run,
         outcomes,
     })
+}
+
+const fn should_reconcile_global_allocators(opts: &GcOptions) -> bool {
+    !opts.dry_run && opts.only.is_none()
 }
 
 /// Decide and (unless dry-run) perform the reap for one room. The cardinal
@@ -447,6 +474,27 @@ fn reconcile_leaked_slots(config: &RoomsConfig) {
     }
     for index in doctor::orphaned_pool_taps(config) {
         firecracker::delete_tap(&format!("tap-fc{index}"));
+    }
+}
+
+/// Reclaim dead `CloneNet` claims from the normal global-GC path.
+///
+/// The allocator performs the destructive proof itself while holding its
+/// free-lock: a live claimer, durable room directory, mismatched host owner
+/// marker, or reassigned claim is retained. This wrapper deliberately has no
+/// index/name synthesis or broad orphan sweep of its own.
+fn reconcile_leaked_clonenets(config: &RoomsConfig) {
+    let Some(base) = config.resolved_state_base() else {
+        return;
+    };
+    for reclaimed in clonenet::reconcile(&base) {
+        if !reclaimed.removed {
+            warn!(
+                clone_net = reclaimed.index,
+                owner = %reclaimed.owner_id,
+                "dead clone-network claim retained because exact host custody was not available"
+            );
+        }
     }
 }
 
@@ -625,6 +673,7 @@ fn unknown_entry(id: &str) -> RoomEntry {
         keep: false,
         slot: None,
         snapshot_lineage: None,
+        clone_net_index: None,
     }
 }
 
@@ -755,8 +804,9 @@ mod tests {
     )]
 
     use super::{
-        classify, gc, is_valid_room_id, kill, kill_live, list_rooms, parse_ls_report, GcOptions,
-        KillDisposition, ListReport, RoomEntry, RoomState, REGISTRY_SCHEMA_VERSION,
+        classify, gc, is_valid_room_id, kill, kill_live, list_rooms, parse_ls_report,
+        should_reconcile_global_allocators, GcOptions, KillDisposition, ListReport, RoomEntry,
+        RoomState, REGISTRY_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::error::RegistryError;
@@ -779,6 +829,7 @@ mod tests {
             keep: true,
             slot: None,
             snapshot_lineage: None,
+            clone_net_index: None,
         }
     }
 
@@ -875,6 +926,19 @@ mod tests {
         assert!(!RoomState::Running.is_reapable());
         assert!(!RoomState::Kept.is_reapable());
         assert!(!RoomState::Unknown.is_reapable());
+    }
+
+    #[test]
+    fn only_a_real_global_gc_reconciles_allocator_pools() {
+        assert!(should_reconcile_global_allocators(&GcOptions::default()));
+        assert!(!should_reconcile_global_allocators(&GcOptions {
+            dry_run: true,
+            only: None,
+        }));
+        assert!(!should_reconcile_global_allocators(&GcOptions {
+            dry_run: false,
+            only: Some(VALID_ID.to_owned()),
+        }));
     }
 
     #[test]
@@ -1273,6 +1337,7 @@ mod tests {
             keep: false,
             slot: None,
             snapshot_lineage: None,
+            clone_net_index: None,
         };
         let outcome = kill_live(&config, &entry).unwrap();
         assert_eq!(

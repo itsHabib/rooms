@@ -93,6 +93,33 @@ pub enum GuestSignal {
     SshReady,
 }
 
+/// Host-side route to one guest.
+///
+/// A restored clone keeps its frozen guest IP inside a private network
+/// namespace, while a normal boot remains directly reachable from the host.
+/// Keeping both facts together prevents an individual SSH or ping call from
+/// accidentally escaping the clone's namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestTarget<'a> {
+    guest_ip: &'a str,
+    netns: Option<&'a str>,
+}
+
+impl<'a> GuestTarget<'a> {
+    /// Direct host-to-guest access (the pre-clone behavior).
+    pub const fn flat(guest_ip: &'a str) -> Self {
+        Self {
+            guest_ip,
+            netns: None,
+        }
+    }
+
+    /// Access with an optional host network namespace.
+    pub const fn new(guest_ip: &'a str, netns: Option<&'a str>) -> Self {
+        Self { guest_ip, netns }
+    }
+}
+
 /// Probe the guest's sshd until it accepts a pubkey connection, or the
 /// configured timeout elapses.
 ///
@@ -102,11 +129,11 @@ pub enum GuestSignal {
 /// `guest_reach_timeout` and `guest_reach_poll_interval` knobs without each
 /// caller redefining them.
 pub async fn wait_for_ssh(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     config: &RoomsConfig,
 ) -> Result<(), FirecrackerError> {
-    wait_for_ssh_observed(guest_ip, key_path, config, false, |_| {}).await
+    wait_for_ssh_observed(target, key_path, config, false, |_| {}).await
 }
 
 /// [`wait_for_ssh`], reporting readiness signals to `observe` as they happen.
@@ -119,12 +146,13 @@ pub async fn wait_for_ssh(
 /// holds: an accepted SSH connection proves the kernel booted, so both signals
 /// fire back-to-back. One deadline bounds the whole wait either way.
 pub async fn wait_for_ssh_observed(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     config: &RoomsConfig,
     probe_ping: bool,
     mut observe: impl FnMut(GuestSignal),
 ) -> Result<(), FirecrackerError> {
+    let guest_ip = target.guest_ip;
     let key = key_path
         .to_str()
         .ok_or_else(|| FirecrackerError::Internal("key path not utf-8".to_owned()))?;
@@ -143,7 +171,7 @@ pub async fn wait_for_ssh_observed(
             });
         }
 
-        match probe_ssh_once(guest_ip, key).await? {
+        match probe_ssh_once(target, key).await? {
             None => {
                 info!(guest_ip, "sshd accepted pubkey connection");
                 signal_ready(&mut observe, guest_seen);
@@ -153,7 +181,7 @@ pub async fn wait_for_ssh_observed(
         }
         debug!(guest_ip, stderr = %last_err, "sshd probe failed; retrying");
 
-        if probe_ping && !guest_seen && probe_ping_once(guest_ip).await {
+        if probe_ping && !guest_seen && probe_ping_once(target).await {
             info!(guest_ip, "guest answered ping (kernel up; sshd not yet)");
             guest_seen = true;
             observe(GuestSignal::GuestReady);
@@ -174,8 +202,12 @@ fn signal_ready(observe: &mut impl FnMut(GuestSignal), guest_seen: bool) {
 
 /// One sshd pubkey probe: `Ok(None)` accepted, `Ok(Some(stderr))` refused,
 /// `Err` when the host-side ssh client couldn't even spawn.
-async fn probe_ssh_once(guest_ip: &str, key: &str) -> Result<Option<String>, FirecrackerError> {
-    let output = Command::new("ssh")
+async fn probe_ssh_once(
+    target: GuestTarget<'_>,
+    key: &str,
+) -> Result<Option<String>, FirecrackerError> {
+    let mut command = guest_process(target, "ssh");
+    let output = command
         .args([
             "-i",
             key,
@@ -189,7 +221,7 @@ async fn probe_ssh_once(guest_ip: &str, key: &str) -> Result<Option<String>, Fir
             "UserKnownHostsFile=/dev/null",
             "-o",
             "LogLevel=ERROR",
-            &format!("{GUEST_USER}@{guest_ip}"),
+            &format!("{GUEST_USER}@{}", target.guest_ip),
             "true",
         ])
         .stdin(Stdio::null())
@@ -209,9 +241,8 @@ async fn probe_ssh_once(guest_ip: &str, key: &str) -> Result<Option<String>, Fir
 
 /// One ICMP echo probe (`ping -c 1 -W 1`). Best-effort observation: any
 /// failure — no ping binary, ICMP filtered, no reply — is just `false`.
-async fn probe_ping_once(guest_ip: &str) -> bool {
-    Command::new("ping")
-        .args(["-c", "1", "-W", "1", guest_ip])
+async fn probe_ping_once(target: GuestTarget<'_>) -> bool {
+    ping_command(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -239,15 +270,23 @@ pub struct GuestExecOutcome {
 /// path or the cursor path, both of which route their guest command through the
 /// same `EXIT=` wrapper so exit-code capture and `result.json` ownership are
 /// identical.
-pub async fn exec(guest_ip: &str, key_path: &Path, runner: &Runner) -> Result<GuestExecOutcome> {
+pub async fn exec(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    runner: &Runner,
+) -> Result<GuestExecOutcome> {
     match runner {
-        Runner::Command(command) => exec_in_guest(guest_ip, key_path, command).await,
-        Runner::Cursor(request) => exec_cursor_in_guest(guest_ip, key_path, request).await,
+        Runner::Command(command) => exec_in_guest(target, key_path, command).await,
+        Runner::Cursor(request) => exec_cursor_in_guest(target, key_path, request).await,
     }
 }
 
 /// Tar-over-ssh: stream the guest's `/workspace/out` into `host_dir`. `GH_TOKEN` not forwarded.
-pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Path) -> Result<()> {
+pub async fn collect_out_to_host(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    host_dir: &Path,
+) -> Result<()> {
     // Fresh dir per collection; a missing dir is fine, any other remove failure is fatal.
     match tokio::fs::remove_dir_all(host_dir).await {
         Ok(()) => {}
@@ -259,7 +298,7 @@ pub async fn collect_out_to_host(guest_ip: &str, key_path: &Path, host_dir: &Pat
         .with_context(|| format!("create --out dir {}", host_dir.display()))?;
     // Empty stream (not a `cd` error) when /workspace/out is absent; `.output()` drains both pipes.
     let ssh_out = ssh_command(
-        guest_ip,
+        target,
         key_path,
         "if [ -d /workspace/out ]; then tar cf - -C /workspace/out .; else exit 0; fi",
         false,
@@ -318,11 +357,11 @@ done'"#;
 /// `host_dir`. Best-effort and read-only: callers run this after
 /// `collect_out_to_host` and never fail a run on its error.
 pub async fn collect_changeset_to_host(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     host_dir: &Path,
 ) -> Result<()> {
-    let ssh_out = ssh_command(guest_ip, key_path, ENUMERATE_OVERLAY, false)?
+    let ssh_out = ssh_command(target, key_path, ENUMERATE_OVERLAY, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -439,11 +478,11 @@ async fn run_host_tar(
 /// the cursor push step (see `push_branch_in_guest`), so a `--command` run and
 /// the agent never see the push token.
 pub async fn exec_in_guest(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     command: &str,
 ) -> Result<GuestExecOutcome> {
-    let run = run_wrapped(guest_ip, key_path, command).await?;
+    let run = run_wrapped(target, key_path, command).await?;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let result = ResultJson::from_exec(
         run.exit_code,
@@ -452,7 +491,7 @@ pub async fn exec_in_guest(
         run.ended_at,
         guest_command_argv(command),
     );
-    write_guest_result_json(guest_ip, key_path, &result).await?;
+    write_guest_result_json(target, key_path, &result).await?;
 
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
@@ -472,27 +511,21 @@ pub async fn exec_in_guest(
 /// structured error line plus an empty summary — so those references never
 /// dangle. `result.patch` is generated here from `git diff` after the run.
 pub async fn exec_cursor_in_guest(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     request: &CursorRequest,
 ) -> Result<GuestExecOutcome> {
-    clone_repo_in_guest(
-        guest_ip,
-        key_path,
-        &request.repo_url,
-        &request.meta.base_sha,
-    )
-    .await?;
-    stage_cursor_input(guest_ip, key_path, &request.task_md, &request.meta).await?;
+    clone_repo_in_guest(target, key_path, &request.repo_url, &request.meta.base_sha).await?;
+    stage_cursor_input(target, key_path, &request.task_md, &request.meta).await?;
 
     let run = run_wrapped(
-        guest_ip,
+        target,
         key_path,
         &format!("node {CURSOR_RUNNER_JS} < /dev/null"),
     )
     .await?;
 
-    let patch_written = match generate_result_patch(guest_ip, key_path).await {
+    let patch_written = match generate_result_patch(target, key_path).await {
         Ok(()) => true,
         Err(err) => {
             warn!(error = %err, "failed to generate result.patch; omitting patch_path");
@@ -508,7 +541,7 @@ pub async fn exec_cursor_in_guest(
     let mut push_err: Option<anyhow::Error> = None;
     let pushed_branch = match (&request.push_branch, run.exit_code) {
         (Some(branch), 0) => {
-            match push_branch_in_guest(guest_ip, key_path, &request.repo_url, branch).await {
+            match push_branch_in_guest(target, key_path, &request.repo_url, branch).await {
                 Ok(true) => Some(branch.clone()),
                 Ok(false) => None,
                 Err(e) => {
@@ -535,7 +568,7 @@ pub async fn exec_cursor_in_guest(
     // as a backstop — a no-op when the files exist, so a real error line and
     // summary survive.
     run_setup_ssh(
-        guest_ip,
+        target,
         key_path,
         "mkdir -p /workspace/out && touch /workspace/out/events.ndjson /workspace/out/summary.md",
         "ensure cursor output artifacts exist",
@@ -547,7 +580,7 @@ pub async fn exec_cursor_in_guest(
         result.patch_path = Some("result.patch".to_owned());
     }
     result.pushed_branch = pushed_branch;
-    write_guest_result_json(guest_ip, key_path, &result).await?;
+    write_guest_result_json(target, key_path, &result).await?;
 
     // result.json is recorded before the push failure surfaces, so a push
     // error never eats the run's artifact. The outcome carries the failure
@@ -581,7 +614,7 @@ struct WrappedRun {
 /// argument to `bash -c`, so no syntax in it can reach the outer wrapper.
 /// `bash -c` also gives subshell isolation, so a user `exit 42` aborts only the
 /// inner bash and the wrapper's `echo EXIT=$?` still prints.
-async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<WrappedRun> {
+async fn run_wrapped(target: GuestTarget<'_>, key_path: &Path, inner: &str) -> Result<WrappedRun> {
     let started_at = Utc::now();
     let quoted_command = shell_single_quote(inner);
     let remote = format!(
@@ -589,7 +622,7 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
          bash -c {quoted_command} > /workspace/out/logs/stdout.log 2> /workspace/out/logs/stderr.log; \
          echo EXIT=$?"
     );
-    let output = ssh_command(guest_ip, key_path, &remote, false)?
+    let output = ssh_command(target, key_path, &remote, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -643,7 +676,7 @@ async fn run_wrapped(guest_ip: &str, key_path: &Path, inner: &str) -> Result<Wra
 /// populated repo. The URL and sha are single-quoted into the remote shell so
 /// neither can inject.
 async fn clone_repo_in_guest(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     repo_url: &str,
     base_sha: &str,
@@ -655,7 +688,7 @@ async fn clone_repo_in_guest(
          git -C /workspace/repo checkout {sha} && \
          git -C /workspace/repo update-ref refs/rooms/base HEAD"
     );
-    run_setup_ssh(guest_ip, key_path, &remote, "clone repo in guest").await
+    run_setup_ssh(target, key_path, &remote, "clone repo in guest").await
 }
 
 /// Resolve the optional repository entirely on the host and build the
@@ -765,13 +798,13 @@ impl Drop for TempPath {
 
 /// Write `task.md` and `meta.json` into `/workspace/in/` for `cursor-runner.js`.
 async fn stage_cursor_input(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     task_md: &str,
     meta: &CursorMeta,
 ) -> Result<()> {
     write_guest_file(
-        guest_ip,
+        target,
         key_path,
         "/workspace/in",
         "task.md",
@@ -780,7 +813,7 @@ async fn stage_cursor_input(
     .await?;
     let meta_json = serde_json::to_string_pretty(meta).context("serialize meta.json")?;
     write_guest_file(
-        guest_ip,
+        target,
         key_path,
         "/workspace/in",
         "meta.json",
@@ -795,10 +828,10 @@ async fn stage_cursor_input(
 /// Best effort: a git error still leaves an (empty) patch file via the `>`
 /// redirect, but a transport failure propagates so the caller can omit
 /// `patch_path` rather than reference a missing file.
-async fn generate_result_patch(guest_ip: &str, key_path: &Path) -> Result<()> {
+async fn generate_result_patch(target: GuestTarget<'_>, key_path: &Path) -> Result<()> {
     let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
          git diff --cached refs/rooms/base > /workspace/out/result.patch 2>/dev/null || true";
-    run_setup_ssh(guest_ip, key_path, remote, "generate result.patch").await
+    run_setup_ssh(target, key_path, remote, "generate result.patch").await
 }
 
 /// Commit the agent's changes and push them to `branch` on the repo's remote.
@@ -808,7 +841,7 @@ async fn generate_result_patch(guest_ip: &str, key_path: &Path) -> Result<()> {
 /// git credential helper that reads `GH_TOKEN` from the guest env (forwarded via
 /// SSH `SendEnv`), so the token is never placed in argv.
 async fn push_branch_in_guest(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     repo_url: &str,
     branch: &str,
@@ -833,7 +866,7 @@ async fn push_branch_in_guest(
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );
-    let output = ssh_command(guest_ip, key_path, &remote, true)?
+    let output = ssh_command(target, key_path, &remote, true)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -858,12 +891,15 @@ async fn push_branch_in_guest(
 /// missing — and `RunnerArtifacts::load` then bails with `MissingRequired`
 /// even though `result.json` has been written. Touching empty placeholders
 /// keeps the contract intact for cancelled runs.
-pub async fn ensure_guest_artifact_skeleton(guest_ip: &str, key_path: &Path) -> Result<()> {
+pub async fn ensure_guest_artifact_skeleton(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+) -> Result<()> {
     let remote = "mkdir -p /workspace/out/logs \
          && : > /workspace/out/logs/stdout.log \
          && : > /workspace/out/logs/stderr.log";
     run_setup_ssh(
-        guest_ip,
+        target,
         key_path,
         remote,
         "create cancelled-run artifact skeleton",
@@ -873,13 +909,13 @@ pub async fn ensure_guest_artifact_skeleton(guest_ip: &str, key_path: &Path) -> 
 
 /// Write `result.json` into the guest artifact directory.
 pub async fn write_guest_result_json(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     result: &ResultJson,
 ) -> Result<()> {
     let json = serde_json::to_string_pretty(result).context("serialize result.json")?;
     write_guest_file(
-        guest_ip,
+        target,
         key_path,
         "/workspace/out",
         "result.json",
@@ -894,14 +930,14 @@ pub async fn write_guest_result_json(
 /// `dir` and `name` are fixed substrate constants (never operator input), so no
 /// shell-quoting is required for them.
 async fn write_guest_file(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     dir: &str,
     name: &str,
     contents: &[u8],
 ) -> Result<()> {
     let remote = format!("mkdir -p {dir} && cat > {dir}/{name}");
-    let mut child = ssh_command(guest_ip, key_path, &remote, false)?
+    let mut child = ssh_command(target, key_path, &remote, false)?
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -941,8 +977,13 @@ async fn write_guest_file(
 ///
 /// Unlike [`run_wrapped`], there is no `EXIT=` marker contract: failure is a
 /// hard error surfaced to the caller, with the guest stderr attached.
-async fn run_setup_ssh(guest_ip: &str, key_path: &Path, remote: &str, what: &str) -> Result<()> {
-    let output = ssh_command(guest_ip, key_path, remote, false)?
+async fn run_setup_ssh(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    remote: &str,
+    what: &str,
+) -> Result<()> {
+    let output = ssh_command(target, key_path, remote, false)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1000,15 +1041,33 @@ fn parse_remote_exit_code(stdout: &[u8]) -> Result<i32> {
         .with_context(|| format!("EXIT= marker not numeric: {marker:?}; raw stdout: {text:?}"))
 }
 
+/// Build a host process that reaches `program` through the guest's namespace
+/// when one is assigned. The namespace is passed as one argv token: this never
+/// invokes a shell on the host.
+fn guest_process(target: GuestTarget<'_>, program: &str) -> Command {
+    let Some(netns) = target.netns else {
+        return Command::new(program);
+    };
+    let mut command = Command::new("ip");
+    command.args(["netns", "exec", netns, program]);
+    command
+}
+
+fn ping_command(target: GuestTarget<'_>) -> Command {
+    let mut command = guest_process(target, "ping");
+    command.args(["-c", "1", "-W", "1", target.guest_ip]);
+    command
+}
+
 fn ssh_command(
-    guest_ip: &str,
+    target: GuestTarget<'_>,
     key_path: &Path,
     remote: &str,
     forward_gh_token: bool,
 ) -> Result<Command> {
     let key = key_path.to_str().context("key path not utf-8")?;
-    let dest = format!("{GUEST_USER}@{guest_ip}");
-    let mut cmd = Command::new("ssh");
+    let dest = format!("{GUEST_USER}@{}", target.guest_ip);
+    let mut cmd = guest_process(target, "ssh");
     cmd.args([
         "-i",
         key,
@@ -1052,8 +1111,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        cursor_command_argv, repo_url_has_userinfo, shell_single_quote, ssh_command,
-        tar_member_is_safe, validate_neutral_warm, wait_for_ssh, CursorMeta,
+        cursor_command_argv, ping_command, repo_url_has_userinfo, shell_single_quote, ssh_command,
+        tar_member_is_safe, validate_neutral_warm, wait_for_ssh, CursorMeta, GuestTarget,
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
@@ -1083,7 +1142,7 @@ mod tests {
     fn ssh_command_scopes_gh_token_to_push() {
         let key = std::path::Path::new("/tmp/id_rooms");
         let collect = |forward| {
-            ssh_command("10.0.0.1", key, "true", forward)
+            ssh_command(GuestTarget::flat("10.0.0.1"), key, "true", forward)
                 .expect("build ssh command")
                 .as_std()
                 .get_args()
@@ -1121,6 +1180,105 @@ mod tests {
             tok < dest,
             "SendEnv=GH_TOKEN must precede the destination; got: {with:?}"
         );
+    }
+
+    #[test]
+    fn guest_commands_keep_flat_argv_and_add_direct_netns_prefix() {
+        let key = std::path::Path::new("/tmp/id_rooms");
+        let flat = ssh_command(GuestTarget::flat("10.0.0.1"), key, "true", false)
+            .expect("build flat ssh command");
+        let namespaced = ssh_command(
+            GuestTarget::new("10.0.0.1", Some("rooms-c3")),
+            key,
+            "true",
+            false,
+        )
+        .expect("build namespaced ssh command");
+        let (flat_program, flat_args) = command_parts(&flat);
+        let (namespaced_program, namespaced_args) = command_parts(&namespaced);
+
+        assert_eq!(flat_program, "ssh");
+        assert_eq!(
+            flat_args,
+            [
+                "-i",
+                "/tmp/id_rooms",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "SendEnv=ANTHROPIC_API_KEY",
+                "-o",
+                "SendEnv=CLAUDE_CODE_OAUTH_TOKEN",
+                "-o",
+                "SendEnv=ANTHROPIC_AUTH_TOKEN",
+                "-o",
+                "SendEnv=CURSOR_API_KEY",
+                "rooms@10.0.0.1",
+                "--",
+                "true",
+            ]
+        );
+        assert_eq!(namespaced_program, "ip");
+        assert_eq!(
+            namespaced_args,
+            ["netns", "exec", "rooms-c3", "ssh"]
+                .into_iter()
+                .chain(flat_args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+        );
+
+        let (flat_ping_program, flat_ping_args) =
+            command_parts(&ping_command(GuestTarget::flat("10.0.0.1")));
+        let (netns_ping_program, netns_ping_args) = command_parts(&ping_command(GuestTarget::new(
+            "10.0.0.1",
+            Some("rooms-c3"),
+        )));
+        assert_eq!(flat_ping_program, "ping");
+        assert_eq!(flat_ping_args, ["-c", "1", "-W", "1", "10.0.0.1"]);
+        assert_eq!(netns_ping_program, "ip");
+        assert_eq!(
+            netns_ping_args,
+            ["netns", "exec", "rooms-c3", "ping", "-c", "1", "-W", "1", "10.0.0.1",]
+        );
+    }
+
+    #[test]
+    fn namespace_metacharacters_remain_one_argv_token() {
+        let namespace = "rooms-c3; touch /tmp/escaped $(false)";
+        let command = ssh_command(
+            GuestTarget::new("10.0.0.1", Some(namespace)),
+            std::path::Path::new("/tmp/id_rooms"),
+            "true",
+            false,
+        )
+        .expect("build namespaced ssh command");
+        let (program, args) = command_parts(&command);
+
+        assert_eq!(program, "ip");
+        assert_eq!(args.get(2).map(String::as_str), Some(namespace));
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == namespace).count(),
+            1
+        );
+        assert!(!args.iter().any(|arg| arg == "sh" || arg == "-c"));
+    }
+
+    fn command_parts(command: &tokio::process::Command) -> (String, Vec<String>) {
+        let command = command.as_std();
+        let program = command.get_program().to_string_lossy().into_owned();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        (program, args)
     }
 
     #[test]
@@ -1179,7 +1337,7 @@ mod tests {
         };
         let start = std::time::Instant::now();
 
-        let err = wait_for_ssh("127.0.0.255", key_path, &config)
+        let err = wait_for_ssh(GuestTarget::flat("127.0.0.255"), key_path, &config)
             .await
             .expect_err("unreachable address should time out");
 
