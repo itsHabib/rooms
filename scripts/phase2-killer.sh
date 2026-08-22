@@ -91,6 +91,11 @@ readonly ENDPOINT_COMMENT="rooms-p2-$PROOF_TAG"
 readonly ENDPOINT_PORT_FILE="$PROOF_ROOT/endpoint.port"
 readonly ENDPOINT_REQUESTS="$PROOF_ROOT/endpoint-requests.ndjson"
 readonly SSH_WALL_TIMEOUT_SECONDS=20
+# `rooms clone --command` starts `--max-wall` before its bounded SSH readiness
+# loop. Keep this proof cap strictly above RoomsConfig::guest_reach_timeout
+# (120s) so the harness does not cancel a valid, contended eight-clone boot;
+# the remaining minute still hard-bounds the repo workload and witness probe.
+readonly WITNESS_MAX_WALL_SECONDS=180
 readonly ROOMS_PROOF_RUST_LOG="info,rooms::vsock=debug"
 readonly ROOMS_ROOT_PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -170,6 +175,8 @@ IDENTITY_PASS="false"
 ISOLATION_PASS="false"
 TWO_HOP_PASS="false"
 WITNESS_PASS="false"
+WITNESS_COMMAND_STATUS=""
+WITNESS_HARD_FAILURES_BEFORE=""
 FINAL_LEAK_AUDIT_PASS="false"
 HARD_FAILURES=0
 PERFORMANCE_FAILURES=0
@@ -254,11 +261,30 @@ add_created_id() {
 
 track_json_ids() {
     local json_file="$1"
+    local ids
+
+    ids="$(jq -ser '
+        if length != 1 then error("expected exactly one clone envelope") else .[0] end as $doc |
+        ($doc.clones // error("missing clones")) as $clones |
+        ($doc.failures // []) as $failures |
+        if (($clones | type) != "array" or ($failures | type) != "array") then
+            error("clone records are not arrays")
+        else
+            [$clones[]?.room_id, $failures[]?.room_id]
+        end as $ids |
+        if (($ids | length) == 0 or any($ids[]; type != "string")) then
+            error("clone records do not carry valid room ids")
+        else
+            $ids[]
+        end
+    ' "$json_file")" || fatal \
+        "clone_id_roster_invalid" \
+        "clone result did not expose a valid clones/failures room-id roster: $json_file"
     while read -r room_id; do
         add_created_id "$room_id" || fatal \
             "invalid_created_room_id" \
             "invalid room id in $json_file: $room_id"
-    done < <(jq -er '.clones[].room_id' "$json_file")
+    done <<<"$ids"
 }
 
 run_rooms() {
@@ -302,6 +328,147 @@ run_rooms() {
         GIT_OPTIONAL_LOCKS=0 \
         RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
         "$ROOMS_BIN" "$@"
+}
+
+run_witness_batch() {
+    # Unknown until the foreground command actually returns. A signal trap may
+    # write the retained summary while this call is still in flight; it must
+    # never publish a speculative zero exit status.
+    WITNESS_COMMAND_STATUS=""
+    if run_rooms clone "$SNAPSHOT_DIR" \
+        --image "$IMAGE" \
+        -n 8 \
+        --max-pool 8 \
+        --command "$WITNESS_COMMAND" \
+        --out "$WITNESS_ROOT" \
+        --witness \
+        --egress none \
+        --max-wall "${WITNESS_MAX_WALL_SECONDS}s" \
+        --json \
+        >"$WITNESS_JSON" \
+        2>"$LOG_DIR/witness.stderr"; then
+        WITNESS_COMMAND_STATUS=0
+    else
+        WITNESS_COMMAND_STATUS=$?
+    fi
+}
+
+account_witness_command_status() {
+    if [[ -z "$WITNESS_COMMAND_STATUS" ]]; then
+        WITNESS_PASS="false"
+        hard_failure "witness_batch_status_unknown" \
+            "witness workload batch has no terminal command status"
+        return 0
+    fi
+    if ((WITNESS_COMMAND_STATUS == 0)); then
+        return 0
+    fi
+    WITNESS_PASS="false"
+    hard_failure "witness_batch_command_failed" \
+        "witness workload batch exited $WITNESS_COMMAND_STATUS; inspecting its retained records and artifacts"
+}
+
+begin_witness_validation() {
+    WITNESS_PASS="false"
+    WITNESS_HARD_FAILURES_BEFORE="$HARD_FAILURES"
+}
+
+commit_witness_validation_result() {
+    if [[ "$WITNESS_COMMAND_STATUS" == "0" ]] \
+        && ((HARD_FAILURES == WITNESS_HARD_FAILURES_BEFORE)); then
+        WITNESS_PASS="true"
+    fi
+}
+
+capture_final_roster() {
+    local final_roster_status=0
+
+    run_rooms ls --json \
+        >"$PROOF_ROOT/final-ls.json" \
+        2>"$LOG_DIR/final-ls.stderr" \
+        || final_roster_status=$?
+    if ((final_roster_status != 0)); then
+        hard_failure "final_roster_unreadable" \
+            "terminal rooms roster exited $final_roster_status; continuing the independent leak probes"
+    elif ! jq -se \
+        'length == 1 and
+         (.[0].schema_version == 1 and
+          (.[0].rooms | type == "array" and length == 0))' \
+        "$PROOF_ROOT/final-ls.json" >/dev/null; then
+        hard_failure "rooms_not_empty" \
+            "proof HOME still lists rooms after command-mode teardown"
+    fi
+}
+
+commit_final_leak_audit_result() {
+    if ((HARD_FAILURES == FINAL_AUDIT_FAILURES_BEFORE)); then
+        FINAL_LEAK_AUDIT_PASS="true"
+    fi
+}
+
+witness_batch_is_clean() {
+    local json_file="$1"
+    local snapshot_id="$2"
+    local guest="$3"
+
+    jq -se \
+        --arg snapshot_id "$snapshot_id" \
+        --arg guest "$guest" '
+        length == 1 and
+        (.[0] as $doc |
+         ($doc | type) == "object" and
+         ($doc | keys) == ["clones"] and
+         ($doc.clones | type) == "array" and
+         ($doc.clones | length) == 8 and
+         all($doc.clones[];
+             .status == "exited" and
+             .exit_code == 0 and
+             .snapshot_id == $snapshot_id and
+             .slot == 1 and
+             .guest_ip == $guest and
+             .namespace == ("rooms-c" + (.clone_net_index | tostring)) and
+             .host_veth == ("veth-h" + (.clone_net_index | tostring))) and
+         ([$doc.clones[].room_id] | unique | length) == 8 and
+         ([$doc.clones[].namespace] | unique | length) == 8 and
+         ([$doc.clones[].host_veth] | unique | length) == 8 and
+         ([$doc.clones[].clone_net_index] | sort) == [range(1; 9)] and
+         ([$doc.clones[].out_dir] | unique | length) == 8)
+    ' "$json_file" >/dev/null
+}
+
+witness_artifact_is_clean() {
+    local json_file="$1"
+    local expected_port="$2"
+
+    sudo -n jq -se \
+        --argjson expected_port "$expected_port" '
+        def destination:
+            type == "object" and
+            (.ip | type) == "string" and
+            (.port | type) == "number" and
+            (.proto | type) == "string" and
+            (.packets | type) == "number";
+        length == 1 and
+        ((.[0] | type) == "object" and
+         (.[0] | keys) == [
+             "blocked", "capture_complete", "destinations", "dns_queries",
+             "egress_policy", "permitted", "schema_version", "tap"
+         ] and
+         .[0].schema_version == 2 and
+         .[0].tap == "tap-fc1" and
+         .[0].capture_complete == true and
+         .[0].egress_policy == "none" and
+         (.[0].permitted | type == "array" and
+          length == 0 and
+          all(.[]; type == "string")) and
+         (.[0].destinations | type == "array" and all(.[]; destination)) and
+         (.[0].blocked | type == "array" and all(.[]; destination)) and
+         (.[0].dns_queries | type == "array" and all(.[]; type == "string")) and
+         any(.[0].destinations[];
+             .ip == "1.1.1.1" and .port == $expected_port and .proto == "tcp") and
+         any(.[0].blocked[];
+             .ip == "1.1.1.1" and .port == $expected_port and .proto == "tcp"))
+    ' "$json_file" >/dev/null
 }
 
 log_cleanup_command() {
@@ -1434,9 +1601,10 @@ recover_proof_snapshots() {
         report "snapshot-recover-list" snapshot-recover --json; then
         return 1
     fi
-    if ! jq -e '
-        .pending | type == "array" and
-        all(.[]; (.snapshot_id | type == "string"))
+    if ! jq -se '
+        length == 1 and
+        (.[0].pending | type == "array" and
+         all(.[]; (.snapshot_id | type == "string")))
     ' >/dev/null <<<"$report"; then
         printf '%s\n' 'cleanup command: snapshot-recover-list returned invalid JSON schema' \
             >>"$CLEANUP_LOG"
@@ -1690,7 +1858,10 @@ cleanup_created_rooms() {
             >>"$CLEANUP_LOG"
     fi
     if run_rooms_cleanup_capture listing "rooms-ls" ls --json; then
-        if ! jq -e '.rooms | type == "array" and length == 0' \
+        if ! jq -se \
+            'length == 1 and
+             (.[0].schema_version == 1 and
+              (.[0].rooms | type == "array" and length == 0))' \
             >/dev/null <<<"$listing"; then
             printf '%s\n' 'cleanup check failed: invalid or nonempty room roster' \
                 >>"$CLEANUP_LOG"
@@ -1794,6 +1965,8 @@ write_summary() {
         --arg isolation_pass "$ISOLATION_PASS" \
         --arg two_hop_pass "$TWO_HOP_PASS" \
         --arg witness_pass "$WITNESS_PASS" \
+        --arg witness_command_status "$WITNESS_COMMAND_STATUS" \
+        --arg witness_max_wall_seconds "$WITNESS_MAX_WALL_SECONDS" \
         --arg final_leak_audit_pass "$FINAL_LEAK_AUDIT_PASS" \
         --arg cleanup_ok "$CLEANUP_OK" \
         --arg rooms_subgate_completed "$ROOMS_SUBGATE_COMPLETED" \
@@ -1867,6 +2040,11 @@ write_summary() {
                  shared_clean: number_or_null($fleet_shared_clean_kb)
                }
              }
+           },
+           witness_workload: {
+             command_exit_code: number_or_null($witness_command_status),
+             max_wall_seconds: number_or_null($witness_max_wall_seconds),
+             passed: ($witness_pass == "true")
            },
            unix_socket_path_budget: {
              worst_case_path: $worst_case_uds_path,
@@ -3430,7 +3608,8 @@ while IFS=$'\t' read -r room_id namespace guest; do
     readiness_ids+=("$room_id")
 done < <(jq -r '.clones[] | [.room_id,.namespace,.guest_ip] | @tsv' "$FLEET_JSON")
 
-READINESS_PASS="true"
+READINESS_PASS="false"
+readiness_hard_failures_before="$HARD_FAILURES"
 for position in "${!readiness_pids[@]}"; do
     readiness_status=0
     wait "${readiness_pids[$position]}" || readiness_status=$?
@@ -3440,6 +3619,9 @@ for position in "${!readiness_pids[@]}"; do
             "clone ${readiness_ids[$position]} did not accept its namespaced SSH probe (exit $readiness_status)"
     fi
 done
+if ((HARD_FAILURES == readiness_hard_failures_before)); then
+    READINESS_PASS="true"
+fi
 
 # Kept-mode `rooms clone` owns the concurrent authenticated SSH barrier and
 # cannot return before every member passes it. Stop the literal interval at
@@ -3461,7 +3643,8 @@ PHASE="fleet-memory"
 log "capturing workload-ready fleet PSS before any two-hop probe"
 readonly FLEET_PSS_TSV="$PROOF_ROOT/fleet-pss.tsv"
 : >"$FLEET_PSS_TSV"
-PSS_PASS="true"
+PSS_PASS="false"
+pss_performance_failures_before="$PERFORMANCE_FAILURES"
 while read -r room_id; do
     room_json="$STATE_DIR/$room_id/room.json"
     privileged_regular_file "$room_json" \
@@ -3522,12 +3705,16 @@ if ((FLEET_PSS_KB >= SINGLE_PSS_KB * 2)); then
     performance_failure "pss_density_missed" \
         "fleet PSS ${FLEET_PSS_KB}KiB is not below 2x one-clone PSS ${SINGLE_PSS_KB}KiB"
 fi
+if ((PERFORMANCE_FAILURES == pss_performance_failures_before)); then
+    PSS_PASS="true"
+fi
 
 PHASE="fleet-two-hop-return-path"
 log "proving request and response across guest tap, namespace NAT, veth, and root INPUT"
 readonly TWO_HOP_GUEST_EVIDENCE="$PROOF_ROOT/two-hop-guest-evidence.tsv"
 : >"$TWO_HOP_GUEST_EVIDENCE"
-TWO_HOP_PASS="true"
+TWO_HOP_PASS="false"
+two_hop_hard_failures_before="$HARD_FAILURES"
 while IFS=$'\t' read -r room_id index namespace guest; do
     expected_response="$ENDPOINT_TOKEN:$room_id"
     expected_peer="172.17.0.$((4 * index + 2))"
@@ -3584,12 +3771,16 @@ if ! endpoint_absent; then
     hard_failure "proof_endpoint_leaked" \
         "proof-owned endpoint resource remains after the return-path proof"
 fi
+if ((HARD_FAILURES == two_hop_hard_failures_before)); then
+    TWO_HOP_PASS="true"
+fi
 
 PHASE="fleet-topology"
 log "capturing namespace, custody, and shared-inode evidence"
 readonly TOPOLOGY_NDJSON="$PROOF_ROOT/fleet-topology.ndjson"
 : >"$TOPOLOGY_NDJSON"
-TOPOLOGY_PASS="true"
+TOPOLOGY_PASS="false"
+topology_hard_failures_before="$HARD_FAILURES"
 while IFS=$'\t' read -r room_id namespace index host_veth slot; do
     room_json="$STATE_DIR/$room_id/room.json"
     if ! privileged_regular_file "$room_json"; then
@@ -3725,6 +3916,9 @@ if [[ "$(jq -sr '[.[].process_ns_inode] | unique | length' "$TOPOLOGY_NDJSON")" 
     TOPOLOGY_PASS="false"
     hard_failure "namespace_inode_not_unique" "the fleet does not have eight distinct network namespaces"
 fi
+if ((HARD_FAILURES == topology_hard_failures_before)); then
+    TOPOLOGY_PASS="true"
+fi
 
 PHASE="fleet-identity"
 log "probing identity, clock, RNG, host/application keys, sudo, and one-shot secrets"
@@ -3760,7 +3954,8 @@ REMOTE
 )"
 readonly REMOTE_PROBE
 
-IDENTITY_PASS="true"
+IDENTITY_PASS="false"
+identity_hard_failures_before="$HARD_FAILURES"
 while IFS=$'\t' read -r room_id index namespace guest; do
     read -r probe_before_realtime_ns probe_before_monotonic_ns \
         < <(host_clock_sample)
@@ -3835,10 +4030,14 @@ if (( $(cut -f12 "$GUEST_EVIDENCE" | sort -u | wc -l) != 1 )) \
     hard_failure "clone_repo_head_drift" \
         "the eight clones did not resume the exact local source HEAD $SOURCE_HEAD"
 fi
+if ((HARD_FAILURES == identity_hard_failures_before)); then
+    IDENTITY_PASS="true"
+fi
 
 PHASE="fleet-isolation"
 log "probing the cross-clone isolation ring"
-ISOLATION_PASS="true"
+ISOLATION_PASS="false"
+isolation_hard_failures_before="$HARD_FAILURES"
 while IFS=$'\t' read -r room_id index namespace guest; do
     next_index=$((index % 8 + 1))
     sibling_address="172.17.0.$((4 * next_index + 2))"
@@ -3880,6 +4079,9 @@ if direct_ssh "$FROZEN_GUEST" true \
     hard_failure "guest_reachable_from_root_namespace" \
         "the duplicate frozen guest IP accepted SSH outside a clone namespace"
 fi
+if ((HARD_FAILURES == isolation_hard_failures_before)); then
+    ISOLATION_PASS="true"
+fi
 
 PHASE="fleet-teardown"
 log "tearing down the exact kept fleet"
@@ -3908,39 +4110,12 @@ readonly WITNESS_ROOT="$ARTIFACT_DIR/witness"
 readonly WITNESS_JSON="$PROOF_ROOT/witness-batch.json"
 readonly WITNESS_COMMAND='set -eu; id="$(cat /run/rooms/identity)"; command -v timeout >/dev/null; command -v bash >/dev/null; command -v cksum >/dev/null; checksum="$(printf %s "$id" | cksum | awk "{print \$1}")"; port=$((1024 + checksum % 50000)); git -C /workspace/repo fsck --no-progress --strict; printf "room=%s witness_port=%s\n" "$id" "$port"; if timeout 2 bash -c "exec 3<>/dev/tcp/1.1.1.1/$port"; then printf "room=%s witness_port=%s egress=reached\n" "$id" "$port"; exit 97; fi; printf "room=%s witness_port=%s egress=blocked\n" "$id" "$port"; test "$(git config --global --get user.email)" = "${id}@rooms.invalid"'
 
-run_rooms clone "$SNAPSHOT_DIR" \
-    --image "$IMAGE" \
-    -n 8 \
-    --max-pool 8 \
-    --command "$WITNESS_COMMAND" \
-    --out "$WITNESS_ROOT" \
-    --witness \
-    --egress none \
-    --max-wall 15s \
-    --json \
-    >"$WITNESS_JSON" \
-    2>"$LOG_DIR/witness.stderr"
+begin_witness_validation
+run_witness_batch
 track_json_ids "$WITNESS_JSON"
 
-WITNESS_PASS="true"
-if ! jq -e \
-    --arg snapshot_id "$SNAPSHOT_ID" \
-    --arg guest "$SNAPSHOT_GUEST" '
-    (.clones | length) == 8 and
-    all(.clones[];
-        .status == "exited" and
-        .exit_code == 0 and
-        .snapshot_id == $snapshot_id and
-        .slot == 1 and
-        .guest_ip == $guest and
-        .namespace == ("rooms-c" + (.clone_net_index | tostring)) and
-        .host_veth == ("veth-h" + (.clone_net_index | tostring))) and
-    ([.clones[].room_id] | unique | length) == 8 and
-    ([.clones[].namespace] | unique | length) == 8 and
-    ([.clones[].host_veth] | unique | length) == 8 and
-    ([.clones[].clone_net_index] | sort) == [range(1; 9)] and
-    ([.clones[].out_dir] | unique | length) == 8
-' "$WITNESS_JSON" >/dev/null; then
+account_witness_command_status
+if ! witness_batch_is_clean "$WITNESS_JSON" "$SNAPSHOT_ID" "$SNAPSHOT_GUEST"; then
     WITNESS_PASS="false"
     hard_failure "witness_batch_invalid" "witness workload batch did not report eight clean exits"
 fi
@@ -3988,21 +4163,16 @@ while IFS=$'\t' read -r room_id out_dir; do
             witness_ok="false"
         fi
     fi
-    if [[ "$witness_ok" == "true" ]] && ! sudo -n jq -e \
-        --argjson expected_port "$expected_port" '
-        .schema_version == 2 and
-        .tap == "tap-fc1" and
-        .capture_complete == true and
-        .egress_policy == "none" and
-        (.permitted | length) == 0 and
-        any(.destinations[]; .ip == "1.1.1.1" and .port == $expected_port and .proto == "tcp") and
-        any(.blocked[]; .ip == "1.1.1.1" and .port == $expected_port and .proto == "tcp")
-    ' "$witness_file" >/dev/null; then
+    if [[ "$witness_ok" == "true" ]] \
+        && ! witness_artifact_is_clean "$witness_file" "$expected_port"; then
         witness_ok="false"
     fi
     if [[ "$witness_ok" == "true" ]] \
-        && ! sudo -n jq -e \
-            '.schema_version == 1 and .status == "succeeded" and .exit_code == 0' \
+        && ! sudo -n jq -se \
+            'length == 1 and
+             (.[0].schema_version == 1 and
+              .[0].status == "succeeded" and
+              .[0].exit_code == 0)' \
             "$result_file" >/dev/null; then
         witness_ok="false"
     fi
@@ -4049,15 +4219,14 @@ if [[ "$(cut -f6 "$WITNESS_MANIFEST" | sort -u | wc -l)" != "8" ]]; then
     WITNESS_PASS="false"
     hard_failure "witness_content_alias" "witness pcaps do not contain eight unique raw captures"
 fi
+commit_witness_validation_result
 
 PHASE="final-leak-audit"
 log "auditing terminal cleanup and protected canonical state"
-FINAL_LEAK_AUDIT_PASS="true"
-run_rooms ls --json >"$PROOF_ROOT/final-ls.json" 2>"$LOG_DIR/final-ls.stderr"
-if ! jq -e '.rooms | length == 0' "$PROOF_ROOT/final-ls.json" >/dev/null; then
-    FINAL_LEAK_AUDIT_PASS="false"
-    hard_failure "rooms_not_empty" "proof HOME still lists rooms after command-mode teardown"
-fi
+FINAL_LEAK_AUDIT_PASS="false"
+FINAL_AUDIT_FAILURES_BEFORE="$HARD_FAILURES"
+readonly FINAL_AUDIT_FAILURES_BEFORE
+capture_final_roster
 if ! assert_terminal_proof_slot; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "final_reservation_drift" \
@@ -4094,6 +4263,11 @@ if ! proof_transients_absent; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "proof_transient_path_leak" \
         "a proof restore intent, snapshot intent, attestation temp, or clone-network claim remains"
+fi
+if ! proof_room_paths_absent; then
+    FINAL_LEAK_AUDIT_PASS="false"
+    hard_failure "proof_room_path_leak" \
+        "a tracked or unlisted proof room/jailer directory remains before EXIT cleanup"
 fi
 if ! endpoint_absent; then
     FINAL_LEAK_AUDIT_PASS="false"
@@ -4151,6 +4325,7 @@ for artifact in snapshot.json snapshot.mem snapshot.vmstate; do
         hard_failure "snapshot_not_preserved" "$artifact disappeared during the gate"
     fi
 done
+commit_final_leak_audit_result
 
 PHASE="complete"
 ROOMS_SUBGATE_COMPLETED="true"
