@@ -637,7 +637,7 @@ printf 'hard_failures=%s audit=%s\n' "$HARD_FAILURES" "$FINAL_LEAK_AUDIT_PASS"
 }
 
 #[test]
-fn phase2_real_jq_rejects_streamed_clone_id_envelopes() {
+fn phase2_real_jq_validates_clone_id_envelopes() {
     let Some(jq_path) = program_on_path("jq") else {
         return;
     };
@@ -646,15 +646,7 @@ fn phase2_real_jq_rejects_streamed_clone_id_envelopes() {
     let temp = tempfile::tempdir().expect("temporary clone-id-jq fixture");
     let add_id = shell_function(source, "add_created_id");
     let track_ids = shell_function(source, "track_json_ids");
-    let streamed_clone_path = temp.path().join("streamed-clones.json");
-    std::fs::write(
-        &streamed_clone_path,
-        concat!(
-            "{\"clones\":[{\"room_id\":\"00000000000000000000000001\"}]}\n",
-            "{\"clones\":[{\"room_id\":\"00000000000000000000000002\"}]}\n"
-        ),
-    )
-    .expect("streamed clone envelopes are written");
+    let clone_path = temp.path().join("clones.json");
     let track_script = format!(
         r#"set -euo pipefail
 jq() {{ "$JQ_BIN" "$@"; }}
@@ -669,17 +661,72 @@ track_json_ids "$1"
 "#
     );
     let tracked_path = temp.path().join("tracked.txt");
-    let track_output = run_bash(
-        &track_script,
-        &[
-            streamed_clone_path
-                .to_str()
-                .expect("streamed clone path is utf-8"),
-            tracked_path.to_str().expect("tracked path is utf-8"),
-            jq_path,
-        ],
+    let run_track = || {
+        run_bash(
+            &track_script,
+            &[
+                clone_path.to_str().expect("clone path is utf-8"),
+                tracked_path.to_str().expect("tracked path is utf-8"),
+                jq_path,
+            ],
+        )
+    };
+
+    std::fs::write(
+        &clone_path,
+        "{\"clones\":[{\"room_id\":\"00000000000000000000000001\"}]}\n",
+    )
+    .expect("valid clone envelope is written");
+    let valid_output = run_track();
+    assert!(
+        valid_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid_output.stderr)
     );
-    assert!(!track_output.status.success());
+    assert_eq!(
+        std::fs::read(&tracked_path).expect("tracked file exists"),
+        b"00000000000000000000000001\n"
+    );
+
+    std::fs::write(
+        &clone_path,
+        "{\"clones\":[{\"room_id\":\"00000000000000000000000001\\u0000\"}]}\n",
+    )
+    .expect("NUL-bearing clone envelope is written");
+    let nul_output = run_track();
+    assert!(!nul_output.status.success());
+    assert_eq!(
+        std::fs::read(&tracked_path).expect("tracked file exists"),
+        b""
+    );
+
+    std::fs::write(
+        &clone_path,
+        concat!(
+            "{\"clones\":[",
+            "{\"room_id\":\"00000000000000000000000001\"},",
+            "{\"room_id\":\"00000000000000000000000002\\n\"}",
+            "]}\n"
+        ),
+    )
+    .expect("mixed valid and newline-bearing clone envelope is written");
+    let newline_output = run_track();
+    assert!(!newline_output.status.success());
+    assert_eq!(
+        std::fs::read(&tracked_path).expect("tracked file exists"),
+        b""
+    );
+
+    std::fs::write(
+        &clone_path,
+        concat!(
+            "{\"clones\":[{\"room_id\":\"00000000000000000000000001\"}]}\n",
+            "{\"clones\":[{\"room_id\":\"00000000000000000000000002\"}]}\n"
+        ),
+    )
+    .expect("streamed clone envelopes are written");
+    let streamed_output = run_track();
+    assert!(!streamed_output.status.success());
     assert_eq!(
         std::fs::read(&tracked_path).expect("tracked file exists"),
         b""

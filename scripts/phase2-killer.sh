@@ -264,16 +264,18 @@ track_json_ids() {
     local ids
 
     ids="$(jq -ser '
-        if length != 1 then error("expected exactly one clone envelope") else .[0] end as $doc |
+        (if length != 1 then error("expected exactly one clone envelope") else .[0] end) as $doc |
         ($doc.clones // error("missing clones")) as $clones |
         ($doc.failures // []) as $failures |
-        if (($clones | type) != "array" or ($failures | type) != "array") then
-            error("clone records are not arrays")
-        else
-            [$clones[]?.room_id, $failures[]?.room_id]
-        end as $ids |
+        (if (($clones | type) != "array" or ($failures | type) != "array") then
+             error("clone records are not arrays")
+         else
+             [$clones[]?.room_id, $failures[]?.room_id]
+         end) as $ids |
         if (($ids | length) == 0 or any($ids[]; type != "string")) then
             error("clone records do not carry valid room ids")
+        elif any($ids[]; (length != 26) or (test("^[0-9a-z]{26}$") | not)) then
+            error("clone records carry malformed room ids")
         else
             $ids[]
         end
