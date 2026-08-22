@@ -4,6 +4,7 @@
 #![allow(clippy::expect_used, clippy::panic, reason = "integration test module")]
 
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -78,6 +79,84 @@ fn phase2_witness_wall_cap_exceeds_the_runtime_ssh_budget() {
         "witness cap {witness_max_wall}s must leave 60s of workload time after the {guest_reach}s SSH budget"
     );
     assert!(source.contains("--max-wall \"${WITNESS_MAX_WALL_SECONDS}s\""));
+}
+
+#[test]
+fn phase2_witness_raw_pcap_reader_feeds_tcpdump_stdin() {
+    let source = include_str!("../scripts/phase2-killer.sh");
+    let read_pcap = shell_function(source, "witness_pcap_has_blocked_tuple");
+    let temp = tempfile::tempdir().expect("temporary pcap-reader fixture");
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir(&bin_dir).expect("fixture bin directory is created");
+    let tcpdump = bin_dir.join("tcpdump");
+    std::fs::write(
+        &tcpdump,
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s\\n' \"$@\" >\"$TCPDUMP_ARGS_FILE\"\n",
+            "cat >\"$TCPDUMP_STDIN_FILE\"\n",
+            "if [ \"${TCPDUMP_EMIT_PACKET:-}\" = 1 ]; then printf 'matching packet\\n'; fi\n",
+        ),
+    )
+    .expect("fake tcpdump is written");
+    let mut permissions = std::fs::metadata(&tcpdump)
+        .expect("fake tcpdump metadata exists")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&tcpdump, permissions).expect("fake tcpdump is executable");
+    let pcap = temp.path().join("retained witness.pcap");
+    std::fs::write(&pcap, b"retained-pcap-bytes\n").expect("pcap fixture is written");
+    let script = format!(
+        r#"set -Eeuo pipefail
+sudo() {{
+    [[ "$1" == -n ]] || return 90
+    shift
+    "$@"
+}}
+{read_pcap}
+PATH="$1/bin:/usr/bin:/bin"
+LOG_DIR="$1"
+TCPDUMP_ARGS_FILE="$1/tcpdump.args"
+TCPDUMP_STDIN_FILE="$1/tcpdump.stdin"
+TCPDUMP_EMIT_PACKET=1
+export PATH TCPDUMP_ARGS_FILE TCPDUMP_STDIN_FILE TCPDUMP_EMIT_PACKET
+witness_pcap_has_blocked_tuple "$2" 45675
+TCPDUMP_EMIT_PACKET=0
+export TCPDUMP_EMIT_PACKET
+if witness_pcap_has_blocked_tuple "$2" 45675; then
+    exit 91
+fi
+"#
+    );
+    let output = run_bash(
+        &script,
+        &[
+            temp.path().to_str().expect("proof path is utf-8"),
+            pcap.to_str().expect("pcap path is utf-8"),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("tcpdump.stdin")).expect("stdin capture exists"),
+        b"retained-pcap-bytes\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("tcpdump.args"))
+            .expect("tcpdump argument capture exists"),
+        concat!(
+            "-nn\n",
+            "-r\n",
+            "-\n",
+            "-c\n",
+            "1\n",
+            "dst host 1.1.1.1 and tcp dst port 45675\n",
+        )
+    );
 }
 
 #[test]

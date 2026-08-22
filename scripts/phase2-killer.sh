@@ -473,6 +473,24 @@ witness_artifact_is_clean() {
     ' "$json_file" >/dev/null
 }
 
+witness_pcap_has_blocked_tuple() {
+    local expected_port="$2"
+    local packet
+    local pcap_file="$1"
+
+    # Ubuntu confines tcpdump from opening retained proof paths. Have the
+    # unconfined privileged shell open the already-resolved regular file, then
+    # exec tcpdump on that exact descriptor through stdin. This avoids copying
+    # the raw custody artifact or weakening the host confinement profile.
+    packet="$(sudo -n sh -c '
+        exec <"$1"
+        exec tcpdump -nn -r - -c 1 \
+            "dst host 1.1.1.1 and tcp dst port $2"
+    ' sh "$pcap_file" "$expected_port")" || return 1
+    # tcpdump returns zero at clean EOF even if the filter matched no packet.
+    [[ -n "$packet" ]]
+}
+
 log_cleanup_command() {
     local label="$1"
     local attempt="$2"
@@ -4185,8 +4203,7 @@ while IFS=$'\t' read -r room_id out_dir; do
         witness_ok="false"
     fi
     if [[ "$witness_ok" == "true" ]] \
-        && ! sudo -n tcpdump -nn -r "$pcap_file" -c 1 \
-            "dst host 1.1.1.1 and tcp dst port $expected_port" \
+        && ! witness_pcap_has_blocked_tuple "$pcap_file" "$expected_port" \
             >/dev/null 2>>"$LOG_DIR/tcpdump-read.stderr"; then
         witness_ok="false"
     fi
