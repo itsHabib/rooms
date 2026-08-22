@@ -103,7 +103,7 @@ TARBALL="alpine-minirootfs-${ALPINE_VERSION}-${BUILD_ARCH}.tar.gz"
 MIRROR="${ALPINE_CDN}/${ALPINE_BRANCH}/releases/${BUILD_ARCH}"
 
 MISSING=()
-for cmd in mkfs.ext4 mount umount chroot losetup truncate curl sha256sum tar; do
+for cmd in mkfs.ext4 mount umount chroot losetup truncate curl sha256sum tar chattr lsattr; do
     command -v "$cmd" >/dev/null 2>&1 || MISSING+=("$cmd")
 done
 ((${#MISSING[@]} == 0)) || fatal "missing tools: ${MISSING[*]}; install with: apt install e2fsprogs util-linux curl coreutils tar"
@@ -172,6 +172,34 @@ echo "$APK_REPO" >> /etc/apk/repositories
 apk update
 apk add --no-cache "claude-code=$CLAUDE_VERSION"
 CHROOT_INSTALL
+
+log "building static post-resume hygiene helper inside native Alpine chroot"
+install -m 0644 "${SCRIPT_DIR}/lib/rooms-resume-apply.c" \
+    "$MNT/tmp/rooms-resume-apply.c"
+chroot "$MNT" /bin/sh -s <<'CHROOT_RESUME_HELPER'
+set -e
+apk add --no-cache --virtual .rooms-resume-build-deps gcc musl-dev linux-headers
+# This is the sole process retained in the clone snapshot. It is compiled
+# without a stack canary deliberately: a canary initialized before the
+# snapshot would become shared secret state across every clone. The receiver
+# has no userspace DRBG, parses bounded trusted-host frames, reseeds the kernel
+# immediately after the first ENTROPY frame, and exits before workload ingress.
+cc -std=c11 -Os -static-pie -fno-stack-protector -D_FORTIFY_SOURCE=2 \
+    -Wall -Wextra -Werror -Wl,-z,relro,-z,now \
+    -o /sbin/rooms-resume-apply /tmp/rooms-resume-apply.c
+if readelf -l /sbin/rooms-resume-apply | grep -q 'INTERP'; then
+    echo "rooms-resume-apply unexpectedly has a dynamic interpreter" >&2
+    exit 1
+fi
+if readelf -sW /sbin/rooms-resume-apply | grep -Eq '__stack_chk_(fail|guard)'; then
+    echo "retained rooms-resume-apply unexpectedly carries a shared stack canary" >&2
+    exit 1
+fi
+strip /sbin/rooms-resume-apply
+chmod 0755 /sbin/rooms-resume-apply
+rm -f /tmp/rooms-resume-apply.c
+apk del .rooms-resume-build-deps
+CHROOT_RESUME_HELPER
 
 log "installing overlay-init (read-only rootfs + tmpfs overlay at boot)"
 install -d -m 0755 "$MNT/mnt" "$MNT/oldroot"
@@ -284,6 +312,39 @@ for env_var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; d
     fi
 done
 
+# Snapshot restores never use the distribution config directly. This small,
+# immutable policy has exactly one guest-generated HostKey and no include,
+# certificate, or agent escape hatch. The native helper validates both this
+# source and one `sshd -T` expansion before it starts the daemon.
+cat >"$MNT/etc/ssh/sshd_config.rooms-resume" <<'EOF'
+Port 22
+AddressFamily inet
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+UseDNS no
+AllowUsers rooms
+AuthorizedKeysFile .ssh/authorized_keys
+StrictModes yes
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PrintMotd no
+AcceptEnv ANTHROPIC_API_KEY
+AcceptEnv CLAUDE_CODE_OAUTH_TOKEN
+AcceptEnv ANTHROPIC_AUTH_TOKEN
+Subsystem sftp internal-sftp
+EOF
+chmod 0644 "$MNT/etc/ssh/sshd_config.rooms-resume"
+
 log "creating ${GUEST_USER} user + enabling services"
 chroot "$MNT" /bin/sh -s -- "$GUEST_USER" "$GUEST_UID" <<'CHROOT_CONFIG'
 set -e
@@ -378,6 +439,18 @@ if [[ -n "$EXTEND" ]]; then
     done
 fi
 
+# The extension hook is trusted customization but must not silently replace a
+# root executable or weaken the exact restore policy that the sealed snapshot
+# relies on. Validate after the hook, immediately before publication.
+for executable in \
+    /sbin/rooms-resume-apply /usr/bin/ssh-keygen /usr/bin/sudo \
+    /usr/sbin/sshd /usr/sbin/visudo; do
+    [[ -f "$MNT$executable" && ! -L "$MNT$executable" && -x "$MNT$executable" ]] \
+        || fatal "post-resume executable is missing, linked, or not executable: $executable"
+done
+chroot "$MNT" /sbin/rooms-resume-apply --prewarm \
+    || fatal "native post-resume helper rejected the final built image policy"
+
 log "syncing and unmounting"
 sync
 umount "$MNT/sys"
@@ -389,11 +462,25 @@ MNT=""
 losetup -d "$LOOP"
 LOOP=""
 
-[[ -f "$OUT" ]] && rm -f "$OUT"
+if [[ -L "$OUT" ]]; then
+    fatal "refusing to replace symlink output: $OUT"
+fi
+if [[ -f "$OUT" ]]; then
+    # Builder-owned images are permanently sealed after publication. Rebuild
+    # is the one explicit replacement path, so it clears only this exact
+    # output's flag before replacing it atomically.
+    chattr -i -- "$OUT"
+    rm -f "$OUT"
+fi
+[[ ! -e "$OUT" ]] || fatal "refusing to replace non-regular output: $OUT"
 mv "$TMP_OUT" "$OUT"
+chmod 0644 "$OUT"
 
 DIGEST="$(sha256sum "$OUT" | awk '{print $1}')"
 ALLOC="$(du -h "$OUT" | awk '{print $1}')"
+chattr +i -- "$OUT"
+lsattr -d -- "$OUT" | awk 'NR == 1 { exit index($1, "i") == 0 }' \
+    || fatal "published rootfs did not retain FS_IMMUTABLE_FL: $OUT"
 log "done: $OUT (${ALLOC} allocated, ${SIZE} capacity)"
 log "sha256: $DIGEST"
 log "guest user: ${GUEST_USER} (uid ${GUEST_UID}); ssh as ${GUEST_USER}@<guest-ip>"

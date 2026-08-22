@@ -4,7 +4,7 @@
 //! host effects and their durable transaction boundaries.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::config::RoomsConfig;
 use crate::error::FirecrackerError;
 use crate::firecracker::{self, KillSignalOutcome};
+use crate::inode_seal;
 use crate::room::{self, Liveness, RoomMeta};
 use crate::slot::{self, Freed, Reserved};
 use crate::snapshot::{self, FcOp, SnapshotMeta, SnapshotRequest};
@@ -25,7 +26,17 @@ pub const SNAPSHOT_INTENTS_DIR: &str = "snapshot-intents";
 /// recovery namespace.
 pub const RESTORE_INTENTS_DIR: &str = "restore-intents";
 pub const SNAPSHOTS_DIR: &str = "snapshots";
+/// Trusted local receipts for snapshots published by this Rooms state store.
+///
+/// These are deliberately outside the portable snapshot directory: a copied or
+/// foreign `snapshot.json` cannot bring its own authority for the rootfs-hash
+/// fast path.
+pub const SNAPSHOT_ATTESTATIONS_DIR: &str = "snapshot-attestations";
 const INTENT_SCHEMA_VERSION: u32 = 1;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const ATTESTATION_SCHEMA_VERSION: u32 = 1;
+#[cfg(target_os = "linux")]
+const MAX_ATTESTATION_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +70,10 @@ struct SnapshotIntent {
     snapshot_id: String,
     base_room_id: String,
     meta: SnapshotMeta,
+    /// Host-local identity captured around the one full backing-image hash.
+    /// This intentionally stays out of portable `snapshot.json`.
+    #[serde(default)]
+    rootfs_source: Option<snapshot::ImmutableFileIdentity>,
     out_dir: PathBuf,
     host_vmstate: PathBuf,
     host_mem: PathBuf,
@@ -71,6 +86,21 @@ struct SnapshotIntent {
     /// recovery can finish it instead of refusing forever.
     #[serde(default)]
     aborted: bool,
+}
+
+/// Sealed, state-local proof that Rooms itself published one exact snapshot
+/// directory from one exact immutable backing inode. `snapshot.json` remains
+/// portable data; this receipt is only an optimization authority on its
+/// creating host and is never copied into the snapshot artifact set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", all(test, unix)))]
+struct SnapshotAttestation {
+    schema_version: u32,
+    snapshot_dir: PathBuf,
+    snapshot_dir_source: snapshot::ImmutableFileIdentity,
+    snapshot_meta_source: snapshot::ImmutableFileIdentity,
+    rootfs_source: snapshot::ImmutableFileIdentity,
+    meta: SnapshotMeta,
 }
 
 /// Completed snapshot command output.
@@ -172,6 +202,12 @@ pub async fn recover(
         .find(|intent| intent.snapshot_id == snapshot_id)
         .ok_or_else(|| anyhow::anyhow!("no pending snapshot transaction {snapshot_id}"))?;
     let _lock = acquire_lock(config, &intent.base_room_id)?;
+    if intent.boundary == Boundary::Pending {
+        // A crash during the immutable-capability probe may have left this
+        // transaction-owned empty directory sealed. Clear and re-prove it
+        // before either abort cleanup or normal drive touches the output.
+        inode_seal::preflight_output(&intent.out_dir)?;
+    }
     if intent.boundary < Boundary::Collected {
         let ambiguous_create =
             intent.boundary == Boundary::Paused && any_artifact_nonempty(&intent);
@@ -237,12 +273,40 @@ fn build_intent(
     let jail_root = config
         .jail_root_dir(&base.id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve jail root"))?;
+    let rootfs = jail_root.join("rootfs");
+    #[cfg(target_os = "linux")]
+    let mut rootfs_file = inode_seal::open_regular(&rootfs, "snapshot backing image")?;
+    #[cfg(not(target_os = "linux"))]
+    let mut rootfs_file = {
+        inode_seal::require(&rootfs, "snapshot backing image")?;
+        File::open(&rootfs)?
+    };
     let active_vsock = active_vsock(&jail_root)?;
+    #[cfg(unix)]
+    let rootfs_source = Some(snapshot::ImmutableFileIdentity::capture_file(&rootfs_file)?);
+    #[cfg(not(unix))]
+    let rootfs_source = None;
+    let rootfs_hash = sha256_open_file(&mut rootfs_file)?;
+    #[cfg(unix)]
+    if rootfs_source.as_ref()
+        != Some(&snapshot::ImmutableFileIdentity::capture_file(
+            &rootfs_file,
+        )?)
+    {
+        anyhow::bail!(
+            "snapshot backing inode {} changed while being hashed",
+            rootfs.display()
+        );
+    }
+    // Re-check the same open inode after the complete hash. Reopening this path
+    // would let a transient ancestor rename pair identity(A) with hash(B).
+    #[cfg(target_os = "linux")]
+    inode_seal::require_file(&rootfs_file, &rootfs, "snapshot backing image")?;
     let request = SnapshotRequest {
         out_dir: out_dir.clone(),
         snapshot_id: snapshot_id.clone(),
         fc_version: firecracker_version(config)?,
-        rootfs_hash: sha256_file(&jail_root.join("rootfs"))?,
+        rootfs_hash,
         base_repo_sha: None,
         active_vsock,
     };
@@ -252,6 +316,7 @@ fn build_intent(
         snapshot_id,
         base_room_id: base.id.clone(),
         meta: plan.meta,
+        rootfs_source,
         out_dir,
         host_vmstate: plan.host_vmstate,
         host_mem: plan.host_mem,
@@ -264,10 +329,18 @@ fn build_intent(
 
 async fn drive(config: &RoomsConfig, mut intent: SnapshotIntent) -> anyhow::Result<SnapshotResult> {
     if intent.boundary == Boundary::Published {
+        #[cfg(target_os = "linux")]
+        ensure_snapshot_attestation(config, &intent)?;
         finish_index(config, &intent)?;
         return result_from(&intent);
     }
     if intent.boundary < Boundary::TargetsStaged {
+        // Prove immutable-inode support and CAP_LINUX_IMMUTABLE before the
+        // transaction can pause or consume the live base. `Pending` recovery
+        // also clears an interrupted directory-flag probe here.
+        inode_seal::preflight_output(&intent.out_dir)?;
+        #[cfg(target_os = "linux")]
+        preflight_attestation_index(config, &intent)?;
         stage_targets(&intent)?;
         advance(config, &mut intent, Boundary::TargetsStaged)?;
     }
@@ -283,13 +356,333 @@ async fn drive(config: &RoomsConfig, mut intent: SnapshotIntent) -> anyhow::Resu
         advance(config, &mut intent, Boundary::Reaped)?;
     }
     validate_collected(&intent)?;
-    snapshot::write_meta_atomic(
-        &intent.out_dir.join(snapshot::SNAPSHOT_META_FILE),
-        &intent.meta,
-    )?;
+    ensure_snapshot_metadata(&intent)?;
+    seal_snapshot(&intent)?;
+    #[cfg(target_os = "linux")]
+    ensure_snapshot_attestation(config, &intent)?;
     advance(config, &mut intent, Boundary::Published)?;
     finish_index(config, &intent)?;
     result_from(&intent)
+}
+
+/// Prove the separate receipt store can durably seal a regular record before
+/// the transaction pauses or reaps the only live base. Each transaction owns
+/// a distinct probe file, so concurrent snapshots never toggle the shared
+/// directory's immutable flag under each other. A crash leaves that probe for
+/// the same Pending recovery to clear and remove.
+#[cfg(target_os = "linux")]
+fn preflight_attestation_index(
+    config: &RoomsConfig,
+    intent: &SnapshotIntent,
+) -> anyhow::Result<()> {
+    if intent.rootfs_source.is_none() {
+        return Ok(());
+    }
+    let dir = attestation_dir(config)?;
+    std::fs::create_dir_all(&dir)?;
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    if !metadata.file_type().is_dir() {
+        anyhow::bail!(
+            "snapshot attestation index is not a real directory: {}",
+            dir.display()
+        );
+    }
+    set_dir_private(&dir)?;
+    sync_dir(&state_base(config)?)?;
+    match std::fs::symlink_metadata(attestation_path(config, &intent.snapshot_id)?) {
+        Ok(_) => anyhow::bail!(
+            "snapshot attestation already exists for {}",
+            intent.snapshot_id
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let probe = dir.join(format!(".{}.preflight", intent.snapshot_id));
+    match std::fs::symlink_metadata(&probe) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => anyhow::bail!(
+            "snapshot attestation preflight is not a regular file: {}",
+            probe.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut file = open_private_create_new(&probe)?;
+            file.write_all(b"rooms snapshot attestation preflight\n")?;
+            file.sync_all()?;
+            drop(file);
+            sync_dir(&dir)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    inode_seal::preflight_output(&probe)?;
+    std::fs::remove_file(&probe)?;
+    sync_dir(&dir)?;
+    Ok(())
+}
+
+/// Publish metadata once, or accept the exact immutable copy left by a crash
+/// between sealing and the `Published` boundary.
+fn ensure_snapshot_metadata(intent: &SnapshotIntent) -> anyhow::Result<()> {
+    let path = intent.out_dir.join(snapshot::SNAPSHOT_META_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let observed: SnapshotMeta = serde_json::from_slice(&bytes)?;
+            if observed != intent.meta {
+                anyhow::bail!(
+                    "published snapshot metadata {} disagrees with its transaction",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            snapshot::write_meta_atomic(&path, &intent.meta)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Seal the complete published snapshot set. Files come first and the
+/// directory last: a crash at any prefix leaves a safe, idempotently
+/// recoverable partial seal, while no transaction reaches `Published` until
+/// every inode rejects writes.
+fn seal_snapshot(intent: &SnapshotIntent) -> anyhow::Result<()> {
+    let meta = intent.out_dir.join(snapshot::SNAPSHOT_META_FILE);
+    ensure_regular_nonempty(&meta)?;
+    for (path, label) in [
+        (&intent.host_vmstate, "snapshot vmstate"),
+        (&intent.host_mem, "snapshot memory"),
+        (&meta, "snapshot metadata"),
+    ] {
+        inode_seal::seal(path, label)?;
+    }
+    inode_seal::seal(&intent.out_dir, "snapshot directory")
+}
+
+/// Publish the state-local compatibility receipt, then seal it before the
+/// transaction may cross `Published`. Recovery accepts only the byte-for-byte
+/// expected receipt, making every crash prefix idempotent without ever blessing
+/// a conflicting record.
+#[cfg(target_os = "linux")]
+fn ensure_snapshot_attestation(
+    config: &RoomsConfig,
+    intent: &SnapshotIntent,
+) -> anyhow::Result<()> {
+    let Some(rootfs_source) = intent.rootfs_source.as_ref() else {
+        // Legacy/non-Unix producers retain the conservative full-hash restore.
+        return Ok(());
+    };
+    let meta_path = intent.out_dir.join(snapshot::SNAPSHOT_META_FILE);
+    let expected = SnapshotAttestation {
+        schema_version: ATTESTATION_SCHEMA_VERSION,
+        snapshot_dir: intent.out_dir.clone(),
+        snapshot_dir_source: snapshot::ImmutableFileIdentity::capture(&intent.out_dir)?,
+        snapshot_meta_source: snapshot::ImmutableFileIdentity::capture(&meta_path)?,
+        rootfs_source: rootfs_source.clone(),
+        meta: intent.meta.clone(),
+    };
+
+    let dir = attestation_dir(config)?;
+    std::fs::create_dir_all(&dir)?;
+    let dir_meta = std::fs::symlink_metadata(&dir)?;
+    if !dir_meta.file_type().is_dir() {
+        anyhow::bail!(
+            "snapshot attestation index is not a real directory: {}",
+            dir.display()
+        );
+    }
+    set_dir_private(&dir)?;
+    sync_dir(&state_base(config)?)?;
+    let path = attestation_path(config, &intent.snapshot_id)?;
+    ensure_attestation_file(&dir, &path, &expected)?;
+    inode_seal::seal(&path, "snapshot attestation")?;
+    sync_dir(&dir)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_attestation_file(
+    dir: &Path,
+    path: &Path,
+    expected: &SnapshotAttestation,
+) -> anyhow::Result<()> {
+    if let Some(observed) = read_attestation(path)? {
+        if observed != *expected {
+            anyhow::bail!(
+                "snapshot attestation {} disagrees with its publication transaction",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    remove_abandoned_attestation_temps(dir, &expected.meta.snapshot_id)?;
+    let bytes = serde_json::to_vec_pretty(expected)?;
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        expected.meta.snapshot_id,
+        ulid::Ulid::new().to_string().to_lowercase()
+    ));
+    let mut file = open_private_create_new(&tmp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    // A hard-link publication leaves two names for one inode between link and
+    // unlink. If the process crashes there and recovery seals the final name,
+    // the hidden temp alias becomes an undeletable immutable file. Linux's
+    // no-replace rename is the same exclusive publication without that alias
+    // window: after any crash the inode has exactly one directory entry.
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &tmp,
+        rustix::fs::CWD,
+        path,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => sync_dir(dir)?,
+        Err(error) if error == rustix::io::Errno::EXIST => {
+            let observed = read_attestation(path)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "snapshot attestation {} disappeared during publication",
+                    path.display()
+                )
+            })?;
+            if observed != *expected {
+                let _ = std::fs::remove_file(&tmp);
+                anyhow::bail!(
+                    "snapshot attestation {} disagrees with its publication transaction",
+                    path.display()
+                );
+            }
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
+    }
+    // On successful rename the temp name no longer exists. On the losing
+    // AlreadyExists path it remains ours and must be removed before return.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => sync_dir(dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Remove only this transaction's unpublished temp names. A crash before the
+/// exclusive rename can leave one behind; per-base transaction locking means
+/// no live publisher for the same snapshot id can own it concurrently.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn remove_abandoned_attestation_temps(dir: &Path, snapshot_id: &str) -> anyhow::Result<()> {
+    let prefix = format!(".{snapshot_id}.");
+    let mut removed = false;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".tmp") else {
+            continue;
+        };
+        if !stem.starts_with(&prefix) {
+            continue;
+        }
+        std::fs::remove_file(entry.path()).map_err(|error| {
+            anyhow::anyhow!(
+                "remove abandoned snapshot attestation temp {}: {error}",
+                entry.path().display()
+            )
+        })?;
+        removed = true;
+    }
+    if removed {
+        sync_dir(dir)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_attestation(path: &Path) -> anyhow::Result<Option<SnapshotAttestation>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        anyhow::bail!(
+            "snapshot attestation is empty, symlinked, or not regular: {}",
+            path.display()
+        );
+    }
+    let bytes = std::fs::read(path)?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+/// Return a trusted digest only for the exact local publication receipt. Any
+/// absent, copied, legacy, unsealed, malformed, or mismatched receipt returns
+/// `None`, directing restore to hash the image bytes instead.
+#[cfg(target_os = "linux")]
+pub(crate) fn attested_rootfs_hash(
+    config: &RoomsConfig,
+    snapshot_dir: &Path,
+    meta: &SnapshotMeta,
+    snapshot_dir_source: &snapshot::ImmutableFileIdentity,
+    snapshot_meta_source: &snapshot::ImmutableFileIdentity,
+    rootfs_source: &snapshot::ImmutableFileIdentity,
+) -> anyhow::Result<Option<String>> {
+    let dir = attestation_dir(config)?;
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let path = attestation_path(config, &meta.snapshot_id)?;
+    let Ok(mut file) = inode_seal::open_regular(&path, "snapshot attestation") else {
+        return Ok(None);
+    };
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_ATTESTATION_BYTES {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len())?);
+    file.read_to_end(&mut bytes)?;
+    inode_seal::require_file(&file, &path, "snapshot attestation")?;
+    let Ok(attestation) = serde_json::from_slice::<SnapshotAttestation>(&bytes) else {
+        return Ok(None);
+    };
+    if attestation_matches(
+        &attestation,
+        snapshot_dir,
+        meta,
+        snapshot_dir_source,
+        snapshot_meta_source,
+        rootfs_source,
+    ) {
+        return Ok(Some(attestation.meta.rootfs_hash));
+    }
+    Ok(None)
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn attestation_matches(
+    attestation: &SnapshotAttestation,
+    snapshot_dir: &Path,
+    meta: &SnapshotMeta,
+    snapshot_dir_source: &snapshot::ImmutableFileIdentity,
+    snapshot_meta_source: &snapshot::ImmutableFileIdentity,
+    rootfs_source: &snapshot::ImmutableFileIdentity,
+) -> bool {
+    if attestation.schema_version != ATTESTATION_SCHEMA_VERSION
+        || attestation.snapshot_dir != snapshot_dir
+        || attestation.meta != *meta
+    {
+        return false;
+    }
+    attestation.snapshot_dir_source == *snapshot_dir_source
+        && attestation.snapshot_meta_source == *snapshot_meta_source
+        && attestation.rootfs_source == *rootfs_source
 }
 
 async fn execute_and_collect(
@@ -520,7 +913,8 @@ fn resolve_output(
     let resolved = canonical_candidate(&candidate)?;
     let snapshot_index = canonical_candidate(&state.join(SNAPSHOT_INTENTS_DIR))?;
     let restore_index = canonical_candidate(&state.join(RESTORE_INTENTS_DIR))?;
-    for index in [&snapshot_index, &restore_index] {
+    let attestation_index = canonical_candidate(&state.join(SNAPSHOT_ATTESTATIONS_DIR))?;
+    for index in [&snapshot_index, &restore_index, &attestation_index] {
         if overlaps(&resolved, index) {
             anyhow::bail!(
                 "snapshot output overlaps transaction index {}",
@@ -1085,12 +1479,22 @@ pub(crate) fn firecracker_version(config: &RoomsConfig) -> anyhow::Result<String
     Ok(version)
 }
 
+#[cfg(test)]
 pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let mut file = File::open(path)?;
+    sha256_open_file(&mut file)
+}
+
+pub(crate) fn sha256_open_file(file: &mut File) -> anyhow::Result<String> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    sha256_reader(file)
+}
+
+fn sha256_reader(reader: &mut impl Read) -> anyhow::Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
-        let read = file.read(&mut buf)?;
+        let read = reader.read(&mut buf)?;
         if read == 0 {
             break;
         }
@@ -1112,6 +1516,21 @@ fn intent_dir(config: &RoomsConfig) -> anyhow::Result<PathBuf> {
     config
         .snapshot_intents_dir()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve snapshot intent directory"))
+}
+
+#[cfg(target_os = "linux")]
+fn attestation_dir(config: &RoomsConfig) -> anyhow::Result<PathBuf> {
+    config
+        .snapshot_attestations_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve snapshot attestation directory"))
+}
+
+#[cfg(target_os = "linux")]
+fn attestation_path(config: &RoomsConfig, snapshot_id: &str) -> anyhow::Result<PathBuf> {
+    if !crate::registry::is_valid_room_id(snapshot_id) {
+        anyhow::bail!("invalid snapshot id for local attestation");
+    }
+    Ok(attestation_dir(config)?.join(format!("{snapshot_id}.json")))
 }
 
 fn intent_path(config: &RoomsConfig, base_id: &str) -> anyhow::Result<PathBuf> {
@@ -1194,9 +1613,9 @@ mod tests {
 
     use super::{
         acquire_lock, canonical_candidate, create_intent_exclusive, create_output_tree,
-        ensure_output_unclaimed, op_request, overlaps, pending_for_base, pending_summary,
-        pinned_process_identity, read_intents, record_abort, resolve_output, sha256_file,
-        snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
+        ensure_output_unclaimed, ensure_snapshot_metadata, op_request, overlaps, pending_for_base,
+        pending_summary, pinned_process_identity, read_intents, record_abort, resolve_output,
+        sha256_file, snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::room::{Provenance, RoomMeta, Slot};
@@ -1239,6 +1658,7 @@ mod tests {
                 base_repo_sha: None,
                 provenance: Provenance::Neutral,
             },
+            rootfs_source: None,
             out_dir: out.clone(),
             host_vmstate: out.join(crate::snapshot::SNAPSHOT_VMSTATE_FILE),
             host_mem: out.join(crate::snapshot::SNAPSHOT_MEM_FILE),
@@ -1287,6 +1707,105 @@ mod tests {
             sha256_file(&path).expect("hash"),
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attestation_recovery_removes_only_its_abandoned_temps() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let own_a = root.path().join(format!(".{SNAPSHOT_ID}.a.tmp"));
+        let own_b = root.path().join(format!(".{SNAPSHOT_ID}.b.tmp"));
+        let foreign = root.path().join(".another-snapshot.a.tmp");
+        let unrelated = root.path().join(format!(".{SNAPSHOT_ID}.preflight"));
+        for path in [&own_a, &own_b, &foreign, &unrelated] {
+            std::fs::write(path, b"partial").expect("temp");
+        }
+
+        super::remove_abandoned_attestation_temps(root.path(), SNAPSHOT_ID)
+            .expect("cleanup own temps");
+
+        assert!(!own_a.exists());
+        assert!(!own_b.exists());
+        assert!(foreign.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_attestation_binds_exact_metadata_directory_and_rootfs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let snapshot_dir = root.path().join("snapshot");
+        std::fs::create_dir(&snapshot_dir).expect("snapshot dir");
+        let snapshot_dir = snapshot_dir.canonicalize().expect("canonical snapshot");
+        let image = root.path().join("image.ext4");
+        std::fs::write(&image, b"rootfs-a").expect("image");
+        let image = image.canonicalize().expect("canonical image");
+        let mut meta = SnapshotMeta {
+            schema_version: 1,
+            snapshot_id: SNAPSHOT_ID.to_owned(),
+            created_at: Utc::now(),
+            fc_version: "Firecracker v1.15.0".to_owned(),
+            rootfs_hash: sha256_file(&image).expect("hash"),
+            base_room_id: BASE_ID.to_owned(),
+            slot_index: Some(1),
+            guest_ip: Some(Ipv4Addr::new(172, 16, 0, 6)),
+            base_repo_sha: None,
+            provenance: Provenance::Neutral,
+        };
+        let meta_path = snapshot_dir.join(crate::snapshot::SNAPSHOT_META_FILE);
+        std::fs::write(
+            &meta_path,
+            serde_json::to_vec_pretty(&meta).expect("serialize"),
+        )
+        .expect("metadata");
+        let receipt = super::SnapshotAttestation {
+            schema_version: super::ATTESTATION_SCHEMA_VERSION,
+            snapshot_dir: snapshot_dir.clone(),
+            snapshot_dir_source: crate::snapshot::ImmutableFileIdentity::capture(&snapshot_dir)
+                .expect("directory identity"),
+            snapshot_meta_source: crate::snapshot::ImmutableFileIdentity::capture(&meta_path)
+                .expect("metadata identity"),
+            rootfs_source: crate::snapshot::ImmutableFileIdentity::capture(&image)
+                .expect("image identity"),
+            meta: meta.clone(),
+        };
+        let dir_source = crate::snapshot::ImmutableFileIdentity::capture(&snapshot_dir)
+            .expect("directory identity");
+        let meta_source =
+            crate::snapshot::ImmutableFileIdentity::capture(&meta_path).expect("metadata identity");
+        let rootfs_source =
+            crate::snapshot::ImmutableFileIdentity::capture(&image).expect("image identity");
+
+        assert!(super::attestation_matches(
+            &receipt,
+            &snapshot_dir,
+            &meta,
+            &dir_source,
+            &meta_source,
+            &rootfs_source,
+        ));
+
+        meta.rootfs_hash = "forged-digest".to_owned();
+        assert!(!super::attestation_matches(
+            &receipt,
+            &snapshot_dir,
+            &meta,
+            &dir_source,
+            &meta_source,
+            &rootfs_source,
+        ));
+
+        std::fs::write(&meta_path, b"replaced metadata").expect("replace metadata");
+        let replaced_meta_source = crate::snapshot::ImmutableFileIdentity::capture(&meta_path)
+            .expect("replaced metadata identity");
+        assert!(!super::attestation_matches(
+            &receipt,
+            &snapshot_dir,
+            &receipt.meta,
+            &dir_source,
+            &replaced_meta_source,
+            &rootfs_source,
+        ));
     }
 
     #[test]
@@ -1380,6 +1899,26 @@ mod tests {
             out.parent().expect("parent").is_dir(),
             "missing ancestors must be created, not assumed"
         );
+    }
+
+    #[test]
+    fn metadata_publication_is_idempotent_but_never_accepts_drift() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = config(dir.path());
+        let intent = intent(&config);
+        std::fs::create_dir_all(&intent.out_dir).expect("create output");
+
+        ensure_snapshot_metadata(&intent).expect("first publication");
+        ensure_snapshot_metadata(&intent).expect("recovery accepts exact metadata");
+
+        let path = intent.out_dir.join(crate::snapshot::SNAPSHOT_META_FILE);
+        let mut drifted = intent.meta.clone();
+        drifted.fc_version = "different".to_owned();
+        std::fs::write(&path, serde_json::to_vec(&drifted).expect("serialize"))
+            .expect("inject drift");
+        let error = ensure_snapshot_metadata(&intent)
+            .expect_err("recovery must not bless different published metadata");
+        assert!(error.to_string().contains("disagrees"), "{error}");
     }
 
     #[tokio::test]
@@ -1524,6 +2063,14 @@ mod tests {
             BASE_ID,
             SNAPSHOT_ID,
             Some(&state.join("snapshot-intents/child"))
+        )
+        .is_err());
+        assert!(resolve_output(
+            &config,
+            &state,
+            BASE_ID,
+            SNAPSHOT_ID,
+            Some(&state.join("snapshot-attestations/child"))
         )
         .is_err());
         assert!(resolve_output(&config, &state, BASE_ID, SNAPSHOT_ID, Some(&state)).is_err());
