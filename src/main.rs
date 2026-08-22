@@ -1734,7 +1734,7 @@ struct CloneFailure {
     clone_net_index: u8,
     room_id: String,
     out_dir: Option<PathBuf>,
-    error: RoomsError,
+    error: Box<RoomsError>,
 }
 
 impl CloneFailure {
@@ -1743,7 +1743,7 @@ impl CloneFailure {
             clone_net_index,
             room_id: room_id.to_owned(),
             out_dir: None,
-            error,
+            error: Box::new(error),
         }
     }
 
@@ -1757,7 +1757,7 @@ impl CloneFailure {
             clone_net_index,
             room_id: room_id.to_owned(),
             out_dir,
-            error,
+            error: Box::new(error),
         }
     }
 }
