@@ -748,11 +748,20 @@ cleanup_created_rooms() {
     local failed=0
     local listing
 
-    cleanup_proof_endpoint || failed=1
+    if ! cleanup_proof_endpoint; then
+        printf '%s\n' 'cleanup check failed: proof endpoint' >>"$CLEANUP_LOG"
+        failed=1
+    fi
 
     if [[ ! -x "$ROOMS_BIN" ]]; then
-        assert_terminal_proof_slot || failed=1
-        proof_transients_absent || failed=1
+        if ! assert_terminal_proof_slot; then
+            printf '%s\n' 'cleanup check failed: terminal proof slot' >>"$CLEANUP_LOG"
+            failed=1
+        fi
+        if ! proof_transients_absent; then
+            printf '%s\n' 'cleanup check failed: proof transients' >>"$CLEANUP_LOG"
+            failed=1
+        fi
         if ((failed == 0)); then
             CLEANUP_OK="true"
             return 0
@@ -761,9 +770,15 @@ cleanup_created_rooms() {
         return 1
     fi
 
-    recover_proof_snapshots || failed=1
+    if ! recover_proof_snapshots; then
+        printf '%s\n' 'cleanup check failed: initial snapshot recovery' >>"$CLEANUP_LOG"
+        failed=1
+    fi
     discover_proof_json_ids
-    discover_proof_room_ids || failed=1
+    if ! discover_proof_room_ids; then
+        printf '%s\n' 'cleanup check failed: initial room discovery' >>"$CLEANUP_LOG"
+        failed=1
+    fi
 
     while read -r room_id; do
         valid_room_id "$room_id" || continue
@@ -783,28 +798,41 @@ cleanup_created_rooms() {
     # exact terminal audits below still decide whether cleanup succeeded.
     run_rooms gc >>"$CLEANUP_LOG" 2>&1 || true
 
-    recover_proof_snapshots || failed=1
-    discover_proof_room_ids || failed=1
+    if ! recover_proof_snapshots; then
+        printf '%s\n' 'cleanup check failed: terminal snapshot recovery' >>"$CLEANUP_LOG"
+        failed=1
+    fi
+    if ! discover_proof_room_ids; then
+        printf '%s\n' 'cleanup check failed: terminal room discovery' >>"$CLEANUP_LOG"
+        failed=1
+    fi
     if listing="$(run_rooms ls --json 2>>"$CLEANUP_LOG")"; then
         if ! jq -e '.rooms | length == 0' >/dev/null <<<"$listing"; then
+            printf '%s\n' 'cleanup check failed: nonempty room roster' >>"$CLEANUP_LOG"
             failed=1
         fi
     else
+        printf '%s\n' 'cleanup check failed: unreadable room roster' >>"$CLEANUP_LOG"
         failed=1
     fi
     if ! assert_terminal_proof_slot; then
+        printf '%s\n' 'cleanup check failed: terminal proof slot' >>"$CLEANUP_LOG"
         failed=1
     fi
     if ! proof_transients_absent; then
+        printf '%s\n' 'cleanup check failed: proof transients' >>"$CLEANUP_LOG"
         failed=1
     fi
     if ! audit_global_clone_absence; then
+        printf '%s\n' 'cleanup check failed: global clone resources' >>"$CLEANUP_LOG"
         failed=1
     fi
     if pgrep -x firecracker >/dev/null 2>&1 || pgrep -x jailer >/dev/null 2>&1; then
+        printf '%s\n' 'cleanup check failed: VMM process remains' >>"$CLEANUP_LOG"
         failed=1
     fi
     if findmnt -rn -o TARGET | grep -Fq "$STATE_DIR/jailer/"; then
+        printf '%s\n' 'cleanup check failed: proof jail mount remains' >>"$CLEANUP_LOG"
         failed=1
     fi
 
@@ -1299,7 +1327,7 @@ sudo -n lsattr -d -- "$SNAPSHOT_DIR" \
     || fatal "snapshot_directory_not_immutable" \
         "published snapshot directory is not protected by FS_IMMUTABLE_FL"
 sudo -n jq -e \
-    --arg rootfs_hash "$ROOTFS_SHA256" \
+    --arg rootfs_hash "sha256:$ROOTFS_SHA256" \
     --arg snapshot_id "$SNAPSHOT_ID" \
     --arg base_id "$BASE_ID" \
     --arg source_head "$SOURCE_HEAD" \
