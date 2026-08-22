@@ -721,8 +721,9 @@ fn verify_clone_custody(
     Ok(())
 }
 
-/// Build the per-restore nudge payload: identity, host clock, fresh entropy,
-/// and the admitted secrets (empty when none).
+/// Build the per-restore nudge payload: identity, fresh entropy, and the
+/// admitted secrets (empty when none). The vsock sender samples the host clock
+/// at delivery so snapshot-load latency cannot make the guest stale.
 fn resume_payload(
     room_id: &str,
     secrets: Option<&vsock::SecretsPayload>,
@@ -730,15 +731,14 @@ fn resume_payload(
     let mut entropy = vec![0_u8; RESUME_ENTROPY_BYTES];
     let mut urandom = File::open("/dev/urandom")?;
     urandom.read_exact(&mut entropy)?;
-    Ok(vsock::ResumePayload {
-        room_id: room_id.to_owned(),
-        epoch_secs: chrono::Utc::now().timestamp(),
+    Ok(vsock::ResumePayload::new(
+        room_id.to_owned(),
         entropy,
-        secrets: secrets.map_or_else(
+        secrets.map_or_else(
             || vsock::SecretsPayload::encode(&[]),
             vsock::SecretsPayload::clone_bytes,
         ),
-    })
+    ))
 }
 
 /// Record the leased slot on the persisted room metadata (the spec's "set

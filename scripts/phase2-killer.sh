@@ -81,6 +81,7 @@ readonly WORST_CASE_UDS_PATH="$STATE_DIR/jailer/firecracker/$WORST_CASE_ROOM_ID/
 readonly LITERAL_LATENCY_REQUIREMENT="<1s"
 readonly WORKLOAD_SCOPE_NOTE="broadcast git-fsck commands prove eight parallel real repo workloads; this gate does not claim /work-driver consumer integration"
 readonly RNG_SCOPE_NOTE="the retained static receiver has no stack canary or userspace DRBG; it reads ENTROPY first and forces RNDRESEEDCRNG before every post-resume fork/exec; kernel draws plus newly spawned ssh-keygen and sshd keys prove downstream divergence"
+readonly CLOCK_SCOPE_NOTE="the bounded clock proof assumes host CLOCK_REALTIME makes no offsetting discontinuous steps inside one SSH bracket; the full 100ms endpoint uncertainty is charged against the five-second tolerance"
 PROOF_TAG="$(basename "$PROOF_ROOT")"
 readonly PROOF_TAG
 readonly ENDPOINT_IF="r2p$PROOF_TAG"
@@ -261,6 +262,8 @@ track_json_ids() {
 }
 
 run_rooms() {
+    local status
+
     if [[ ! -x "$ROOMS_BIN" ]]; then
         return 127
     fi
@@ -281,7 +284,8 @@ run_rooms() {
             RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
             ROOMS_PHASE2_PROBE="$ROOMS_PHASE2_PROBE" \
             "$ROOMS_BIN" "$@"
-        return
+        status=$?
+        return "$status"
     fi
     sudo -n env \
         -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
@@ -411,54 +415,74 @@ privileged_read_file() {
 }
 
 capture_protected_entry() {
+    local digest
+    local digest_record
+    local metadata
     local output="$1"
+    local parent
     local path="$2"
+
     if [[ -L "$path" ]]; then
-        printf 'symlink\t%s\t%s\t%s\n' \
-            "$path" \
-            "$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" \
-            "$(readlink "$path")" \
-            >>"$output"
-        return
+        return 1
     fi
     if [[ -f "$path" ]]; then
+        metadata="$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" || return 1
+        digest_record="$(sha256sum "$path")" || return 1
+        read -r digest _ <<<"$digest_record"
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
         printf 'file\t%s\t%s\t%s\n' \
-            "$path" \
-            "$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" \
-            "$(sha256sum "$path" | awk '{print $1}')" \
-            >>"$output"
-        return
+            "$path" "$metadata" "$digest" \
+            >>"$output" || return 1
+        return 0
     fi
     if [[ -d "$path" ]]; then
+        metadata="$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" || return 1
         printf 'dir\t%s\t%s\n' \
-            "$path" \
-            "$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" \
-            >>"$output"
-        return
+            "$path" "$metadata" \
+            >>"$output" || return 1
+        return 0
     fi
     if [[ -e "$path" ]]; then
+        metadata="$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" || return 1
         printf 'other\t%s\t%s\n' \
-            "$path" \
-            "$(stat -c '%d:%i:%s:%Y:%a:%u:%g' "$path")" \
-            >>"$output"
-        return
+            "$path" "$metadata" \
+            >>"$output" || return 1
+        return 0
     fi
-    printf 'absent\t%s\n' "$path" >>"$output"
+    parent="$(dirname -- "$path")" || return 1
+    [[ -d "$parent" && -x "$parent" ]] || return 1
+    printf 'absent\t%s\n' "$path" >>"$output" || return 1
+    return 0
 }
 
 capture_protected_state() {
+    local inventory
     local output="$1"
     local path
-    : >"$output"
-    capture_protected_entry "$output" "$CANONICAL_SLOT"
+    local status=0
+
+    : >"$output" || return 1
+    capture_protected_entry "$output" "$CANONICAL_SLOT" || return 1
     if [[ ! -d "$CANONICAL_IMAGES" ]]; then
-        printf 'absent\t%s\n' "$CANONICAL_IMAGES" >>"$output"
-        return
+        capture_protected_entry "$output" "$CANONICAL_IMAGES" || return 1
+        [[ ! -e "$CANONICAL_IMAGES" && ! -L "$CANONICAL_IMAGES" ]] || return 1
+        return 0
     fi
-    capture_protected_entry "$output" "$CANONICAL_IMAGES"
+    capture_protected_entry "$output" "$CANONICAL_IMAGES" || return 1
+    inventory="$(mktemp "$output.paths.XXXXXX")" || return 1
+    if ! (set -o pipefail; find "$CANONICAL_IMAGES" -mindepth 1 -print0 | sort -z >"$inventory"); then
+        rm -f -- "$inventory" || true
+        return 1
+    fi
     while IFS= read -r -d '' path; do
-        capture_protected_entry "$output" "$path"
-    done < <(find "$CANONICAL_IMAGES" -mindepth 1 -print0 | sort -z)
+        if ! capture_protected_entry "$output" "$path"; then
+            status=1
+            break
+        fi
+    done <"$inventory"
+    rm -f -- "$inventory" || return 1
+    ((status == 0)) || return 1
+    return 0
 }
 
 capture_sealed_entry() {
@@ -1776,6 +1800,7 @@ write_summary() {
         --arg full_phase2_gate_completed "$FULL_PHASE2_GATE_COMPLETED" \
         --arg workload_scope_note "$WORKLOAD_SCOPE_NOTE" \
         --arg rng_scope_note "$RNG_SCOPE_NOTE" \
+        --arg clock_scope_note "$CLOCK_SCOPE_NOTE" \
         --arg endpoint_ip "$ENDPOINT_IP" \
         --arg endpoint_port "$ENDPOINT_PORT" \
         --arg created_ids "$created_ids" \
@@ -1913,6 +1938,7 @@ write_summary() {
            created_room_ids: ($created_ids | split("\n") | map(select(length > 0))),
            workload_scope_note: $workload_scope_note,
            rng_scope_note: $rng_scope_note,
+           clock_scope_note: $clock_scope_note,
            failures: $failures
          }' >"$summary_tmp"
     mv "$summary_tmp" "$SUMMARY_FILE"
@@ -1920,7 +1946,7 @@ write_summary() {
 
 close_flat_restore_gate() {
     if [[ "$FLAT_RESTORE_GATE_FD" =~ ^[0-9]+$ ]]; then
-        eval "exec ${FLAT_RESTORE_GATE_FD}>&-"
+        eval "exec ${FLAT_RESTORE_GATE_FD}>&-" || return 1
     fi
     FLAT_RESTORE_GATE_FD=""
     if [[ -n "$FLAT_RESTORE_GATE" ]]; then
@@ -1939,6 +1965,7 @@ close_flat_restore_gate() {
             || return 1
     fi
     FLAT_RESTORE_GATE_READY=""
+    return 0
 }
 
 flat_restore_group_members() {
@@ -2020,6 +2047,7 @@ terminate_flat_restore_group() {
     fi
     [[ "$job_status" -eq 1 ]] || return 1
     wait "$pid" 2>/dev/null || true
+    return 0
 }
 
 clear_flat_restore_identity() {
@@ -2029,6 +2057,7 @@ clear_flat_restore_identity() {
     FLAT_RESTORE_SID=""
     FLAT_RESTORE_PARENT_SID=""
     FLAT_RESTORE_LAUNCH_STAGE="idle"
+    return 0
 }
 
 quiesce_flat_restore_driver() {
@@ -2066,8 +2095,8 @@ quiesce_flat_restore_driver() {
         fi
     fi
     if [[ -z "$pid" ]]; then
-        close_flat_restore_gate
-        return
+        close_flat_restore_gate || return 1
+        return 0
     fi
     if ! [[ "$pid" =~ ^[0-9]+$ \
         && "$FLAT_RESTORE_PID_STARTTIME" =~ ^[0-9]+$ \
@@ -2083,9 +2112,9 @@ quiesce_flat_restore_driver() {
             fi
             if [[ "$job_status" -eq 1 ]]; then
                 wait "$pid" 2>/dev/null || true
-                clear_flat_restore_identity
-                close_flat_restore_gate
-                return
+                clear_flat_restore_identity || return 1
+                close_flat_restore_gate || return 1
+                return 0
             fi
             # A roster audit error forbids wait, but it does not weaken the
             # independent PGID/SID/member proof used by the kill path below.
@@ -2102,9 +2131,9 @@ quiesce_flat_restore_driver() {
             close_flat_restore_gate || true
             return 1
         fi
-        clear_flat_restore_identity
-        close_flat_restore_gate
-        return
+        clear_flat_restore_identity || return 1
+        close_flat_restore_gate || return 1
+        return 0
     fi
 
     if current_starttime="$(process_starttime "$pid")"; then
@@ -2138,9 +2167,9 @@ quiesce_flat_restore_driver() {
         fi
         [[ "$job_status" -eq 1 ]] || return 1
         wait "$pid" 2>/dev/null || true
-        clear_flat_restore_identity
-        close_flat_restore_gate
-        return
+        clear_flat_restore_identity || return 1
+        close_flat_restore_gate || return 1
+        return 0
     fi
     if [[ "$identity_complete" != "true" \
         && "$leader_absent_owned" != "true" ]]; then
@@ -2158,8 +2187,9 @@ quiesce_flat_restore_driver() {
         close_flat_restore_gate || true
         return 1
     fi
-    clear_flat_restore_identity
-    close_flat_restore_gate
+    clear_flat_restore_identity || return 1
+    close_flat_restore_gate || return 1
+    return 0
 }
 
 on_exit() {
@@ -2295,6 +2325,48 @@ require_command() {
 
 monotonic_ns() {
     python3 -c 'import time; print(time.monotonic_ns())'
+}
+
+host_clock_sample() {
+    python3 -c \
+        'import time; print(time.time_ns(), time.monotonic_ns())'
+}
+
+guest_clock_within_host_window() {
+    python3 - "$@" <<'PY'
+import sys
+
+try:
+    guest, before_wall_ns, after_wall_ns, before_mono, after_mono = map(int, sys.argv[1:])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+
+if min(guest, before_wall_ns, after_wall_ns, before_mono, after_mono) < 0:
+    raise SystemExit(1)
+monotonic_span = after_mono - before_mono
+wall_span_ns = after_wall_ns - before_wall_ns
+if not 0 <= monotonic_span <= 10_000_000_000:
+    raise SystemExit(1)
+# The two clocks are sampled back-to-back at each endpoint. A 100ms allowance
+# covers scheduling and ordinary clock slew while refusing a material net host
+# wall-clock step during the proof interval. Offsetting discontinuous steps
+# inside the interval are an explicit host-clock assumption recorded in the
+# machine summary; two endpoint samples cannot observe such a pair.
+if wall_span_ns < 0 or abs(wall_span_ns - monotonic_span) > 100_000_000:
+    raise SystemExit(1)
+# Conservatively treat the guest's integer `date +%s` as the whole half-open
+# second [guest, guest+1), and charge the full admitted endpoint discrepancy
+# against the five-second tolerance. A probe wider than ten seconds has no
+# interval that can pass. Offsetting interior steps remain the explicit scope
+# boundary recorded above because two endpoint samples cannot observe them.
+guest_floor_ns = guest * 1_000_000_000
+guest_ceiling_ns = (guest + 1) * 1_000_000_000
+uncertainty_ns = 100_000_000
+if guest_floor_ns < after_wall_ns - 5_000_000_000 + uncertainty_ns:
+    raise SystemExit(1)
+if guest_ceiling_ns > before_wall_ns + 5_000_000_000 - uncertainty_ns:
+    raise SystemExit(1)
+PY
 }
 
 process_starttime() {
@@ -2532,8 +2604,8 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 
 for command_name in \
-    awk bash cargo cat chattr cksum cmp cp curl cut date debugfs env find findmnt firecracker flock git grep head \
-    ip iptables iptables-save jailer jq lsattr mkfifo mkfs.ext4 mount pgrep ps python3 readelf readlink rm rustc sed seq sha256sum \
+    awk bash cargo cat chattr cksum cmp cp curl cut date debugfs dirname env find findmnt firecracker flock git grep head \
+    ip iptables iptables-save jailer jq lsattr mkfifo mkfs.ext4 mktemp mount pgrep ps python3 readelf readlink rm rustc sed seq sha256sum \
     sh sleep sort ssh ssh-keygen stat sudo tar tcpdump timeout tr truncate umount wc xargs; do
     require_command "$command_name"
 done
@@ -2726,6 +2798,7 @@ sudo -n chattr +i -- "$PROOF_CARGO_CONFIG" "$PROOF_CARGO_HOME" \
     printf 'worst_case_uds_path=%s\n' "$WORST_CASE_UDS_PATH"
     printf 'worst_case_uds_bytes=%s\n' "$WORST_CASE_UDS_BYTES"
     printf 'rng_scope=%s\n' "$RNG_SCOPE_NOTE"
+    printf 'clock_scope=%s\n' "$CLOCK_SCOPE_NOTE"
     printf 'host_arch=%s\n' "$(uname -m)"
     printf 'firecracker=%s\n' "$(firecracker --version 2>&1 | head -n 1)"
     printf 'jailer=%s\n' "$(jailer --version 2>&1 | head -n 1)"
@@ -3689,12 +3762,23 @@ readonly REMOTE_PROBE
 
 IDENTITY_PASS="true"
 while IFS=$'\t' read -r room_id index namespace guest; do
-    if ! evidence="$(ssh_clone "$namespace" "$guest" "$REMOTE_PROBE" 2>"$LOG_DIR/evidence-$room_id.stderr")"; then
+    read -r probe_before_realtime_ns probe_before_monotonic_ns \
+        < <(host_clock_sample)
+    evidence_status=0
+    evidence="$(ssh_clone "$namespace" "$guest" "$REMOTE_PROBE" 2>"$LOG_DIR/evidence-$room_id.stderr")" \
+        || evidence_status=$?
+    read -r probe_after_realtime_ns probe_after_monotonic_ns \
+        < <(host_clock_sample)
+    if ((evidence_status != 0)); then
         IDENTITY_PASS="false"
         hard_failure "identity_probe_failed" "guest identity probe failed for $room_id"
         continue
     fi
-    printf '%s\t%s\t%s\n' "$room_id" "$index" "$evidence" >>"$GUEST_EVIDENCE"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$room_id" "$index" "$evidence" \
+        "$probe_before_realtime_ns" "$probe_after_realtime_ns" \
+        "$probe_before_monotonic_ns" "$probe_after_monotonic_ns" \
+        >>"$GUEST_EVIDENCE"
     IFS=$'\t' read -r \
         identity epoch kernel_rng host_key application_key \
         global_name global_email local_name local_email repo_head \
@@ -3704,10 +3788,15 @@ while IFS=$'\t' read -r room_id index namespace guest; do
         hard_failure "clone_clock_invalid" "clone $room_id returned a non-numeric epoch"
         continue
     fi
-    now="$(date +%s)"
-    delta=$((now - epoch))
-    if ((delta < 0)); then
-        delta=$((-delta))
+    if ! guest_clock_within_host_window \
+        "$epoch" \
+        "$probe_before_realtime_ns" \
+        "$probe_after_realtime_ns" \
+        "$probe_before_monotonic_ns" \
+        "$probe_after_monotonic_ns"; then
+        IDENTITY_PASS="false"
+        hard_failure "clone_clock_skew" \
+            "clone $room_id clock is not provably within five seconds of the bounded host interval"
     fi
     if [[ "$identity" != "$room_id" \
         || "$global_name" != "rooms $room_id" \
@@ -3720,8 +3809,7 @@ while IFS=$'\t' read -r room_id index namespace guest; do
         || "$secret_consumed" != absent \
         || ! "$kernel_rng" =~ ^[0-9a-f]{64}$ \
         || "$host_key" != SHA256:* \
-        || "$application_key" != SHA256:* \
-        || $delta -gt 5 ]]; then
+        || "$application_key" != SHA256:* ]]; then
         IDENTITY_PASS="false"
         hard_failure "clone_hygiene_invalid" \
             "identity/git/clock/RNG/host-key/secret evidence is invalid for $room_id"
@@ -4076,5 +4164,6 @@ log "PASS: fleet PSS ${FLEET_PSS_KB}KiB; naive ratio $PSS_SHARING_RATIO"
 log "PASS: eight isolated identities, post-reseed RNG consumers, exact repo workloads, and witnesses"
 log "PASS: eight observe-mode guests completed the hermetic two-hop return-path proof"
 log "$RNG_SCOPE_NOTE"
+log "$CLOCK_SCOPE_NOTE"
 log "$WORKLOAD_SCOPE_NOTE"
 log "FULL PHASE-2 GATE INCOMPLETE: distinct-task /work-driver evidence remains an external consumer gate"

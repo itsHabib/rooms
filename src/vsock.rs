@@ -335,21 +335,64 @@ async fn read_bounded_line(stream: &mut tokio::net::UnixStream) -> Result<String
 
 /// The per-restore hygiene nudge served to the resumed guest's agent.
 ///
-/// Carries the new room/run identity, the host clock, fresh entropy, and the
-/// admitted secrets (empty when none were requested — the guest still walks
-/// one deterministic protocol either way).
+/// Carries the new room/run identity, fresh entropy, and the admitted secrets
+/// (empty when none were requested — the guest still walks one deterministic
+/// protocol either way). The host clock is sampled only after the resumed
+/// guest supplies the exact protocol preface, immediately before the CLOCK
+/// frame is written; capturing it when this payload is armed would bake the
+/// snapshot-load and resume latency into every restored guest's clock skew.
 pub struct ResumePayload {
     /// The restored room's id — the guest's new identity.
     pub room_id: String,
-    /// Host wall-clock seconds since the epoch, to step the resumed guest's
-    /// stale clock.
-    pub epoch_secs: i64,
     /// Fresh host randomness the guest mixes into its CRNG so two restores of
     /// one snapshot diverge immediately.
     pub entropy: Vec<u8>,
     /// Encoded `NAME=value\n` secrets blob (empty = no secrets). Reuses the
     /// [`SecretsPayload`] wire shape; overwritten on drop with it.
     pub secrets: SecretsPayload,
+    clock: ResumeClock,
+}
+
+enum ResumeClock {
+    AtDelivery,
+    #[cfg(test)]
+    Fixed(i64),
+}
+
+impl ResumePayload {
+    /// Build a production payload whose wall clock is sampled at delivery.
+    #[must_use]
+    pub const fn new(room_id: String, entropy: Vec<u8>, secrets: SecretsPayload) -> Self {
+        Self {
+            room_id,
+            entropy,
+            secrets,
+            clock: ResumeClock::AtDelivery,
+        }
+    }
+
+    fn epoch_secs(&self) -> i64 {
+        match self.clock {
+            ResumeClock::AtDelivery => chrono::Utc::now().timestamp(),
+            #[cfg(test)]
+            ResumeClock::Fixed(epoch_secs) => epoch_secs,
+        }
+    }
+
+    #[cfg(test)]
+    const fn with_fixed_epoch(
+        room_id: String,
+        epoch_secs: i64,
+        entropy: Vec<u8>,
+        secrets: SecretsPayload,
+    ) -> Self {
+        Self {
+            room_id,
+            entropy,
+            secrets,
+            clock: ResumeClock::Fixed(epoch_secs),
+        }
+    }
 }
 
 /// Pending post-restore hygiene handshake.
@@ -571,8 +614,9 @@ async fn serve_resume_inner(
         .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
         .await
         .map_err(|error| format!("resume protocol for room {room_id}: write identity: {error}"))?;
+    let epoch_secs = payload.epoch_secs();
     stream
-        .write_all(format!("CLOCK {}\n", payload.epoch_secs).as_bytes())
+        .write_all(format!("CLOCK {epoch_secs}\n").as_bytes())
         .await
         .map_err(|error| format!("resume protocol for room {room_id}: write clock: {error}"))?;
     write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0)
@@ -834,12 +878,12 @@ mod tests {
     #[tokio::test]
     async fn resume_nudge_streams_frames_then_gates_on_the_ack() {
         let dir = tempfile::tempdir().unwrap();
-        let payload = ResumePayload {
-            room_id: "01resumeroomidresumeroomid".to_owned(),
-            epoch_secs: 1_700_000_000,
-            entropy: vec![7_u8; 64],
-            secrets: SecretsPayload::encode(&[("GH_TOKEN".to_owned(), "t-9".to_owned())]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            "01resumeroomidresumeroomid".to_owned(),
+            1_700_000_000,
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[("GH_TOKEN".to_owned(), "t-9".to_owned())]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
 
         let path = listener_path_for(dir.path(), RESUME_PORT);
@@ -877,14 +921,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_nudge_samples_the_clock_after_the_guest_preface() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload::new(
+            "01resumeroomidresumeroomid".to_owned(),
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[]),
+        );
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+
+        // A payload may be armed and its socket accepted well before the guest
+        // supplies the exact preface. Delay after connect so this also rejects
+        // sampling immediately after accept instead of at frame delivery.
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let delivery_not_before = chrono::Utc::now().timestamp();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        assert_eq!(read_typed_frame(&mut guest).await.0, "ENTROPY");
+        assert!(read_line(&mut guest).await.starts_with("IDENTITY "));
+        let clock = read_line(&mut guest).await;
+        let epoch_secs = clock
+            .strip_prefix("CLOCK ")
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        let delivery_not_after = chrono::Utc::now().timestamp();
+        assert!(
+            (delivery_not_before..=delivery_not_after).contains(&epoch_secs),
+            "{clock}"
+        );
+        assert_eq!(read_typed_frame(&mut guest).await.0, "SECRETS");
+        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
+        guest.write_all(b"ACK resume\n").await.unwrap();
+        drop(guest);
+
+        delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect("a delivery-time clock payload acks");
+    }
+
+    #[tokio::test]
     async fn resume_nudge_retries_a_clean_preface_eof_without_reopening_secrets() {
         let dir = tempfile::tempdir().unwrap();
-        let payload = ResumePayload {
-            room_id: "01resumeroomidresumeroomid".to_owned(),
-            epoch_secs: 1_700_000_000,
-            entropy: vec![7_u8; 64],
-            secrets: SecretsPayload::encode(&[("TOKEN".to_owned(), "once".to_owned())]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            "01resumeroomidresumeroomid".to_owned(),
+            1_700_000_000,
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[("TOKEN".to_owned(), "once".to_owned())]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
         let path = listener_path_for(dir.path(), RESUME_PORT);
 
@@ -922,12 +1008,12 @@ mod tests {
     #[tokio::test]
     async fn resume_nudge_retries_an_exact_partial_preface_without_sending_data() {
         let dir = tempfile::tempdir().unwrap();
-        let payload = ResumePayload {
-            room_id: "01resumeroomidresumeroomid".to_owned(),
-            epoch_secs: 1_700_000_000,
-            entropy: vec![7_u8; 64],
-            secrets: SecretsPayload::encode(&[("TOKEN".to_owned(), "once".to_owned())]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            "01resumeroomidresumeroomid".to_owned(),
+            1_700_000_000,
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[("TOKEN".to_owned(), "once".to_owned())]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
         let path = listener_path_for(dir.path(), RESUME_PORT);
 
@@ -960,12 +1046,12 @@ mod tests {
     #[tokio::test]
     async fn resume_nudge_rejects_a_divergent_partial_preface_without_sending_data() {
         let dir = tempfile::tempdir().unwrap();
-        let payload = ResumePayload {
-            room_id: "01resumeroomidresumeroomid".to_owned(),
-            epoch_secs: 1_700_000_000,
-            entropy: vec![7_u8; 64],
-            secrets: SecretsPayload::encode(&[("TOKEN".to_owned(), "never".to_owned())]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            "01resumeroomidresumeroomid".to_owned(),
+            1_700_000_000,
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[("TOKEN".to_owned(), "never".to_owned())]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
         let path = listener_path_for(dir.path(), RESUME_PORT);
 
@@ -986,12 +1072,12 @@ mod tests {
     #[tokio::test]
     async fn resume_nudge_bounds_clean_preface_candidates() {
         let dir = tempfile::tempdir().unwrap();
-        let payload = ResumePayload {
-            room_id: "01resumeroomidresumeroomid".to_owned(),
-            epoch_secs: 1,
-            entropy: vec![0_u8; 64],
-            secrets: SecretsPayload::encode(&[]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            "01resumeroomidresumeroomid".to_owned(),
+            1,
+            vec![0_u8; 64],
+            SecretsPayload::encode(&[]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
         let path = listener_path_for(dir.path(), RESUME_PORT);
 
@@ -1014,12 +1100,12 @@ mod tests {
     async fn resume_nudge_surfaces_guest_error_with_room_and_last_step() {
         let dir = tempfile::tempdir().unwrap();
         let room_id = "01resumeroomidresumeroomid";
-        let payload = ResumePayload {
-            room_id: room_id.to_owned(),
-            epoch_secs: 1_700_000_000,
-            entropy: vec![7_u8; 64],
-            secrets: SecretsPayload::encode(&[]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            room_id.to_owned(),
+            1_700_000_000,
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
 
         let path = listener_path_for(dir.path(), RESUME_PORT);
@@ -1049,12 +1135,12 @@ mod tests {
     async fn resume_nudge_eof_surfaces_room_and_last_step() {
         let dir = tempfile::tempdir().unwrap();
         let room_id = "01resumeroomidresumeroomid";
-        let payload = ResumePayload {
-            room_id: room_id.to_owned(),
-            epoch_secs: 1_700_000_000,
-            entropy: vec![7_u8; 64],
-            secrets: SecretsPayload::encode(&[]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            room_id.to_owned(),
+            1_700_000_000,
+            vec![7_u8; 64],
+            SecretsPayload::encode(&[]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
 
         let path = listener_path_for(dir.path(), RESUME_PORT);
@@ -1081,12 +1167,12 @@ mod tests {
     async fn resume_nudge_without_ack_is_a_delivery_failure() {
         let dir = tempfile::tempdir().unwrap();
         let room_id = "01resumeroomidresumeroomid";
-        let payload = ResumePayload {
-            room_id: room_id.to_owned(),
-            epoch_secs: 1,
-            entropy: vec![0_u8; 64],
-            secrets: SecretsPayload::encode(&[]),
-        };
+        let payload = ResumePayload::with_fixed_epoch(
+            room_id.to_owned(),
+            1,
+            vec![0_u8; 64],
+            SecretsPayload::encode(&[]),
+        );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
