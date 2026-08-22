@@ -211,6 +211,68 @@ run_rooms() {
         "$ROOMS_BIN" "$@"
 }
 
+# rooms runs as root and deliberately publishes state and immutable snapshots
+# that the ordinary proof operator cannot traverse. Keep every inspection of
+# that security boundary privileged too; an unprivileged test would otherwise
+# confuse EACCES with absence and make both the evidence and leak audit lie.
+privileged_paths_absent() {
+    local state
+
+    state="$(sudo -n sh -c '
+        for path do
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                printf present
+                exit 0
+            fi
+        done
+        printf absent
+    ' sh "$@")" || return 1
+    [[ "$state" == "absent" ]]
+}
+
+privileged_regular_file() {
+    local state
+
+    state="$(sudo -n sh -c '
+        if [ -f "$1" ] && [ ! -L "$1" ]; then
+            printf regular
+        else
+            printf other
+        fi
+    ' sh "$1")" || return 1
+    [[ "$state" == "regular" ]]
+}
+
+privileged_directory() {
+    local state
+
+    state="$(sudo -n sh -c '
+        if [ -d "$1" ] && [ ! -L "$1" ]; then
+            printf directory
+        else
+            printf other
+        fi
+    ' sh "$1")" || return 1
+    [[ "$state" == "directory" ]]
+}
+
+privileged_nonempty_file() {
+    local state
+
+    state="$(sudo -n sh -c '
+        if [ -f "$1" ] && [ -s "$1" ] && [ ! -L "$1" ]; then
+            printf nonempty
+        else
+            printf other
+        fi
+    ' sh "$1")" || return 1
+    [[ "$state" == "nonempty" ]]
+}
+
+privileged_read_file() {
+    sudo -n cat -- "$1"
+}
+
 capture_protected_entry() {
     local output="$1"
     local path="$2"
@@ -541,36 +603,57 @@ discover_proof_room_ids() {
         done < <(jq -r '.rooms[].id' <<<"$listing" 2>>"$CLEANUP_LOG")
     fi
 
-    if [[ -d "$STATE_DIR" ]]; then
+    if ! privileged_paths_absent "$STATE_DIR"; then
+        privileged_directory "$STATE_DIR" || return 1
+        listing="$(sudo -n find "$STATE_DIR" \
+            -mindepth 1 -maxdepth 1 -type d -print \
+            2>>"$CLEANUP_LOG")" || return 1
         while read -r path; do
+            [[ -n "$path" ]] || continue
             owner="$(basename "$path")"
             add_created_id "$owner" || true
-        done < <(find "$STATE_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>>"$CLEANUP_LOG")
+        done <<<"$listing"
     fi
 
-    if [[ -d "$STATE_DIR/restore-intents" ]]; then
+    if ! privileged_paths_absent "$STATE_DIR/restore-intents"; then
+        privileged_directory "$STATE_DIR/restore-intents" || return 1
+        listing="$(sudo -n find "$STATE_DIR/restore-intents" \
+            -maxdepth 1 -type f -name '*.json' -print \
+            2>>"$CLEANUP_LOG")" || return 1
         while read -r path; do
+            [[ -n "$path" ]] || continue
             owner="$(basename "$path" .json)"
             add_created_id "$owner" || true
-        done < <(find "$STATE_DIR/restore-intents" -maxdepth 1 -type f -name '*.json' -print 2>>"$CLEANUP_LOG")
+        done <<<"$listing"
     fi
 
-    if [[ -d "$STATE_DIR/snapshot-intents" ]]; then
+    if ! privileged_paths_absent "$STATE_DIR/snapshot-intents"; then
+        privileged_directory "$STATE_DIR/snapshot-intents" || return 1
+        listing="$(sudo -n find "$STATE_DIR/snapshot-intents" \
+            -maxdepth 1 -type f -name '*.json' -print \
+            2>>"$CLEANUP_LOG")" || return 1
         while read -r path; do
+            [[ -n "$path" ]] || continue
             owner="$(basename "$path" .json)"
             add_created_id "$owner" || true
-        done < <(find "$STATE_DIR/snapshot-intents" -maxdepth 1 -type f -name '*.json' -print 2>>"$CLEANUP_LOG")
+        done <<<"$listing"
     fi
 
-    if [[ -d "$STATE_DIR/clonenets" ]]; then
+    if ! privileged_paths_absent "$STATE_DIR/clonenets"; then
+        privileged_directory "$STATE_DIR/clonenets" || return 1
+        listing="$(sudo -n find "$STATE_DIR/clonenets" \
+            -maxdepth 1 -type f -print \
+            2>>"$CLEANUP_LOG")" || return 1
         while read -r path; do
-            owner="$(sed -n '1p' "$path" 2>>"$CLEANUP_LOG")"
+            [[ -n "$path" ]] || continue
+            owner="$(sudo -n sed -n '1p' "$path" 2>>"$CLEANUP_LOG")" || return 1
             add_created_id "$owner" || true
-        done < <(find "$STATE_DIR/clonenets" -maxdepth 1 -type f -print 2>>"$CLEANUP_LOG")
+        done <<<"$listing"
     fi
 
-    if [[ -f "$STATE_DIR/slots/1" ]]; then
-        IFS= read -r owner <"$STATE_DIR/slots/1" || true
+    if ! privileged_paths_absent "$STATE_DIR/slots/1"; then
+        privileged_regular_file "$STATE_DIR/slots/1" || return 1
+        owner="$(privileged_read_file "$STATE_DIR/slots/1")" || return 1
         add_created_id "$owner" || true
     fi
 }
@@ -611,20 +694,20 @@ assert_terminal_proof_slot() {
     local recovered_snapshot_id
     local token
 
-    if [[ ! -e "$STATE_DIR/slots/1" && ! -L "$STATE_DIR/slots/1" ]]; then
+    if privileged_paths_absent "$STATE_DIR/slots/1"; then
         [[ -z "$SNAPSHOT_ID" ]]
         return
     fi
-    [[ -f "$STATE_DIR/slots/1" && ! -L "$STATE_DIR/slots/1" ]] || return 1
-    token="$(<"$STATE_DIR/slots/1")"
+    privileged_regular_file "$STATE_DIR/slots/1" || return 1
+    token="$(privileged_read_file "$STATE_DIR/slots/1")" || return 1
     if [[ -n "$SNAPSHOT_ID" ]]; then
         [[ "$token" == "@reservation $SNAPSHOT_ID" ]]
         return
     fi
     if [[ "$token" =~ ^@reservation\ ([0-9a-z]{26})$ ]]; then
         recovered_snapshot_id="${BASH_REMATCH[1]}"
-        if [[ -s "$SNAPSHOT_DIR/snapshot.json" ]] \
-            && jq -e --arg snapshot_id "$recovered_snapshot_id" \
+        if privileged_nonempty_file "$SNAPSHOT_DIR/snapshot.json" \
+            && sudo -n jq -e --arg snapshot_id "$recovered_snapshot_id" \
                 '.snapshot_id == $snapshot_id' \
                 "$SNAPSHOT_DIR/snapshot.json" >/dev/null 2>>"$CLEANUP_LOG"; then
             SNAPSHOT_ID="$recovered_snapshot_id"
@@ -638,14 +721,19 @@ proof_transients_absent() {
     local directory
     local found
     for directory in restore-intents snapshot-intents clonenets; do
-        [[ -d "$STATE_DIR/$directory" ]] || continue
+        if privileged_paths_absent "$STATE_DIR/$directory"; then
+            continue
+        fi
+        privileged_directory "$STATE_DIR/$directory" || return 1
         if [[ "$directory" == "clonenets" ]]; then
-            found="$(find "$STATE_DIR/$directory" -mindepth 1 -maxdepth 1 -print -quit)" \
+            found="$(sudo -n find "$STATE_DIR/$directory" \
+                -mindepth 1 -maxdepth 1 -print -quit)" \
                 || return 1
         else
             # Snapshot transaction lock files are durable serialization
             # primitives, not live intents. Only the indexed JSON is custody.
-            found="$(find "$STATE_DIR/$directory" -mindepth 1 -maxdepth 1 -name '*.json' -print -quit)" \
+            found="$(sudo -n find "$STATE_DIR/$directory" \
+                -mindepth 1 -maxdepth 1 -name '*.json' -print -quit)" \
                 || return 1
         fi
         if [[ -n "$found" ]]; then
@@ -675,18 +763,28 @@ cleanup_created_rooms() {
 
     recover_proof_snapshots || failed=1
     discover_proof_json_ids
-    discover_proof_room_ids
+    discover_proof_room_ids || failed=1
 
     while read -r room_id; do
         valid_room_id "$room_id" || continue
+        # Both operations are idempotent cleanup attempts. A room may already
+        # have reached terminal absence (for example snapshot consumes its
+        # base, and command-mode clones reap themselves). The authoritative
+        # result is the exact state/resource audit below, not an "already
+        # gone" diagnostic from a redundant cleanup attempt.
         run_rooms kill "$room_id" --json \
-            >>"$CLEANUP_LOG" 2>&1 || failed=1
+            >>"$CLEANUP_LOG" 2>&1 || true
         run_rooms gc "$room_id" \
-            >>"$CLEANUP_LOG" 2>&1 || failed=1
+            >>"$CLEANUP_LOG" 2>&1 || true
     done < <(sort -u "$CREATED_IDS_FILE")
 
+    # The global pass owns reconciliation of orphaned restore intents and
+    # CloneNet allocator claims. It runs inside the hermetic proof HOME; the
+    # exact terminal audits below still decide whether cleanup succeeded.
+    run_rooms gc >>"$CLEANUP_LOG" 2>&1 || true
+
     recover_proof_snapshots || failed=1
-    discover_proof_room_ids
+    discover_proof_room_ids || failed=1
     if listing="$(run_rooms ls --json 2>>"$CLEANUP_LOG")"; then
         if ! jq -e '.rooms | length == 0' >/dev/null <<<"$listing"; then
             failed=1
@@ -913,8 +1011,8 @@ monotonic_ns() {
 
 assert_reservation() {
     local token
-    [[ -f "$STATE_DIR/slots/1" && ! -L "$STATE_DIR/slots/1" ]] || return 1
-    token="$(<"$STATE_DIR/slots/1")"
+    privileged_regular_file "$STATE_DIR/slots/1" || return 1
+    token="$(privileged_read_file "$STATE_DIR/slots/1")" || return 1
     [[ "$token" == "@reservation $SNAPSHOT_ID" ]]
 }
 
@@ -971,15 +1069,12 @@ assert_batch_owned_paths_absent() {
         || return 1
     [[ -n "$records" ]] || return 1
     while IFS=$'\t' read -r room_id index; do
-        if [[ -e "$STATE_DIR/$room_id" || -L "$STATE_DIR/$room_id" \
-            || -e "$STATE_DIR/jailer/firecracker/$room_id" \
-            || -L "$STATE_DIR/jailer/firecracker/$room_id" \
-            || -e "$STATE_DIR/restore-intents/$room_id.json" \
-            || -L "$STATE_DIR/restore-intents/$room_id.json" \
-            || -e "$STATE_DIR/snapshot-intents/$room_id.json" \
-            || -L "$STATE_DIR/snapshot-intents/$room_id.json" \
-            || -e "$STATE_DIR/clonenets/$index" \
-            || -L "$STATE_DIR/clonenets/$index" ]]; then
+        if ! privileged_paths_absent \
+            "$STATE_DIR/$room_id" \
+            "$STATE_DIR/jailer/firecracker/$room_id" \
+            "$STATE_DIR/restore-intents/$room_id.json" \
+            "$STATE_DIR/snapshot-intents/$room_id.json" \
+            "$STATE_DIR/clonenets/$index"; then
             failed=1
         fi
     done <<<"$records"
@@ -1189,17 +1284,21 @@ valid_room_id "$SNAPSHOT_ID" || fatal "invalid_snapshot_id" "snapshot returned a
 jq -e '.slot == 1' "$PROOF_ROOT/snapshot-result.json" >/dev/null \
     || fatal "snapshot_wrong_slot" "snapshot did not retain frozen slot 1"
 for artifact in snapshot.json snapshot.mem snapshot.vmstate; do
-    [[ -s "$SNAPSHOT_DIR/$artifact" ]] \
+    privileged_nonempty_file "$SNAPSHOT_DIR/$artifact" \
         || fatal "snapshot_artifact_missing" "$artifact is missing or empty"
-    lsattr -d -- "$SNAPSHOT_DIR/$artifact" \
+    sudo -n lsattr -d -- "$SNAPSHOT_DIR/$artifact" \
         | awk 'NR == 1 { exit index($1, "i") == 0 }' \
         || fatal "snapshot_artifact_not_immutable" \
             "$artifact is not protected by FS_IMMUTABLE_FL"
 done
-lsattr -d -- "$SNAPSHOT_DIR" | awk 'NR == 1 { exit index($1, "i") == 0 }' \
+privileged_directory "$SNAPSHOT_DIR" \
+    || fatal "snapshot_directory_invalid" \
+        "published snapshot path is not an exact directory"
+sudo -n lsattr -d -- "$SNAPSHOT_DIR" \
+    | awk 'NR == 1 { exit index($1, "i") == 0 }' \
     || fatal "snapshot_directory_not_immutable" \
         "published snapshot directory is not protected by FS_IMMUTABLE_FL"
-jq -e \
+sudo -n jq -e \
     --arg rootfs_hash "$ROOTFS_SHA256" \
     --arg snapshot_id "$SNAPSHOT_ID" \
     --arg base_id "$BASE_ID" \
@@ -1213,15 +1312,19 @@ jq -e \
      .provenance == "neutral"' \
     "$SNAPSHOT_DIR/snapshot.json" >/dev/null \
     || fatal "snapshot_metadata_mismatch" "snapshot metadata does not pin the fresh image and neutral provenance"
-SNAPSHOT_GUEST="$(jq -er .guest_ip "$SNAPSHOT_DIR/snapshot.json")"
+SNAPSHOT_GUEST="$(sudo -n jq -er .guest_ip "$SNAPSHOT_DIR/snapshot.json")"
 BASE_REPO_SHA="$SOURCE_HEAD"
 assert_reservation \
     || fatal "reservation_missing" "proof state does not hold the exact snapshot reservation"
-SNAPSHOT_MEM_BYTES="$(stat -Lc %s "$SNAPSHOT_DIR/snapshot.mem")"
-SNAPSHOT_MEM_INODE="$(stat -Lc '%d:%i' "$SNAPSHOT_DIR/snapshot.mem")"
-RESERVATION_SHA256="$(sha256sum "$STATE_DIR/slots/1" | awk '{print $1}')"
+SNAPSHOT_MEM_BYTES="$(sudo -n stat -Lc %s "$SNAPSHOT_DIR/snapshot.mem")"
+SNAPSHOT_MEM_INODE="$(sudo -n stat -Lc '%d:%i' "$SNAPSHOT_DIR/snapshot.mem")"
+RESERVATION_SHA256="$(sudo -n sha256sum "$STATE_DIR/slots/1" | awk '{print $1}')"
 readonly RESERVATION_SHA256
-sha256sum "$SNAPSHOT_DIR"/snapshot.* >"$PROOF_ROOT/snapshot-artifacts.sha256"
+sudo -n sha256sum \
+    "$SNAPSHOT_DIR/snapshot.json" \
+    "$SNAPSHOT_DIR/snapshot.mem" \
+    "$SNAPSHOT_DIR/snapshot.vmstate" \
+    >"$PROOF_ROOT/snapshot-artifacts.sha256"
 SNAPSHOT_PASS="true"
 
 PHASE="single-clone-baseline"
@@ -1257,7 +1360,7 @@ ssh_clone "$SINGLE_NAMESPACE" "$SINGLE_GUEST" true \
     >"$LOG_DIR/single-ready.stdout" \
     2>"$LOG_DIR/single-ready.stderr" \
     || fatal "single_clone_not_ready" "one-clone baseline did not accept SSH"
-SINGLE_PID="$(jq -er .pid "$STATE_DIR/$SINGLE_ID/room.json")"
+SINGLE_PID="$(sudo -n jq -er .pid "$STATE_DIR/$SINGLE_ID/room.json")"
 readonly SINGLE_PID
 SINGLE_PSS_KB="$(sudo -n awk '/^Pss:/ {print $2}' "/proc/$SINGLE_PID/smaps_rollup")"
 [[ "$SINGLE_PSS_KB" =~ ^[0-9]+$ ]] && ((SINGLE_PSS_KB > 0)) \
@@ -1417,12 +1520,12 @@ TOPOLOGY_PASS="true"
 PSS_PASS="true"
 while IFS=$'\t' read -r room_id namespace index host_veth slot; do
     room_json="$STATE_DIR/$room_id/room.json"
-    if [[ ! -f "$room_json" ]]; then
+    if ! privileged_regular_file "$room_json"; then
         TOPOLOGY_PASS="false"
         hard_failure "room_metadata_missing" "room metadata disappeared for $room_id"
         continue
     fi
-    pid="$(jq -er .pid "$room_json")"
+    pid="$(sudo -n jq -er .pid "$room_json")"
     process_ns_inode="$(sudo -n stat -Lc %i "/proc/$pid/ns/net")"
     named_ns_inode="$(sudo -n stat -Lc %i "/run/netns/$namespace")"
     pss_kb="$(sudo -n awk '/^Pss:/ {print $2}' "/proc/$pid/smaps_rollup")"
@@ -1733,6 +1836,11 @@ fi
 readonly WITNESS_MANIFEST="$PROOF_ROOT/witness-manifest.tsv"
 : >"$WITNESS_MANIFEST"
 while IFS=$'\t' read -r room_id out_dir; do
+    resolved_out_dir=""
+    resolved_pcap_file=""
+    resolved_result_file=""
+    resolved_stdout_file=""
+    resolved_witness_file=""
     expected_port="$(witness_port_for_room "$room_id")" \
         || fatal "witness_port_invalid" "could not derive the witness port for $room_id"
     witness_file="$out_dir/witness.json"
@@ -1741,26 +1849,34 @@ while IFS=$'\t' read -r room_id out_dir; do
     stdout_file="$out_dir/logs/stdout.log"
     witness_ok="true"
     if [[ "$out_dir" != "$WITNESS_ROOT/$room_id" \
-        || -L "$out_dir" \
-        || -L "$witness_file" \
-        || -L "$pcap_file" \
-        || -L "$result_file" \
-        || -L "$stdout_file" \
-        || ! -s "$witness_file" \
-        || ! -s "$pcap_file" \
-        || ! -s "$result_file" \
-        || ! -s "$stdout_file" ]]; then
+        ]] \
+        || ! privileged_directory "$out_dir" \
+        || ! privileged_nonempty_file "$witness_file" \
+        || ! privileged_nonempty_file "$pcap_file" \
+        || ! privileged_nonempty_file "$result_file" \
+        || ! privileged_nonempty_file "$stdout_file"; then
         witness_ok="false"
     fi
-    if [[ "$witness_ok" == "true" ]] \
-        && { [[ "$(readlink -f -- "$out_dir")" != "$out_dir" ]] \
-            || [[ "$(readlink -f -- "$witness_file")" != "$witness_file" ]] \
-            || [[ "$(readlink -f -- "$pcap_file")" != "$pcap_file" ]] \
-            || [[ "$(readlink -f -- "$result_file")" != "$result_file" ]] \
-            || [[ "$(readlink -f -- "$stdout_file")" != "$stdout_file" ]]; }; then
-        witness_ok="false"
+    if [[ "$witness_ok" == "true" ]]; then
+        resolved_out_dir="$(sudo -n readlink -f -- "$out_dir")" \
+            || witness_ok="false"
+        resolved_witness_file="$(sudo -n readlink -f -- "$witness_file")" \
+            || witness_ok="false"
+        resolved_pcap_file="$(sudo -n readlink -f -- "$pcap_file")" \
+            || witness_ok="false"
+        resolved_result_file="$(sudo -n readlink -f -- "$result_file")" \
+            || witness_ok="false"
+        resolved_stdout_file="$(sudo -n readlink -f -- "$stdout_file")" \
+            || witness_ok="false"
+        if [[ "$resolved_out_dir" != "$out_dir" \
+            || "$resolved_witness_file" != "$witness_file" \
+            || "$resolved_pcap_file" != "$pcap_file" \
+            || "$resolved_result_file" != "$result_file" \
+            || "$resolved_stdout_file" != "$stdout_file" ]]; then
+            witness_ok="false"
+        fi
     fi
-    if [[ "$witness_ok" == "true" ]] && ! jq -e \
+    if [[ "$witness_ok" == "true" ]] && ! sudo -n jq -e \
         --argjson expected_port "$expected_port" '
         .schema_version == 2 and
         .tap == "tap-fc1" and
@@ -1773,17 +1889,19 @@ while IFS=$'\t' read -r room_id out_dir; do
         witness_ok="false"
     fi
     if [[ "$witness_ok" == "true" ]] \
-        && ! jq -e \
+        && ! sudo -n jq -e \
             '.schema_version == 1 and .status == "succeeded" and .exit_code == 0' \
             "$result_file" >/dev/null; then
         witness_ok="false"
     fi
     if [[ "$witness_ok" == "true" ]] \
-        && ! grep -Fxq "room=$room_id witness_port=$expected_port egress=blocked" "$stdout_file"; then
+        && ! sudo -n grep -Fxq \
+            "room=$room_id witness_port=$expected_port egress=blocked" \
+            "$stdout_file"; then
         witness_ok="false"
     fi
     if [[ "$witness_ok" == "true" ]] \
-        && ! tcpdump -nn -r "$pcap_file" -c 1 \
+        && ! sudo -n tcpdump -nn -r "$pcap_file" -c 1 \
             "dst host 1.1.1.1 and tcp dst port $expected_port" \
             >/dev/null 2>>"$LOG_DIR/tcpdump-read.stderr"; then
         witness_ok="false"
@@ -1797,9 +1915,9 @@ while IFS=$'\t' read -r room_id out_dir; do
         "$room_id" \
         "$out_dir" \
         "$expected_port" \
-        "$(stat -Lc '%d:%i' "$pcap_file")" \
-        "$(stat -Lc %s "$pcap_file")" \
-        "$(sha256sum "$pcap_file" | awk '{print $1}')" \
+        "$(sudo -n stat -Lc '%d:%i' "$pcap_file")" \
+        "$(sudo -n stat -Lc %s "$pcap_file")" \
+        "$(sudo -n sha256sum "$pcap_file" | awk '{print $1}')" \
         >>"$WITNESS_MANIFEST"
 done < <(jq -r '.clones[] | [.room_id,.out_dir] | @tsv' "$WITNESS_JSON")
 
@@ -1832,24 +1950,37 @@ if ! assert_reservation; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "final_reservation_drift" "terminal slot token is not the exact snapshot reservation"
 fi
-if [[ "$(sha256sum "$STATE_DIR/slots/1" | awk '{print $1}')" != "$RESERVATION_SHA256" ]]; then
+if [[ "$(sudo -n sha256sum "$STATE_DIR/slots/1" | awk '{print $1}')" \
+    != "$RESERVATION_SHA256" ]]; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "reservation_bytes_changed" "terminal reservation bytes differ from the published snapshot token"
 fi
-if [[ -d "$STATE_DIR/restore-intents" ]] \
-    && find "$STATE_DIR/restore-intents" -maxdepth 1 -name '*.json' -print -quit | grep -q .; then
-    FINAL_LEAK_AUDIT_PASS="false"
-    hard_failure "restore_intent_leak" "restore intent tombstones remain"
+if ! privileged_paths_absent "$STATE_DIR/restore-intents"; then
+    if ! privileged_directory "$STATE_DIR/restore-intents" \
+        || sudo -n find "$STATE_DIR/restore-intents" \
+            -maxdepth 1 -name '*.json' -print -quit | grep -q .; then
+        FINAL_LEAK_AUDIT_PASS="false"
+        hard_failure "restore_intent_leak" \
+            "restore intent tombstones or an invalid intent path remain"
+    fi
 fi
-if [[ -d "$STATE_DIR/clonenets" ]] \
-    && find "$STATE_DIR/clonenets" -maxdepth 1 -type f -print -quit | grep -q .; then
-    FINAL_LEAK_AUDIT_PASS="false"
-    hard_failure "clonenet_claim_leak" "clone-network claim files remain"
+if ! privileged_paths_absent "$STATE_DIR/clonenets"; then
+    if ! privileged_directory "$STATE_DIR/clonenets" \
+        || sudo -n find "$STATE_DIR/clonenets" \
+            -maxdepth 1 -type f -print -quit | grep -q .; then
+        FINAL_LEAK_AUDIT_PASS="false"
+        hard_failure "clonenet_claim_leak" \
+            "clone-network claims or an invalid claim path remain"
+    fi
 fi
-if [[ -d "$STATE_DIR/snapshot-intents" ]] \
-    && find "$STATE_DIR/snapshot-intents" -maxdepth 1 -name '*.json' -print -quit | grep -q .; then
-    FINAL_LEAK_AUDIT_PASS="false"
-    hard_failure "snapshot_intent_leak" "snapshot intent tombstones remain"
+if ! privileged_paths_absent "$STATE_DIR/snapshot-intents"; then
+    if ! privileged_directory "$STATE_DIR/snapshot-intents" \
+        || sudo -n find "$STATE_DIR/snapshot-intents" \
+            -maxdepth 1 -name '*.json' -print -quit | grep -q .; then
+        FINAL_LEAK_AUDIT_PASS="false"
+        hard_failure "snapshot_intent_leak" \
+            "snapshot intent tombstones or an invalid intent path remain"
+    fi
 fi
 if ! proof_transients_absent; then
     FINAL_LEAK_AUDIT_PASS="false"
@@ -1869,12 +2000,12 @@ if pgrep -x firecracker >/dev/null 2>&1 || pgrep -x jailer >/dev/null 2>&1; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "vmm_process_leak" "a Firecracker or jailer process remains"
 fi
-if ! sha256sum -c --status "$PROOF_ROOT/build-artifacts.sha256"; then
+if ! sudo -n sha256sum -c --status "$PROOF_ROOT/build-artifacts.sha256"; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "build_artifact_changed" \
         "the proof binary, fresh rootfs, or copied kernel changed after build verification"
 fi
-if ! sha256sum -c --status "$PROOF_ROOT/snapshot-artifacts.sha256"; then
+if ! sudo -n sha256sum -c --status "$PROOF_ROOT/snapshot-artifacts.sha256"; then
     FINAL_LEAK_AUDIT_PASS="false"
     hard_failure "snapshot_artifact_changed" \
         "one or more neutral snapshot artifacts changed after publication"
@@ -1884,20 +2015,18 @@ if findmnt -rn -o TARGET | grep -Fq "$STATE_DIR/jailer/"; then
     hard_failure "jail_mount_leak" "a proof jail bind mount remains"
 fi
 while read -r created_room_id; do
-    if [[ -e "$STATE_DIR/$created_room_id" || -L "$STATE_DIR/$created_room_id" \
-        || -e "$STATE_DIR/jailer/firecracker/$created_room_id" \
-        || -L "$STATE_DIR/jailer/firecracker/$created_room_id" \
-        || -e "$STATE_DIR/restore-intents/$created_room_id.json" \
-        || -L "$STATE_DIR/restore-intents/$created_room_id.json" \
-        || -e "$STATE_DIR/snapshot-intents/$created_room_id.json" \
-        || -L "$STATE_DIR/snapshot-intents/$created_room_id.json" ]]; then
+    if ! privileged_paths_absent \
+        "$STATE_DIR/$created_room_id" \
+        "$STATE_DIR/jailer/firecracker/$created_room_id" \
+        "$STATE_DIR/restore-intents/$created_room_id.json" \
+        "$STATE_DIR/snapshot-intents/$created_room_id.json"; then
         FINAL_LEAK_AUDIT_PASS="false"
         hard_failure "created_room_path_leak" \
             "managed paths remain for proof-owned room $created_room_id"
     fi
 done < <(sort -u "$CREATED_IDS_FILE")
 for artifact in snapshot.json snapshot.mem snapshot.vmstate; do
-    if [[ ! -s "$SNAPSHOT_DIR/$artifact" ]]; then
+    if ! privileged_nonempty_file "$SNAPSHOT_DIR/$artifact"; then
         FINAL_LEAK_AUDIT_PASS="false"
         hard_failure "snapshot_not_preserved" "$artifact disappeared during the gate"
     fi
