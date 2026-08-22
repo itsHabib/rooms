@@ -639,9 +639,8 @@ pub(crate) fn attested_rootfs_hash(
         Err(error) => return Err(error.into()),
     }
     let path = attestation_path(config, &meta.snapshot_id)?;
-    let mut file = match inode_seal::open_regular(&path, "snapshot attestation") {
-        Ok(file) => file,
-        Err(_) => return Ok(None),
+    let Ok(mut file) = inode_seal::open_regular(&path, "snapshot attestation") else {
+        return Ok(None);
     };
     let metadata = file.metadata()?;
     if metadata.len() > MAX_ATTESTATION_BYTES {
