@@ -384,6 +384,15 @@ mod tests {
         assert!(apply.contains("socket(AF_VSOCK"));
         assert!(apply.contains("SOCK_NONBLOCK"));
         assert!(apply.contains("connect_resume_stream"));
+        assert!(apply.contains("MSG_NOSIGNAL"));
+        assert!(apply.contains("RESUME_HANDSHAKE_MAX_ATTEMPTS"));
+        let preface_write = apply
+            .find("send_resume_preface(fd)")
+            .expect("preface write before transport attachment");
+        let transport_attach = apply
+            .find("dup2(fd, STDIN_FILENO)")
+            .expect("resume transport attachment");
+        assert!(preface_write < transport_attach);
         let resume_session = apply
             .split_once("static int resume_session")
             .expect("native resume transaction")
@@ -921,6 +930,21 @@ mod tests {
         let line = stdout.trim_end_matches('\n');
         assert!(line.starts_with("ERR hostkeys "), "{line:?}");
         assert!(line.len() <= 64, "protocol error is {} bytes", line.len());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_resume_preface_handles_a_closed_candidate_without_sigpipe() {
+        let (_build, binary) = compile_resume_helper();
+        let output = std::process::Command::new(binary)
+            .arg("--test-preface-closed-peer")
+            .output()
+            .expect("write preface to closed candidate");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]

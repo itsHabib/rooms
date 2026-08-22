@@ -62,6 +62,7 @@ readonly ENDPOINT_COMMENT="rooms-p2-$PROOF_TAG"
 readonly ENDPOINT_PORT_FILE="$PROOF_ROOT/endpoint.port"
 readonly ENDPOINT_REQUESTS="$PROOF_ROOT/endpoint-requests.ndjson"
 readonly SSH_WALL_TIMEOUT_SECONDS=20
+readonly ROOMS_PROOF_RUST_LOG="info,rooms::vsock=debug"
 
 export PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
@@ -229,6 +230,7 @@ run_rooms() {
         sudo -n env \
             HOME="$PROOF_HOME" \
             PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
             ROOMS_PHASE2_PROBE="$ROOMS_PHASE2_PROBE" \
             "$ROOMS_BIN" "$@"
         return
@@ -236,6 +238,7 @@ run_rooms() {
     sudo -n env \
         HOME="$PROOF_HOME" \
         PATH="$OPERATOR_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        RUST_LOG="$ROOMS_PROOF_RUST_LOG" \
         "$ROOMS_BIN" "$@"
 }
 
@@ -432,24 +435,50 @@ endpoint_pid_is_owned() {
 
 endpoint_interface_is_owned() {
     local current_address
-    local current_alias
-    local current_ifindex
+    local current_alias="<unread>"
+    local current_ifindex="<unread>"
+    local presence="<unknown>"
+    local reason="owned"
 
-    [[ "$ENDPOINT_IFINDEX" =~ ^[0-9]+$ ]] || return 1
-    [[ "$ENDPOINT_ADDRESS" =~ ^02(:[[:xdigit:]]{2}){5}$ ]] || return 1
-    [[ "$ENDPOINT_INTERFACE_STAGE" == "fingerprinted" \
-        || "$ENDPOINT_INTERFACE_STAGE" == "alias_confirmed" ]] || return 1
-    sudo -n ip link show "$ENDPOINT_IF" >/dev/null 2>&1 || return 1
-    current_ifindex="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/ifindex")" || return 1
-    current_address="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/address")" || return 1
-    current_alias="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/ifalias")" || return 1
-    [[ "$current_ifindex" == "$ENDPOINT_IFINDEX" \
-        && "$current_address" == "$ENDPOINT_ADDRESS" ]] || return 1
-    if [[ "$ENDPOINT_INTERFACE_STAGE" == "alias_confirmed" ]]; then
-        [[ "$current_alias" == "$ENDPOINT_ALIAS" ]]
-        return
+    if [[ ! "$ENDPOINT_IFINDEX" =~ ^[0-9]+$ ]]; then
+        reason="invalid-expected-ifindex"
+    elif [[ ! "$ENDPOINT_ADDRESS" =~ ^02(:[[:xdigit:]]{2}){5}$ ]]; then
+        reason="invalid-expected-address"
+    elif [[ "$ENDPOINT_INTERFACE_STAGE" != "fingerprinted" \
+        && "$ENDPOINT_INTERFACE_STAGE" != "alias_confirmed" ]]; then
+        reason="invalid-expected-stage"
+    elif ! presence="$(endpoint_interface_presence 2>>"$CLEANUP_LOG")"; then
+        reason="presence-inspection-failed"
+    elif [[ "$presence" != "present" ]]; then
+        reason="interface-absent"
+    elif ! current_ifindex="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/ifindex" \
+        2>>"$CLEANUP_LOG")"; then
+        reason="ifindex-read-failed"
+    elif ! current_address="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/address" \
+        2>>"$CLEANUP_LOG")"; then
+        reason="address-read-failed"
+    elif ! current_alias="$(sudo -n cat "/sys/class/net/$ENDPOINT_IF/ifalias" \
+        2>>"$CLEANUP_LOG")"; then
+        reason="alias-read-failed"
+    elif [[ "$current_ifindex" != "$ENDPOINT_IFINDEX" ]]; then
+        reason="ifindex-mismatch"
+    elif [[ "$current_address" != "$ENDPOINT_ADDRESS" ]]; then
+        reason="address-mismatch"
+    elif [[ "$ENDPOINT_INTERFACE_STAGE" == "alias_confirmed" \
+        && "$current_alias" != "$ENDPOINT_ALIAS" ]]; then
+        reason="alias-mismatch"
+    elif [[ "$ENDPOINT_INTERFACE_STAGE" == "fingerprinted" \
+        && -n "$current_alias" \
+        && "$current_alias" != "$ENDPOINT_ALIAS" ]]; then
+        reason="pre-alias-foreign-alias"
     fi
-    [[ -z "$current_alias" || "$current_alias" == "$ENDPOINT_ALIAS" ]]
+
+    printf 'endpoint interface custody: result=%q interface=%q presence=%q expected_stage=%q expected_ifindex=%q current_ifindex=%q expected_address=%q current_address=%q expected_alias=%q current_alias=%q\n' \
+        "$reason" "$ENDPOINT_IF" "$presence" "$ENDPOINT_INTERFACE_STAGE" \
+        "$ENDPOINT_IFINDEX" "$current_ifindex" "$ENDPOINT_ADDRESS" \
+        "${current_address:-<unread>}" "$ENDPOINT_ALIAS" "$current_alias" \
+        >>"$CLEANUP_LOG"
+    [[ "$reason" == "owned" ]]
 }
 
 endpoint_interface_presence() {
@@ -1085,6 +1114,15 @@ cleanup_created_rooms() {
     local room_id
     local failed=0
     local listing
+
+    # A fleet fault may exit before the normal post-probe unset. Cleanup must
+    # never replay that fault injection through snapshot recovery, discovery,
+    # kill, gc, or the terminal roster audit.
+    if [[ -v ROOMS_PHASE2_PROBE ]]; then
+        printf '%s\n' 'cleanup environment: removed ROOMS_PHASE2_PROBE fault injection' \
+            >>"$CLEANUP_LOG"
+        unset ROOMS_PHASE2_PROBE
+    fi
 
     if ! cleanup_proof_endpoint; then
         printf '%s\n' 'cleanup check failed: proof endpoint' >>"$CLEANUP_LOG"
@@ -2142,6 +2180,8 @@ run_rooms clone "$SNAPSHOT_DIR" \
     --json \
     >"$FLEET_JSON" \
     2>"$LOG_DIR/fleet.stderr"
+FLEET_READY_NS="$(monotonic_ns)"
+readonly FLEET_READY_NS
 unset ROOMS_PHASE2_PROBE
 track_json_ids "$FLEET_JSON"
 
@@ -2188,11 +2228,10 @@ for position in "${!readiness_pids[@]}"; do
     fi
 done
 
-# A kept clone has completed resume hygiene but has not traversed the workload
-# channel. The literal gate ends only after all eight authenticated namespaced
-# SSH probes complete, so it measures the real CLI plus its readiness gate.
-FLEET_READY_NS="$(monotonic_ns)"
-readonly FLEET_READY_NS
+# Kept-mode `rooms clone` owns the concurrent authenticated SSH barrier and
+# cannot return before every member passes it. Stop the literal interval at
+# the real CLI boundary; the independent probes above verify that promise but
+# are deliberately outside the already-completed CLI plus readiness gate.
 FLEET_ELAPSED_NS="$((FLEET_READY_NS - FLEET_START_NS))"
 ((FLEET_ELAPSED_NS >= 0)) \
     || fatal "monotonic_clock_invalid" "monotonic clone interval was negative"

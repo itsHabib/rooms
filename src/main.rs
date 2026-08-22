@@ -228,9 +228,9 @@ enum Command {
     ///
     /// Every clone gets a distinct host network namespace and veth identity
     /// while reusing the snapshot's frozen guest slot. With no `--command`,
-    /// all clones are kept alive after their resume acknowledgements; command
-    /// mode runs the command concurrently and tears every clone down through
-    /// the established authenticated SSH readiness/workload lifecycle.
+    /// all clones are kept alive only after every member passes an authenticated
+    /// SSH readiness barrier; command mode runs the command concurrently and
+    /// tears every clone down through that same readiness/workload lifecycle.
     Clone {
         /// Completed snapshot artifact directory (from `rooms snapshot`).
         snapshot_dir: PathBuf,
@@ -2045,6 +2045,22 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     .await
     .map_err(|e| RoomsError::Internal(e.to_string()))?;
 
+    if args.keep {
+        let guest_ip = restored.slot.guest.to_string();
+        let namespace = restored.clone_net.as_ref().map(|net| net.netns.as_str());
+        if let Err(readiness) =
+            runner::wait_for_ssh(runner::GuestTarget::new(&guest_ip, namespace), &key, config).await
+        {
+            let original = RoomsError::Firecracker(readiness);
+            return Err(match teardown_restored_clone(restored, config).await {
+                Ok(()) => original,
+                Err(cleanup) => RoomsError::Internal(format!(
+                    "{original}; restore SSH-readiness cleanup incomplete: {cleanup}"
+                )),
+            });
+        }
+    }
+
     let rooms::restore_exec::Restored {
         mut vm,
         slot,
@@ -2180,12 +2196,33 @@ async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, 
         return Err(cleanup_partial_restore(restored.ready, error).await.into());
     }
     let ready = restored.ready;
-    // `restore_prepared` returns only after the resume acknowledgement, which
-    // is emitted after post-resume hygiene and the fresh sshd listener are up.
-    // Kept mode can therefore hand off directly. Command mode enters the
-    // established post-boot SSH readiness/workload lifecycle below; a batch
-    // probe here would add another handshake for every clone.
+    // Command mode enters the established post-boot SSH readiness/workload
+    // lifecycle below, so probing the whole batch here would add a second
+    // handshake. Kept mode has no later workload path: it must prove every
+    // ACKed clone accepts the configured pubkey before custody is handed off.
     let Some(command) = args.command.clone() else {
+        match wait_kept_clone_batch_ready(&ready, &key, cancellation.receiver()).await {
+            Ok(()) => {}
+            Err(CloneReadinessBarrierError::Failed(error)) => {
+                match cancellation.commit_terminal_handoff().await {
+                    Ok(Some(signal)) => {
+                        return Err(cancel_clone_custody(ready, signal, None).await);
+                    }
+                    Ok(None) => {
+                        return Err(cleanup_partial_restore(ready, error).await.into());
+                    }
+                    Err(arbitration) => {
+                        let combined = RoomsError::Internal(format!(
+                            "{error}; clone readiness terminal arbitration failed: {arbitration}"
+                        ));
+                        return Err(cleanup_partial_restore(ready, combined).await.into());
+                    }
+                }
+            }
+            Err(CloneReadinessBarrierError::Cancelled(signal)) => {
+                return Err(cancel_clone_custody(ready, signal, None).await);
+            }
+        }
         return finish_kept_clone_batch(ready, &mut cancellation, config, args.json).await;
     };
     let command_cancellation = cancellation.receiver();
@@ -2497,6 +2534,133 @@ async fn collect_clone_restores(
         failure,
         cancelled,
     }
+}
+
+type CloneReadinessFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), RoomsError>> + Send + 'static>>;
+
+struct CloneReadinessProbe {
+    clone_net_index: u8,
+    room_id: String,
+    future: CloneReadinessFuture,
+}
+
+enum CloneReadinessBarrierError {
+    Failed(RoomsError),
+    Cancelled(CloneTermination),
+}
+
+/// Re-probe every restored kept clone through its host namespace before the
+/// terminal custody handoff. The resume ACK proves hygiene plus listener
+/// ownership; only this full pubkey login proves the documented SSH barrier.
+async fn wait_kept_clone_batch_ready(
+    ready: &[CloneCustody],
+    key: &Path,
+    cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<(), CloneReadinessBarrierError> {
+    let probes = ready
+        .iter()
+        .map(|custody| {
+            let restored = custody.restored()?;
+            let clone_net = restored.clone_net.as_ref().ok_or_else(|| {
+                RoomsError::Internal("clone restore returned no clone network".to_owned())
+            })?;
+            let clone_net_index = clone_net.index;
+            let room_id = restored.room_id.clone();
+            let guest_ip = restored.slot.guest.to_string();
+            let namespace = clone_net.netns.clone();
+            let key = key.to_path_buf();
+            let config = custody.config.clone();
+            let future: CloneReadinessFuture = Box::pin(async move {
+                runner::wait_for_ssh(
+                    runner::GuestTarget::new(&guest_ip, Some(&namespace)),
+                    &key,
+                    &config,
+                )
+                .await
+                .map_err(RoomsError::Firecracker)
+            });
+            Ok(CloneReadinessProbe {
+                clone_net_index,
+                room_id,
+                future,
+            })
+        })
+        .collect::<Result<Vec<_>, RoomsError>>()
+        .map_err(CloneReadinessBarrierError::Failed)?;
+    run_clone_readiness_barrier(probes, cancellation).await
+}
+
+/// Start every SSH probe before awaiting the fleet. Each member inherits the
+/// existing configured guest-reach deadline. Failure or cancellation still
+/// awaits every bounded probe so no SSH child holds a namespace during clone
+/// teardown.
+async fn run_clone_readiness_barrier(
+    probes: Vec<CloneReadinessProbe>,
+    mut cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Result<(), CloneReadinessBarrierError> {
+    if let Some(signal) = observed_clone_termination(&cancellation) {
+        return Err(CloneReadinessBarrierError::Cancelled(signal));
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut task_identities = HashMap::new();
+    for probe in probes {
+        let identity = (probe.clone_net_index, probe.room_id);
+        let handle = tasks.spawn(probe.future);
+        task_identities.insert(handle.id(), identity);
+    }
+    let mut failures = Vec::new();
+    let mut cancelled = None;
+    while !tasks.is_empty() {
+        let joined = if cancelled.is_some() {
+            tasks.join_next_with_id().await
+        } else {
+            tokio::select! {
+                biased;
+                signal = wait_for_clone_termination(&mut cancellation) => {
+                    cancelled = Some(signal);
+                    // An SSH child must be awaited to exit before its network
+                    // namespace is torn down. Keep draining the bounded probe
+                    // fleet instead of merely dropping kill-on-drop handles.
+                    continue;
+                }
+                result = tasks.join_next_with_id() => result,
+            }
+        };
+        let Some(joined) = joined else {
+            break;
+        };
+        match joined {
+            Ok((id, Ok(()))) => {
+                task_identities.remove(&id);
+            }
+            Ok((id, Err(error))) => {
+                let identity = task_identities
+                    .remove(&id)
+                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
+                failures.push(CloneFailure::new(identity.0, &identity.1, error));
+            }
+            Err(error) => {
+                let identity = task_identities
+                    .remove(&error.id())
+                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
+                failures.push(CloneFailure::new(
+                    identity.0,
+                    &identity.1,
+                    RoomsError::Internal(format!(
+                        "SSH readiness worker {}",
+                        clone_join_error_kind(&error)
+                    )),
+                ));
+            }
+        }
+    }
+    if let Some(signal) = cancelled {
+        return Err(CloneReadinessBarrierError::Cancelled(signal));
+    }
+    collapse_clone_failures("SSH readiness", failures).map_or(Ok(()), |error| {
+        Err(CloneReadinessBarrierError::Failed(error))
+    })
 }
 
 async fn teardown_clone_custody(mut ready: Vec<CloneCustody>) -> Vec<String> {
@@ -3940,6 +4104,10 @@ mod tests {
     )]
 
     use std::path::{Path, PathBuf};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use std::time::Duration;
 
     #[cfg(unix)]
@@ -3949,15 +4117,39 @@ mod tests {
         changeset_exit_code, clone_command_failure_json, clone_output_dir, clone_records_json,
         collapse_clone_failures, diff_changeset, exit_code_for_error, harvest_secrets,
         humanize_secs, parse_clone_count, parse_max_pool, parse_max_wall, race_workload,
-        race_workload_with_clone_cancellation, resolve_action, run_error_record, truncate_label,
-        valid_secret_name, validate_clone_capacity, validate_json_emitted_path, Cli,
-        CloneCancellation, CloneCommandBatchFailure, CloneFailure, CloneNetError, CloneRecord,
-        CloneSignalSource, CloneTermination, Command, ExecRace, RoomsError, RunArgs, RunnerKind,
-        SlotError, BARE_BOOT_LINGER,
+        race_workload_with_clone_cancellation, resolve_action, run_clone_readiness_barrier,
+        run_error_record, truncate_label, valid_secret_name, validate_clone_capacity,
+        validate_json_emitted_path, Cli, CloneCancellation, CloneCommandBatchFailure, CloneFailure,
+        CloneNetError, CloneReadinessBarrierError, CloneReadinessFuture, CloneReadinessProbe,
+        CloneRecord, CloneSignalSource, CloneTermination, Command, ExecRace, RoomsError, RunArgs,
+        RunnerKind, SlotError, BARE_BOOT_LINGER,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
     use tempfile::tempdir;
+
+    struct ProbeCancellationOnDrop(Option<tokio::sync::watch::Sender<Option<CloneTermination>>>);
+
+    impl Drop for ProbeCancellationOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(Some(CloneTermination::Terminate));
+            }
+        }
+    }
+
+    fn readiness_probe(
+        clone_net_index: u8,
+        room_id: &str,
+        future: impl std::future::Future<Output = Result<(), RoomsError>> + Send + 'static,
+    ) -> CloneReadinessProbe {
+        let future: CloneReadinessFuture = Box::pin(future);
+        CloneReadinessProbe {
+            clone_net_index,
+            room_id: room_id.to_owned(),
+            future,
+        }
+    }
 
     #[test]
     fn cli_definition_is_valid() {
@@ -4420,6 +4612,183 @@ mod tests {
             race_workload_with_clone_cancellation(work, None, Some(receiver)).await,
             ExecRace::Cancelled(143)
         ));
+    }
+
+    #[tokio::test]
+    async fn kept_clone_readiness_starts_the_whole_fleet_concurrently() {
+        let (started_sender, mut started_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (release_sender, release_receiver) = tokio::sync::watch::channel(false);
+        let probes = (1_u8..=3)
+            .map(|index| {
+                let started = started_sender.clone();
+                let mut release = release_receiver.clone();
+                readiness_probe(index, &format!("room-{index}"), async move {
+                    started.send(index).expect("test observes every probe");
+                    while !*release.borrow() {
+                        release.changed().await.expect("test release stays live");
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        drop(started_sender);
+        let (_cancellation_sender, cancellation) = tokio::sync::watch::channel(None);
+        let barrier = tokio::spawn(run_clone_readiness_barrier(probes, cancellation));
+
+        let mut started = Vec::new();
+        for _ in 0..3 {
+            started.push(
+                tokio::time::timeout(Duration::from_secs(1), started_receiver.recv())
+                    .await
+                    .expect("all probes start before any is released")
+                    .expect("probe start channel stays live"),
+            );
+        }
+        started.sort_unstable();
+        assert_eq!(started, [1, 2, 3]);
+        release_sender.send(true).expect("release probes");
+        match barrier.await.expect("barrier task joins") {
+            Ok(()) => {}
+            Err(CloneReadinessBarrierError::Failed(error)) => {
+                panic!("all concurrent readiness probes succeeded: {error}")
+            }
+            Err(CloneReadinessBarrierError::Cancelled(signal)) => {
+                panic!("no cancellation was sent: {}", signal.name())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn kept_clone_readiness_honors_cancellation_before_spawning_probes() {
+        let probe_polled = Arc::new(AtomicBool::new(false));
+        let poll_observer = Arc::clone(&probe_polled);
+        let probe = readiness_probe(1, "room-one", async move {
+            poll_observer.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let (cancellation_sender, cancellation) = tokio::sync::watch::channel(None);
+        cancellation_sender
+            .send(Some(CloneTermination::Interrupt))
+            .expect("barrier still owns cancellation receiver");
+
+        assert!(matches!(
+            run_clone_readiness_barrier(vec![probe], cancellation).await,
+            Err(CloneReadinessBarrierError::Cancelled(
+                CloneTermination::Interrupt
+            ))
+        ));
+        assert!(
+            !probe_polled.load(Ordering::SeqCst),
+            "an already-cancelled fleet must not launch a new SSH client"
+        );
+    }
+
+    #[tokio::test]
+    async fn kept_clone_readiness_failure_awaits_and_drains_sibling_probes() {
+        let sibling_completed = Arc::new(AtomicBool::new(false));
+        let completion_observer = Arc::clone(&sibling_completed);
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let pending = readiness_probe(7, "room-seven", async move {
+            started_sender.send(()).expect("failure probe is waiting");
+            release_receiver.await.expect("sibling probe is released");
+            completion_observer.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let failed = readiness_probe(2, "room-two", async move {
+            started_receiver.await.expect("sibling probe starts");
+            release_sender.send(()).expect("release sibling probe");
+            Err(RoomsError::Internal("pubkey refused".to_owned()))
+        });
+        let (_cancellation_sender, cancellation) = tokio::sync::watch::channel(None);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_clone_readiness_barrier(vec![pending, failed], cancellation),
+        )
+        .await
+        .expect("readiness failure returns promptly");
+        let CloneReadinessBarrierError::Failed(error) = result.expect_err("fleet must fail") else {
+            panic!("probe failure must not be reported as cancellation");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("net 2")
+                && message.contains("room-two")
+                && message.contains("pubkey refused"),
+            "failure must retain exact clone identity and cause: {message}"
+        );
+        assert!(
+            sibling_completed.load(Ordering::SeqCst),
+            "the barrier must await the sibling SSH child before returning custody for teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn kept_clone_readiness_prefers_signal_published_during_failure_drain() {
+        let (cancellation_sender, cancellation) = tokio::sync::watch::channel(None);
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let pending = readiness_probe(7, "room-seven", async move {
+            let _cancel_on_drop = ProbeCancellationOnDrop(Some(cancellation_sender));
+            started_sender.send(()).expect("failure probe is waiting");
+            release_receiver.await.expect("sibling probe is released");
+            Ok(())
+        });
+        let failed = readiness_probe(2, "room-two", async move {
+            started_receiver.await.expect("sibling probe starts");
+            release_sender.send(()).expect("release sibling probe");
+            Err(RoomsError::Internal("ssh interrupted".to_owned()))
+        });
+
+        let result = run_clone_readiness_barrier(vec![pending, failed], cancellation).await;
+        assert!(matches!(
+            result,
+            Err(CloneReadinessBarrierError::Cancelled(
+                CloneTermination::Terminate
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn kept_clone_readiness_cancellation_drains_inflight_probe() {
+        let probe_completed = Arc::new(AtomicBool::new(false));
+        let completion_observer = Arc::clone(&probe_completed);
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let probe = readiness_probe(4, "room-four", async move {
+            started_sender.send(()).expect("test waits for probe start");
+            release_receiver.await.expect("probe is released");
+            completion_observer.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let (cancellation_sender, cancellation) = tokio::sync::watch::channel(None);
+        let barrier = tokio::spawn(run_clone_readiness_barrier(vec![probe], cancellation));
+        started_receiver.await.expect("probe started");
+        cancellation_sender
+            .send(Some(CloneTermination::Terminate))
+            .expect("barrier still observes cancellation");
+        tokio::task::yield_now().await;
+        assert!(
+            !barrier.is_finished(),
+            "cancellation must wait for the SSH child to exit"
+        );
+        release_sender.send(()).expect("release SSH child");
+
+        let result = tokio::time::timeout(Duration::from_secs(1), barrier)
+            .await
+            .expect("cancelled barrier returns promptly")
+            .expect("barrier task joins");
+        assert!(matches!(
+            result,
+            Err(CloneReadinessBarrierError::Cancelled(
+                CloneTermination::Terminate
+            ))
+        ));
+        assert!(
+            probe_completed.load(Ordering::SeqCst),
+            "cancellation must await the SSH probe before full-fleet teardown"
+        );
     }
 
     #[cfg(unix)]

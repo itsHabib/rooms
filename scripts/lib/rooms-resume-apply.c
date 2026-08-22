@@ -53,11 +53,17 @@
 #define RESUME_HOST_CID 2U
 #define RESUME_PORT 5003U
 #define RESUME_CONNECT_MS 100
+#define RESUME_HANDSHAKE_MAX_ATTEMPTS 8U
+#define RESUME_HANDSHAKE_RETRY_SECONDS 5
 #define RESUME_IO_TIMEOUT_SECONDS 120
+#define RESUME_SEND_TIMEOUT_SECONDS 1
 #define PROTOCOL_ERROR_LINE_MAX 64U
 
 static const char sudo_grant[] = "rooms ALL=(ALL) NOPASSWD: ALL\n";
 static const char repo_include[] = "\n[include]\n\tpath = rooms-identity\n";
+#ifdef __linux__
+static const char resume_preface[] = "ROOMS-RESUME/1\n";
+#endif
 static const char canonical_sshd_config[] =
     "Port 22\n"
     "AddressFamily inet\n"
@@ -400,6 +406,68 @@ static int init_paths(struct paths *paths, const char *root)
     return 0;
 }
 
+#ifdef __linux__
+static bool deadline_reached(const struct timespec *deadline)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) return true;
+    return now.tv_sec > deadline->tv_sec ||
+           (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec);
+}
+
+static int send_resume_preface(int fd)
+{
+    const unsigned char *cursor = (const unsigned char *)resume_preface;
+    size_t remaining = strlen(resume_preface);
+    while (remaining > 0U) {
+        ssize_t written = send(fd, cursor, remaining, MSG_NOSIGNAL);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return -1;
+        cursor += (size_t)written;
+        remaining -= (size_t)written;
+    }
+    return 0;
+}
+
+static bool configure_resume_stream(int fd)
+{
+    const struct timeval receive_timeout = {
+        .tv_sec = RESUME_IO_TIMEOUT_SECONDS,
+        .tv_usec = 0,
+    };
+    const struct timeval send_timeout = {
+        .tv_sec = RESUME_SEND_TIMEOUT_SECONDS,
+        .tv_usec = 0,
+    };
+    int flags = fcntl(fd, F_GETFL);
+    return flags >= 0 && fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                      &receive_timeout, sizeof(receive_timeout)) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+                      &send_timeout, sizeof(send_timeout)) == 0;
+}
+
+static bool connect_resume_candidate(int fd, const struct sockaddr_vm *address)
+{
+    if (connect(fd, (const struct sockaddr *)address, sizeof(*address)) == 0) {
+        return true;
+    }
+    if (errno != EINPROGRESS) return false;
+
+    struct pollfd event = {.fd = fd, .events = POLLOUT, .revents = 0};
+    int ready;
+    do {
+        ready = poll(&event, 1U, RESUME_CONNECT_MS);
+    } while (ready < 0 && errno == EINTR);
+    if (ready <= 0) return false;
+
+    int socket_error = 0;
+    socklen_t length = sizeof(socket_error);
+    return getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &length) == 0 &&
+           socket_error == 0;
+}
+#endif
+
 static int connect_resume_stream(void)
 {
 #ifndef __linux__
@@ -410,48 +478,35 @@ static int connect_resume_stream(void)
         .svm_port = RESUME_PORT,
         .svm_cid = RESUME_HOST_CID,
     };
-    const struct timeval io_timeout = {
-        .tv_sec = RESUME_IO_TIMEOUT_SECONDS,
-        .tv_usec = 0,
-    };
     const struct timespec retry = {
         .tv_sec = 0,
         .tv_nsec = RESUME_CONNECT_MS * 1000000L,
     };
+    struct timespec retry_deadline = {0};
+    bool retry_deadline_armed = false;
+    unsigned int handshake_attempts = 0U;
 
     for (;;) {
         int fd = socket(AF_VSOCK, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-        bool connected = false;
-        if (fd >= 0) {
-            if (connect(fd, (const struct sockaddr *)&address, sizeof(address)) == 0) {
-                connected = true;
-            } else if (errno == EINPROGRESS) {
-                struct pollfd event = {.fd = fd, .events = POLLOUT, .revents = 0};
-                int ready;
-                do {
-                    ready = poll(&event, 1U, RESUME_CONNECT_MS);
-                } while (ready < 0 && errno == EINTR);
-                if (ready > 0) {
-                    int socket_error = 0;
-                    socklen_t length = sizeof(socket_error);
-                    connected = getsockopt(fd, SOL_SOCKET, SO_ERROR,
-                                           &socket_error, &length) == 0 &&
-                                socket_error == 0;
-                }
-            }
-        }
-
+        bool connected = fd >= 0 && connect_resume_candidate(fd, &address);
         if (connected) {
-            int flags = fcntl(fd, F_GETFL);
-            if (flags >= 0 && fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 &&
-                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
-                           &io_timeout, sizeof(io_timeout)) == 0 &&
-                setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
-                           &io_timeout, sizeof(io_timeout)) == 0) {
-                return fd;
+            handshake_attempts++;
+            if (configure_resume_stream(fd) && send_resume_preface(fd) == 0) return fd;
+            if (!retry_deadline_armed) {
+                if (clock_gettime(CLOCK_MONOTONIC, &retry_deadline) < 0) {
+                    close(fd);
+                    return fail("cannot start resume handshake retry deadline");
+                }
+                retry_deadline.tv_sec += RESUME_HANDSHAKE_RETRY_SECONDS;
+                retry_deadline_armed = true;
             }
         }
         if (fd >= 0) close(fd);
+
+        if (handshake_attempts >= RESUME_HANDSHAKE_MAX_ATTEMPTS ||
+            (retry_deadline_armed && deadline_reached(&retry_deadline))) {
+            return fail("resume preface retries exhausted");
+        }
 
         struct timespec remaining = retry;
         while (nanosleep(&remaining, &remaining) < 0 && errno == EINTR) {
@@ -1342,8 +1397,7 @@ static int apply_payload(const struct paths *paths, struct payload *payload,
 static int resume_session(const struct paths *paths)
 {
     set_protocol_stage("entropy");
-    if (protocol_line("ROOMS-RESUME/1\n") < 0 ||
-        parse_entropy_frame(&sensitive_payload) < 0) {
+    if (parse_entropy_frame(&sensitive_payload) < 0) {
         return -1;
     }
     set_protocol_stage("reseed");
@@ -1436,6 +1490,20 @@ static int test_missing_sshd_pid(const char *root, bool terminal)
     (void)fail("launched sshd did not own the reachable port 22 listener");
     return 1;
 }
+
+static int test_closed_preface_socket(void)
+{
+#ifndef __linux__
+    return 0;
+#else
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) < 0) return 1;
+    close(sockets[1]);
+    int result = send_resume_preface(sockets[0]);
+    close(sockets[0]);
+    return result < 0 ? 0 : 1;
+#endif
+}
 #endif
 
 int main(int argc, char **argv)
@@ -1447,6 +1515,9 @@ int main(int argc, char **argv)
 #ifdef ROOMS_RESUME_TEST
     if (argc == 2 && strcmp(argv[1], "--test-parse") == 0) return test_parse_only();
     if (argc == 2 && strcmp(argv[1], "--test-error") == 0) return test_protocol_error();
+    if (argc == 2 && strcmp(argv[1], "--test-preface-closed-peer") == 0) {
+        return test_closed_preface_socket();
+    }
     if (argc == 3 && strcmp(argv[1], "--test-sshd-pid-absent") == 0) {
         return test_missing_sshd_pid(argv[2], false);
     }

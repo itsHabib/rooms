@@ -30,6 +30,13 @@ pub const QUIESCED_PORT: u32 = 5002;
 /// a restored room's jail, so in an ordinary base the poll fails fast.
 pub const RESUME_PORT: u32 = 5003;
 
+#[cfg(unix)]
+const RESUME_PREFACE: &str = "ROOMS-RESUME/1";
+#[cfg(unix)]
+const RESUME_PREFACE_MAX_CANDIDATES: usize = 8;
+#[cfg(unix)]
+const RESUME_PREFACE_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The guest's own CID (must be ≥ 3). With the hybrid UDS model there is no
 /// host-wide CID namespace to collide in — isolation comes from the per-jail
 /// socket path — so every room uses the same value.
@@ -438,12 +445,109 @@ pub fn serve_resume(
     ))
 }
 
-/// Serve the nudge to the first agent connection: preface in, entropy first,
-/// then identity / clock / secrets frames out and the exact terminal ack.
+#[cfg(unix)]
+enum ResumePreface {
+    RetiredPrefix { received: usize },
+    Line(String),
+}
+
+#[cfg(unix)]
+async fn read_resume_preface(stream: &mut tokio::net::UnixStream) -> Result<ResumePreface, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    loop {
+        let byte = match stream.read_u8().await {
+            Ok(byte) => byte,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if RESUME_PREFACE.as_bytes().starts_with(&bytes) {
+                    return Ok(ResumePreface::RetiredPrefix {
+                        received: bytes.len(),
+                    });
+                }
+                return Err(format!(
+                    "resume preface diverged before EOF: {:?}",
+                    String::from_utf8_lossy(&bytes)
+                ));
+            }
+            Err(error) => return Err(format!("read resume preface: {error}")),
+        };
+        if byte == b'\n' {
+            break;
+        }
+        bytes.push(byte);
+        if bytes.len() > 64 {
+            return Err("resume preface exceeds 64 bytes".to_owned());
+        }
+    }
+    String::from_utf8(bytes)
+        .map(ResumePreface::Line)
+        .map_err(|error| format!("resume preface is not utf-8: {error}"))
+}
+
+#[cfg(unix)]
+async fn accept_resume_agent(
+    listener: &tokio::net::UnixListener,
+    room_id: &str,
+) -> Result<(tokio::net::UnixStream, std::time::Instant), String> {
+    let mut deadline = None;
+    for candidate in 1..=RESUME_PREFACE_MAX_CANDIDATES {
+        let accepted = match deadline {
+            None => listener.accept().await,
+            Some(limit) => tokio::time::timeout_at(limit, listener.accept())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "resume protocol for room {room_id}: preface retry deadline expired after {} candidate(s)",
+                        candidate - 1
+                    )
+                })?,
+        };
+        let (mut stream, _) = accepted.map_err(|error| {
+            format!("resume protocol for room {room_id}: accept agent: {error}")
+        })?;
+        let connected_at = std::time::Instant::now();
+        let limit = *deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + RESUME_PREFACE_RETRY_WINDOW);
+        tracing::debug!(room = %room_id, candidate, "resume: agent candidate connected");
+        let preface = tokio::time::timeout_at(limit, read_resume_preface(&mut stream))
+            .await
+            .map_err(|_| {
+                format!(
+                    "resume protocol for room {room_id}: candidate {candidate} sent no preface before the retry deadline"
+                )
+            })??;
+        match preface {
+            ResumePreface::Line(line) if line == RESUME_PREFACE => {
+                tracing::debug!(room = %room_id, candidate,
+                    elapsed_ms = %connected_at.elapsed().as_millis(),
+                    "resume: candidate preface accepted");
+                return Ok((stream, connected_at));
+            }
+            ResumePreface::Line(line) => {
+                return Err(format!(
+                    "resume protocol for room {room_id}: candidate {candidate} preface malformed: {line:?}"
+                ));
+            }
+            ResumePreface::RetiredPrefix { received } => {
+                tracing::warn!(room = %room_id, candidate,
+                    elapsed_ms = %connected_at.elapsed().as_millis(),
+                    received_bytes = received,
+                    "resume: agent candidate retired during preface");
+            }
+        }
+    }
+    Err(format!(
+        "resume protocol for room {room_id}: {RESUME_PREFACE_MAX_CANDIDATES} agent candidates retired before a complete preface"
+    ))
+}
+
+/// Serve the nudge to the first agent candidate that sends the exact preface:
+/// entropy first, then identity / clock / secrets frames and the terminal ack.
 /// Entropy is deliberately first so the retained receiver can force a kernel
 /// CRNG reseed before it parses any other post-resume field or forks.
-/// The endpoint retires on accept, like the secrets one-shot — the nudge
-/// carries secrets, so a second reader must find nothing.
+/// Empty or exact-prefix candidates are retried without sending data; after
+/// the complete preface, the endpoint retires before entropy or secrets leave.
 #[cfg(unix)]
 async fn serve_resume_inner(
     listener: tokio::net::UnixListener,
@@ -454,24 +558,10 @@ async fn serve_resume_inner(
     use tokio::io::AsyncWriteExt;
 
     let room_id = payload.room_id.clone();
-    let (mut stream, _) = listener
-        .accept()
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: accept agent: {error}"))?;
-    let connected_at = std::time::Instant::now();
+    let (mut stream, connected_at) = accept_resume_agent(&listener, &room_id).await?;
     drop(listener);
     std::fs::remove_file(listen_path)
         .map_err(|error| format!("resume protocol for room {room_id}: retire endpoint: {error}"))?;
-    tracing::debug!(room = %room_id, elapsed_ms = 0, "resume: agent connected");
-
-    let preface = read_bounded_line(&mut stream)
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
-    if preface != "ROOMS-RESUME/1" {
-        return Err(format!(
-            "resume protocol for room {room_id}: preface malformed: {preface:?}"
-        ));
-    }
     tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
         "resume: preface ok, sending nudge frames");
     write_typed_frame(&mut stream, "ENTROPY", &payload.entropy)
@@ -693,7 +783,7 @@ mod tests {
     use super::{
         listener_path, listener_path_for, serve_one_shot, serve_provisioning, serve_resume,
         ProvisioningPayload, ResumePayload, SecretsPayload, PROVISION_PORT, QUIESCED_PORT,
-        RESUME_PORT, SECRETS_PORT,
+        RESUME_PORT, RESUME_PREFACE_MAX_CANDIDATES, SECRETS_PORT,
     };
 
     fn payload() -> SecretsPayload {
@@ -784,6 +874,140 @@ mod tests {
             .await_acked(Duration::from_secs(5))
             .await
             .expect("a well-formed hygiene handshake acks");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_retries_a_clean_preface_eof_without_reopening_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload {
+            room_id: "01resumeroomidresumeroomid".to_owned(),
+            epoch_secs: 1_700_000_000,
+            entropy: vec![7_u8; 64],
+            secrets: SecretsPayload::encode(&[("TOKEN".to_owned(), "once".to_owned())]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+
+        let empty = tokio::net::UnixStream::connect(&path).await.unwrap();
+        drop(empty);
+        tokio::task::yield_now().await;
+        assert!(
+            path.exists(),
+            "empty candidate must not retire the endpoint"
+        );
+
+        let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        assert_eq!(read_typed_frame(&mut guest).await.0, "ENTROPY");
+        assert!(read_line(&mut guest).await.starts_with("IDENTITY "));
+        assert!(read_line(&mut guest).await.starts_with("CLOCK "));
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("SECRETS".to_owned(), b"TOKEN=once\n".to_vec())
+        );
+        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
+        guest
+            .write_all(b"STEP reseeded\nSTEP sshd\nACK resume\n")
+            .await
+            .unwrap();
+        drop(guest);
+
+        delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect("a valid candidate after clean EOF completes");
+        assert!(!path.exists(), "valid preface must retire the endpoint");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_retries_an_exact_partial_preface_without_sending_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload {
+            room_id: "01resumeroomidresumeroomid".to_owned(),
+            epoch_secs: 1_700_000_000,
+            entropy: vec![7_u8; 64],
+            secrets: SecretsPayload::encode(&[("TOKEN".to_owned(), "once".to_owned())]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+
+        let mut partial = tokio::net::UnixStream::connect(&path).await.unwrap();
+        partial.write_all(b"ROOMS-RES").await.unwrap();
+        partial.shutdown().await.unwrap();
+        let mut leaked = Vec::new();
+        partial.read_to_end(&mut leaked).await.unwrap();
+        assert!(leaked.is_empty(), "partial candidate received host data");
+
+        let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        assert_eq!(read_typed_frame(&mut guest).await.0, "ENTROPY");
+        assert!(read_line(&mut guest).await.starts_with("IDENTITY "));
+        assert!(read_line(&mut guest).await.starts_with("CLOCK "));
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("SECRETS".to_owned(), b"TOKEN=once\n".to_vec())
+        );
+        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
+        guest.write_all(b"ACK resume\n").await.unwrap();
+        drop(guest);
+
+        delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect("an exact-prefix EOF may retry once");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_rejects_a_divergent_partial_preface_without_sending_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload {
+            room_id: "01resumeroomidresumeroomid".to_owned(),
+            epoch_secs: 1_700_000_000,
+            entropy: vec![7_u8; 64],
+            secrets: SecretsPayload::encode(&[("TOKEN".to_owned(), "never".to_owned())]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+
+        let mut divergent = tokio::net::UnixStream::connect(&path).await.unwrap();
+        divergent.write_all(b"ROOMS-X").await.unwrap();
+        divergent.shutdown().await.unwrap();
+        let mut leaked = Vec::new();
+        divergent.read_to_end(&mut leaked).await.unwrap();
+        assert!(leaked.is_empty(), "divergent candidate received host data");
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("a divergent preface must remain terminal");
+        assert!(error.contains("preface diverged before EOF"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_bounds_clean_preface_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = ResumePayload {
+            room_id: "01resumeroomidresumeroomid".to_owned(),
+            epoch_secs: 1,
+            entropy: vec![0_u8; 64],
+            secrets: SecretsPayload::encode(&[]),
+        };
+        let delivery = serve_resume(dir.path(), payload, None).unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+
+        for _ in 0..RESUME_PREFACE_MAX_CANDIDATES {
+            let empty = tokio::net::UnixStream::connect(&path).await.unwrap();
+            drop(empty);
+        }
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("empty candidates must exhaust the bounded handshake");
+        assert!(
+            error.contains("8 agent candidates retired before a complete preface"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
