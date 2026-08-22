@@ -28,7 +28,7 @@ const JAIL_API_SOCK: &str = "api.sock";
 
 /// Bind-mount target names inside the jail root for kernel and rootfs.
 const JAIL_KERNEL: &str = "kernel";
-const JAIL_ROOTFS: &str = "rootfs";
+pub(crate) const JAIL_ROOTFS: &str = "rootfs";
 
 /// `ip netns` bind-mount directory consumed by jailer's `--netns` flag.
 const NETWORK_NAMESPACE_DIR: &str = "/run/netns";

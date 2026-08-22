@@ -228,8 +228,9 @@ enum Command {
     ///
     /// Every clone gets a distinct host network namespace and veth identity
     /// while reusing the snapshot's frozen guest slot. With no `--command`,
-    /// all clones are kept alive; command mode waits until the complete batch
-    /// is ready, runs the command concurrently, and tears every clone down.
+    /// all clones are kept alive after their resume acknowledgements; command
+    /// mode runs the command concurrently and tears every clone down through
+    /// the established authenticated SSH readiness/workload lifecycle.
     Clone {
         /// Completed snapshot artifact directory (from `rooms snapshot`).
         snapshot_dir: PathBuf,
@@ -1280,12 +1281,6 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provena
 /// within seconds; the bound exists for images predating the agent.
 const RESTORE_ACK_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// Clone restore has already received the resume-agent hygiene ack before it
-/// enters the SSH barrier, so sshd should be seconds past startup. Polling at
-/// the general cold-boot cadence would add up to two avoidable seconds to an
-/// otherwise ready batch.
-const CLONE_SSH_POLL_INTERVAL: Duration = Duration::from_millis(25);
-
 /// Flags for `rooms restore` (a flat mirror of the CLI variant).
 #[allow(
     clippy::struct_excessive_bools,
@@ -2185,18 +2180,11 @@ async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, 
         return Err(cleanup_partial_restore(restored.ready, error).await.into());
     }
     let ready = restored.ready;
-    // The barrier applies to BOTH lifecycle modes. A kept batch is not a
-    // success until every namespaced SSH channel is usable; if any member
-    // fails readiness, exact teardown consumes the complete batch below.
-    match wait_clone_batch_ready(&ready, &key, config, cancellation.receiver()).await {
-        Ok(()) => {}
-        Err(CloneStageStop::Failed(error)) => {
-            return Err(cleanup_partial_restore(ready, error).await.into());
-        }
-        Err(CloneStageStop::Cancelled(signal)) => {
-            return Err(cancel_clone_custody(ready, signal, None).await);
-        }
-    }
+    // `restore_prepared` returns only after the resume acknowledgement, which
+    // is emitted after post-resume hygiene and the fresh sshd listener are up.
+    // Kept mode can therefore hand off directly. Command mode enters the
+    // established post-boot SSH readiness/workload lifecycle below; a batch
+    // probe here would add another handshake for every clone.
     let Some(command) = args.command.clone() else {
         return finish_kept_clone_batch(ready, &mut cancellation, config, args.json).await;
     };
@@ -2363,17 +2351,6 @@ struct CloneRestoreBatch {
     ready: Vec<CloneCustody>,
     failure: Option<RoomsError>,
     cancelled: Option<CloneTermination>,
-}
-
-enum CloneStageStop {
-    Failed(RoomsError),
-    Cancelled(CloneTermination),
-}
-
-impl From<RoomsError> for CloneStageStop {
-    fn from(error: RoomsError) -> Self {
-        Self::Failed(error)
-    }
 }
 
 async fn restore_clone_batch(
@@ -2621,95 +2598,6 @@ fn cancel_preserved_clones(
         record.exit_code = Some(signal.exit_code());
     }
     CloneCancellation::with_clones(signal, records.to_vec(), cleanup_failures)
-}
-
-async fn wait_clone_batch_ready(
-    ready: &[CloneCustody],
-    key: &Path,
-    config: &RoomsConfig,
-    mut cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
-) -> Result<(), CloneStageStop> {
-    if let Some(signal) = observed_clone_termination(&cancellation) {
-        return Err(CloneStageStop::Cancelled(signal));
-    }
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut task_identities = HashMap::new();
-    for custody in ready {
-        let restored = custody.restored()?;
-        let room_id = restored.room_id.clone();
-        let guest_ip = restored.slot.guest.to_string();
-        let clone_net = restored.clone_net.as_ref().ok_or_else(|| {
-            RoomsError::Internal("clone restore returned no clone network".to_owned())
-        })?;
-        let clone_net_index = clone_net.index;
-        let namespace = clone_net.netns.clone();
-        let task_key = key.to_path_buf();
-        let mut task_config = config.clone();
-        task_config.guest_reach_poll_interval = CLONE_SSH_POLL_INTERVAL;
-        let task_identity = (clone_net_index, room_id.clone());
-        let handle = tasks.spawn(async move {
-            runner::wait_for_ssh(
-                runner::GuestTarget::new(&guest_ip, Some(&namespace)),
-                &task_key,
-                &task_config,
-            )
-            .await
-            .map_err(|error| {
-                CloneFailure::new(clone_net_index, &room_id, RoomsError::Firecracker(error))
-            })
-        });
-        task_identities.insert(handle.id(), task_identity);
-    }
-    let mut failures = Vec::new();
-    let mut cancelled = None;
-    while !tasks.is_empty() {
-        let joined = if cancelled.is_some() {
-            tasks.join_next_with_id().await
-        } else {
-            tokio::select! {
-                biased;
-                signal = wait_for_clone_termination(&mut cancellation) => {
-                    cancelled = Some(signal);
-                    tasks.abort_all();
-                    continue;
-                }
-                result = tasks.join_next_with_id() => result,
-            }
-        };
-        let Some(joined) = joined else {
-            break;
-        };
-        match joined {
-            Ok((id, Ok(()))) => {
-                task_identities.remove(&id);
-            }
-            Ok((id, Err(failure))) => {
-                task_identities.remove(&id);
-                failures.push(failure);
-            }
-            Err(error) => {
-                let identity = task_identities
-                    .remove(&error.id())
-                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
-                if cancelled.is_some() && error.is_cancelled() {
-                    continue;
-                }
-                failures.push(CloneFailure::new(
-                    identity.0,
-                    &identity.1,
-                    RoomsError::Internal(format!(
-                        "readiness worker {}",
-                        clone_join_error_kind(&error)
-                    )),
-                ));
-            }
-        }
-    }
-    if let Some(signal) = cancelled {
-        return Err(CloneStageStop::Cancelled(signal));
-    }
-    let error = collapse_clone_failures("readiness", failures);
-    error.map_or(Ok(()), |error| Err(CloneStageStop::Failed(error)))
 }
 
 struct CloneCommandOutcome {

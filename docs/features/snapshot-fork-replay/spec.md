@@ -18,7 +18,12 @@
 > namespace/veth/two-hop-NAT identity per clone, namespace-scoped witness and egress custody,
 > multi-lessee snapshot tokens, exact-owner cancellation cleanup, and deterministic machine output.
 > Rootfs and published snapshot inodes are permanently `FS_IMMUTABLE_FL`-sealed because Firecracker
-> can demand-page both files after `Resumed`; path checks alone cannot close that lifetime race.
+> can demand-page both files after `Resumed`; path checks alone cannot close that lifetime race. A
+> separate sealed local attestation binds Rooms' exact snapshot publication to its exact rootfs
+> inode and digest, while restore pins admission files and verifies the actual jailed binds/copy.
+> The boot shell immediately execs one static native receiver, and that C process—not a shell or
+> `socat`—is what the snapshot retains. It receives entropy first, forces a kernel CRNG reseed, then
+> performs the clock/identity/key/daemon transaction and ACKs only after effective-policy probes pass.
 > `scripts/phase2-killer.sh` is the fail-closed host gate. No performance or `/work-driver`
 > integration claim is complete until its named evidence exists.
 >
@@ -27,7 +32,7 @@
 > - **§4 D7 + §7 B** — the post-resume receiver + the ack gate. A neutral base boots without `--secret`; the retained agent reconnects through bounded poll/retry for the reseed/clock/identity nudge *on resume*, or every clone fails closed. Review the retry cadence/deadlines and the no-active-connection snapshot precondition (§10 Q2).
 > - **§4 D3/D6 + §9** — review namespace/veth/NAT teardown, veth-keyed custody, multi-lease return,
 >   and the immutable shared-inode contract together; breaking any one invalidates the fan-out proof.
-> - **§8** — the fork hygiene matrix, especially the **userspace-PRNG** row: the captured minimal resume agent waits without drawing randomness; workload and `sshd` processes start only after hygiene.
+> - **§8** — the fork hygiene matrix, especially the **userspace-PRNG** row: the retained native receiver has no stack canary or userspace DRBG and waits without drawing randomness; workload and `sshd` processes start only after hygiene.
 
 ## 1. Problem & hypothesis
 
@@ -276,19 +281,22 @@ RNG state** (codex P1). So v2:
   `{ reseed, clock: <host-now>, secrets…, run_id }`, derives `user.name = rooms <run_id>` and
   `user.email = <run_id>@rooms.invalid` for the rooms user, then ACKs. Git identity is a pure
   function of the already-canonical run id, not a second caller-controlled protocol field.
-- **Restore-time hygiene moves to phase 1.** *Every* restore — even a single one — reseeds the RNG
-  (kernel via VMGenID/virtio-rng per `random-for-clones.md`, plus the userspace guarantee below),
-  steps the clock, and sets identity, behind the ack gate (reuses the vsock-secrets host sequencing:
-  no ack ⇒ no `workload_started`). Phase 2 adds only the netns fan-out around this.
+- **Restore-time hygiene moves to phase 1.** *Every* restore — even a single one — sends an exact
+  64-byte host entropy frame first; the retained receiver mixes it into `/dev/urandom` and forces
+  `RNDRESEEDCRNG` before parsing identity/clock/secrets or forking. VMGenID and virtio-rng remain
+  defense-in-depth, not the ordering boundary: Firecracker documents a notification race, and this
+  contract does not assume its Linux 6.1 arm64 backport. Clock and identity then apply behind the ack
+  gate (no ack ⇒ no `workload_started`). Phase 2 adds only the netns fan-out around this.
 - **Userspace PRNG — every *retained* process, not just the agent (codex P1, hardened v3).** Kernel
   reseed does not touch an already-started process's userspace DRBG. v2 delayed the *agent*, but the
   base also ran `sshd` and the resume-apply agent itself — each can hold cloned DRBG state that new
   sessions reuse. v3 closes this at the source via D2 quiescing: **`sshd` and every non-essential
-  daemon are stopped before the snapshot**, so the only process captured is the **minimal resume-apply
-  agent, which draws no randomness before the nudge** (it blocks on the channel). The agent and a
-  **freshly-keyed `sshd`** both start/reseed *after* the kernel reseed on resume. Any daemon that must
-  survive the snapshot owns a named reseed/restart step, and the §9 gate validates *those* processes'
-  draws, not just `/dev/urandom`.
+  daemon are stopped before the snapshot**, so the only process captured is the **minimal native
+  resume receiver**. It is compiled without a stack protector, owns no userspace DRBG, and performs
+  only nonblocking vsock retry/poll/sleep before the entropy-first nudge. The receiver forces the
+  kernel reseed in the retained process; **freshly-keyed `sshd`** and every tool child start only
+  afterward. Any daemon that must survive the snapshot owns a named reseed/restart step, and the §9
+  gate validates *those* processes' draws, not just `/dev/urandom`.
 - **Fresh `sshd` per clone (v3).** Because sealing stops `sshd` (D2), the snapshot has no `sshd`
   running and no host-key/session state to duplicate. On resume the resume-apply agent starts `sshd`
   with exactly one **freshly generated Ed25519 host key**, pins its runtime config to only that key,
@@ -308,9 +316,15 @@ RNG state** (codex P1). So v2:
   pause/resume trivially. **"No active vsock connection at snapshot time" is an explicit snapshot
   precondition** (a FC constraint, not just hygiene) — which the quiesce beacon (D2 v4) must close
   *before* the pause, not hold open.
-The implementation uses a 100ms reconnect cadence inside a one-minute host ACK bound. Quiescence
-admits only the minimal resume agent; `sshd` starts after reseed with one freshly generated Ed25519
-key and an effective configuration that names no alternate key source.
+The implementation uses a 100ms reconnect cadence inside a one-minute host ACK bound. A boot shell
+execs the static native receiver *before* the snapshot; there is no post-resume exec. Its first host
+frame is entropy, and it forces Linux `RNDRESEEDCRNG` immediately after the exact 64-byte read,
+before parsing any other field or spawning a child. It then steps the clock, stages identity/secrets,
+installs terminal global and worktree Git identity, creates one fresh Ed25519 host key, validates the
+complete effective SSH/sudo policy, starts the listener, and only then ACKs. Snapshot admission also
+requires every host `v.sock_*` endpoint to be absent, so no receiver connection can be established;
+an in-flight nonblocking attempt closes on error/reset and retries. Quiescence admits only this
+minimal receiver; no `sshd` exists in the snapshot.
 
 ## 5. Data model
 
@@ -328,6 +342,13 @@ key and an effective configuration that names no alternate key source.
   must carry the same flag.
 - **Checkpoint receipt** (D5): the same metadata surfaced as a first-class artifact line for a run —
   no new store, a projection of `snapshot.json` + the run's pinned inputs.
+- **Local compatibility attestation** (`snapshot-attestations/<snapshot-id>.json`): a sealed,
+  owner-only state record outside the portable snapshot. It binds the exact snapshot directory,
+  `snapshot.json`, backing rootfs identities, and complete `SnapshotMeta`. Only that exact local
+  publication may reuse the already-computed rootfs digest; absent, malformed, copied, foreign,
+  legacy, or mismatched receipts force a full image hash. Exclusive rename publication and
+  transaction-owned temp cleanup make every crash prefix recoverable without a second immutable
+  hard-link alias.
 - **`room.json`** gains additive fields: `provenance` (above), `snapshot_lineage`
   (`{ from_snapshot, base_room }`), and a non-owning restore slot intent. A restored room leaves
   `slot` unset until the exact snapshot lease succeeds, then atomically records leased ownership.
@@ -375,8 +396,10 @@ pub async fn restore(req: RestoreRequest<'_>) -> Result<Guard, FirecrackerError>
 // (no ack ⇒ error, no workload). D7.
 ```
 
-**FR5 compat guard:** `restore` reads `snapshot.json`, compares `fc_version` (`firecracker
---version`) and `rootfs_hash` (of the mounted RO base) to the host; mismatch →
+**FR5 compat guard:** `restore` reads `snapshot.json` through a pinned descriptor, compares
+`fc_version` (`firecracker --version`) and `rootfs_hash` to the host; an exact state-local
+attestation can reuse snapshot's one publication-time image digest, otherwise restore hashes the
+opened immutable image in full. Mismatch →
 `FirecrackerError::SnapshotIncompatible { field }` (fail closed), never a best-effort load.
 
 **Restore-hygiene nudge (post-resume, per clone):** the resume-apply agent (captured in the snapshot,
@@ -462,8 +485,8 @@ Every clone must diverge from its siblings on each axis or it's unsafe:
 | Duplicated state | Why it bites | Mitigation (v2) |
 |---|---|---|
 | MAC / IP / hostname | two clones same address → collision | **netns-per-clone + host NAT (D3)** — inner MAC/IP intentionally identical, disambiguated + isolated by namespace; frozen IP reclaimed per clone via slot target |
-| Kernel RNG | identical CSPRNG stream → repeated TLS nonces/keys/UUIDs | virtio entropy device (`firecracker.rs:1292`) + **post-resume kernel reseed** in the hygiene nudge (`random-for-clones.md`: VMGenID auto-reseed on kernel ≥5.18) — applied on **every** restore (D7) |
-| **Userspace PRNG (every retained process)** | kernel reseed does **not** touch an already-started process's DRBG | **D2 v5:** snapshot mode never starts `sshd`; only the minimal resume-apply agent is retained and it draws no randomness before the nudge. Fresh `sshd` starts after kernel reseed. §9 validates retained-process draws, not only `/dev/urandom` |
+| Kernel RNG | identical CSPRNG stream → repeated TLS nonces/keys/UUIDs | **Authoritative boundary:** exact host entropy is the first frame and the retained receiver fails closed unless `RNDRESEEDCRNG` succeeds before any other field or child. VMGenID/virtio-rng are defense-in-depth because VMGenID notification has a documented race and arm64 Linux 6.1 support requires a backport. |
+| **Userspace PRNG (every retained process)** | kernel reseed does **not** touch an already-started process's DRBG | Snapshot mode never starts `sshd`; the sole retained native receiver has no stack canary/userspace DRBG and does only vsock retry/poll/sleep before reseeding in-process. Fresh `ssh-keygen`, `sshd`, and other children start afterward. |
 | **SSH host key / sessions** | a running `sshd` in the snapshot → every clone shares host key + session RNG | **D2 v5:** snapshot mode carries no baked host key and never starts `sshd`; the resume-apply agent generates and starts a freshly-keyed daemon per restore |
 | Wall clock / kvmclock | resumes stale → token-expiry + TLS-validity wrong | post-resume clock step in the same hygiene nudge, on every restore |
 | Secrets in RAM | baked into `snapshot.mem`, shared by all clones | **D2 neutrality by construction**: no secret ever in the base; secrets only post-fork over vsock |

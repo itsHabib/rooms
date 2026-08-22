@@ -13,7 +13,7 @@
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
-use rustix::fs::{ioctl_getflags, ioctl_setflags, IFlags};
+use rustix::fs::{ioctl_getflags, ioctl_setflags, open, IFlags, Mode, OFlags};
 
 #[cfg(any(target_os = "linux", test))]
 trait InodeFlagOps {
@@ -76,14 +76,75 @@ fn require_with_ops(ops: &mut impl InodeFlagOps, path: &Path, label: &str) -> an
 pub(crate) fn require(path: &Path, label: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let file = std::fs::File::open(path)
-            .map_err(|error| anyhow::anyhow!("open {label} {}: {error}", path.display()))?;
+        let fd = open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|error| anyhow::anyhow!("open {label} {}: {error}", path.display()))?;
+        let file = std::fs::File::from(fd);
+        let metadata = file
+            .metadata()
+            .map_err(|error| anyhow::anyhow!("inspect {label} {}: {error}", path.display()))?;
+        if !metadata.file_type().is_file() && !metadata.file_type().is_dir() {
+            anyhow::bail!(
+                "{label} {} is not a regular file or directory",
+                path.display()
+            );
+        }
         require_with_ops(&mut LinuxInodeFlagOps { file: &file }, path, label)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (path, label);
+        anyhow::bail!("snapshot inode sealing is supported only on Linux")
+    }
+}
+
+/// Open one regular path without following its leaf symlink, require the
+/// opened inode to be immutable, and return that same descriptor to the caller.
+/// Hashing or parsing through this handle cannot be redirected by a later path
+/// rename.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn open_regular(path: &Path, label: &str) -> anyhow::Result<std::fs::File> {
+    #[cfg(target_os = "linux")]
+    {
+        let fd = open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|error| anyhow::anyhow!("open {label} {}: {error}", path.display()))?;
+        let file = std::fs::File::from(fd);
+        let metadata = file
+            .metadata()
+            .map_err(|error| anyhow::anyhow!("inspect {label} {}: {error}", path.display()))?;
+        if !metadata.file_type().is_file() || metadata.len() == 0 {
+            anyhow::bail!("{label} {} is empty or not a regular file", path.display());
+        }
+        require_file(&file, path, label)?;
+        Ok(file)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, label);
+        anyhow::bail!("snapshot inode sealing is supported only on Linux")
+    }
+}
+
+/// Re-check immutability on an already-open descriptor.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn require_file(file: &std::fs::File, path: &Path, label: &str) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        require_with_ops(&mut LinuxInodeFlagOps { file }, path, label)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (file, path, label);
         anyhow::bail!("snapshot inode sealing is supported only on Linux")
     }
 }

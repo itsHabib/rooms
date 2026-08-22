@@ -69,10 +69,30 @@ sudoers_directory_is_safe() {
     esac
 }
 
+sudo_policy_lists_no_rooms_rules() {
+    listing="$1"
+    # Alpine sudo 1.9.17 exits zero even when its policy engine reports that a
+    # user has no matching rules. Admit only that single C-locale denial line;
+    # any Sudoers entry (NOPASSWD or otherwise) produces a multi-line listing.
+    [ "$(printf '%s\n' "$listing" | wc -l)" -eq 1 ] || return 1
+    case "$listing" in
+        "User rooms is not allowed to run sudo on "*.) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 rooms_sudo_is_revoked() {
-    ! su rooms -s /bin/sh -c \
+    if su rooms -s /bin/sh -c \
         'exec env -i HOME=/home/rooms USER=rooms LOGNAME=rooms PATH=/usr/local/bin:/usr/bin:/bin sudo -n true' \
-        >/dev/null 2>&1
+        >/dev/null 2>&1; then
+        return 1
+    fi
+    /usr/sbin/visudo -cf /etc/sudoers >/dev/null 2>&1 || return 1
+    # `sudo -n true` alone misses a command-specific NOPASSWD grant such as
+    # `/bin/sh`. Ask sudo's own policy engine for the complete rooms ruleset;
+    # no matching rule is the only neutral-warm state we admit.
+    listing="$(LC_ALL=C /usr/bin/sudo -U rooms -ll 2>&1)" || return 1
+    sudo_policy_lists_no_rooms_rules "$listing"
 }
 
 # A normal workload gets passwordless sudo, but a neutral-base warm command is
@@ -127,7 +147,10 @@ write_protected_state() {
             protected_directory_record "$directory" || return 1
         done
         for file in \
-            /sbin/rooms-resume-agent /etc/ssh/sshd_config \
+            /sbin/rooms-resume-agent /sbin/rooms-resume-apply \
+            /usr/bin/ssh-keygen /usr/bin/sudo \
+            /usr/sbin/sshd /usr/sbin/visudo \
+            /etc/ssh/sshd_config /etc/ssh/sshd_config.rooms-resume \
             /etc/sudoers "$ROOMS_HOME/.ssh/authorized_keys"; do
             protected_file_record "$file" || return 1
         done
@@ -331,6 +354,26 @@ no_post_warm_processes() {
     done
 }
 
+# Fault the exact post-restore executables, dynamic libraries, policy parsers,
+# and public configuration into the neutral base before it is frozen. Every
+# process exits before the retained-process gate below, and none generates a
+# key, opens ingress, or reads a secret. The resulting clean pages belong to
+# snapshot.mem once and stay shared across a clone fleet instead of eight
+# guests faulting and dirtying the same cold runtime independently.
+prewarm_resume_runtime() {
+    /sbin/rooms-resume-apply --prewarm
+    /usr/bin/ssh-keygen -lf "$ROOMS_HOME/.ssh/authorized_keys" >/dev/null
+    # `sshd -T` refuses to expand a config until its HostKey exists. Creating a
+    # disposable key here would put private bytes into the snapshot, so only
+    # fault the executable and dynamic loader; the native helper parses the
+    # canonical source without a key and performs the sole `sshd -T` after its
+    # post-reseed key generation.
+    status=0
+    /usr/sbin/sshd -? >/dev/null 2>&1 || status=$?
+    [ "$status" -eq 1 ]
+    /usr/sbin/visudo -cf /etc/sudoers >/dev/null
+}
+
 emit_beacon() {
     # The caller replaces all three stdio descriptors before forking this
     # helper, so it cannot retain the provisioning stream. The host binds this
@@ -360,6 +403,7 @@ session() {
     rooms_sudo_is_revoked || fail "warm command reacquired sudo authority"
     verify_protected_state
     credential_state_is_safe || fail "warm command left a configured credential source"
+    prewarm_resume_runtime || fail "cannot prewarm the post-restore runtime"
     printf 'ACK warm\n'
 
     rm -f "$BUNDLE" "$WARM" "$PROTECTED_BEFORE" "$PROTECTED_AFTER"

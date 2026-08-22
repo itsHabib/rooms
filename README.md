@@ -20,7 +20,7 @@ Disposable Firecracker microVMs with specified deps. The cold path takes a rootf
 
 - `base-create` → `snapshot` → `restore` for a credential-free warm base and one hygiene-gated restored room.
 - `clone <snapshot> -n 1..8` for bounded concurrent fan-out. Every clone gets its own host network namespace, veth/NAT identity, post-resume identity, fresh SSH host key, and exact teardown; command mode can add per-clone egress enforcement and witness custody.
-- A Linux immutable-inode lifecycle for snapshot backing state: the rootfs builder seals its output, snapshot publication seals `snapshot.vmstate`, `snapshot.mem`, `snapshot.json`, and their directory, and restore revalidates the exact immutable inodes before use.
+- A Linux immutable-inode lifecycle for snapshot backing state: the rootfs builder seals its output, snapshot publication seals `snapshot.vmstate`, `snapshot.mem`, `snapshot.json`, and their directory, and restore verifies the exact bind-mounted/copied jail artifacts before launch and resume. A separate sealed, state-local receipt binds an exact local publication to its rootfs digest; copied, foreign, legacy, or mismatched snapshots fall back to a full image hash.
 - Crash-recoverable snapshot/restore intents, a persistent snapshot slot reservation with bounded clone leases, and deterministic JSON batch records.
 
 Still separate work: a Nix flake as the deps spec (`--flake`), ship's `backend: "rooms"`, and the Ship `/work-driver` adapter that maps distinct tasks onto one warm fleet. `rooms clone --command` currently broadcasts the **same command** to every clone; eight independently assigned `/work-driver` tasks are not yet a claim this repository makes. See [`docs/features/snapshot-fork-replay/spec.md`](docs/features/snapshot-fork-replay/spec.md) for the Phase-2 contract and [`docs/vision.md`](docs/vision.md) for the wider roadmap.
@@ -106,7 +106,7 @@ sudo -E rooms clone ./rooms.snapshot \
 
 Omit `clone --command` to keep the complete batch alive; the returned JSON gives the room ids for `rooms kill <id>`. Command mode is deliberately a broadcast primitive today. A consumer that needs eight different task commands, outputs, and lifecycle streams must supply the still-follow-up Ship `/work-driver` fleet adapter.
 
-On Linux, the Alpine builder publishes its rootfs with `FS_IMMUTABLE_FL`; snapshot publication applies the same kernel flag to all three artifacts and the snapshot directory. Restore refuses mutable backing and detects inode substitution across its admission and custody boundaries. There is intentionally no snapshot delete/unseal verb yet: published snapshots are operator-retained evidence, and rerunning the rootfs builder is the one supported exact-output replacement path.
+On Linux, the Alpine builder publishes its rootfs with `FS_IMMUTABLE_FL`; snapshot publication applies the same kernel flag to all three artifacts and the snapshot directory. Restore refuses mutable backing, parses and hashes through pinned descriptors, and verifies that the jail contains those prepared rootfs/memory inodes plus the prepared vmstate bytes. The state-local compatibility receipt is deliberately outside the portable snapshot directory, so copying `snapshot.json` cannot copy hash authority. There is intentionally no snapshot delete/unseal verb yet: published snapshots are operator-retained evidence, and rerunning the rootfs builder is the one supported exact-output replacement path.
 
 `--keep` and `--command` are mutually exclusive on `run`/`restore`; kept modes cannot collect output or witness traffic; `--push-branch` is cursor-only. clap enforces these combinations at parse time.
 
@@ -189,7 +189,7 @@ The Phase-2 killer is the stricter eight-clone acceptance gate. Run it as the or
 ./scripts/phase2-killer.sh
 ```
 
-It builds the current source and a fresh immutable rootfs under a unique proof `HOME`, publishes one neutral snapshot, measures the one-clone baseline, demands eight workload-ready clones in literally less than one second with aggregate PSS below twice that baseline, then verifies namespace/NAT isolation, post-resume hygiene, eight witnessed workloads, exact teardown, and zero proof-owned leaks. The preserved proof root under `~/.r2/` contains `summary.json`, hashes, pcaps, and logs. A pass proves the Rooms broadcast-fleet substrate; it explicitly does not prove distinct-task `/work-driver` integration.
+It builds the current source and a fresh immutable rootfs under a unique proof `HOME`, verifies the static native resume helper, publishes one neutral snapshot plus its separate sealed local receipt, measures the one-clone baseline, and demands eight authenticated workload-ready clones in literally less than one second with aggregate PSS below twice that baseline. It then verifies namespace/NAT isolation, forced guest CRNG reseed, fresh host/application keys, exact Git identity, post-snapshot secret delivery, eight witnessed workloads, exact teardown, and zero proof-owned leaks. The preserved proof root under `~/.r2/` contains `summary.json`, hashes, pcaps, and logs. A pass proves the Rooms broadcast-fleet substrate; it explicitly does not prove distinct-task `/work-driver` integration.
 
 ### Building the rootfs
 

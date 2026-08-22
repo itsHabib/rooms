@@ -113,6 +113,15 @@ impl RoomsConfig {
         )
     }
 
+    /// Sealed local publication receipts used only to avoid re-hashing an
+    /// exact immutable rootfs. Portable snapshot artifacts never live here.
+    pub fn snapshot_attestations_dir(&self) -> Option<PathBuf> {
+        Some(
+            self.resolved_state_base()?
+                .join(crate::snapshot_exec::SNAPSHOT_ATTESTATIONS_DIR),
+        )
+    }
+
     /// Default completed snapshot artifact root.
     pub fn snapshots_dir(&self) -> Option<PathBuf> {
         Some(

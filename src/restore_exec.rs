@@ -7,7 +7,8 @@
 //! atomic rewrite, and the intent survives (as a tombstone) until both
 //! resource cleanup and the lease return are durably complete.
 
-use std::io::{Read, Write as _};
+use std::fs::File;
+use std::io::{Read, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ use crate::restore::{self, RestoreOp};
 use crate::room::{self, Liveness};
 use crate::slot;
 use crate::snapshot::{self, SnapshotMeta};
-use crate::snapshot_exec::{canonical_candidate, firecracker_version, overlaps, sha256_file};
+use crate::snapshot_exec::{canonical_candidate, firecracker_version, overlaps, sha256_open_file};
 use crate::{clonenet, egress, transport, vsock, witness};
 
 const INTENT_SCHEMA_VERSION: u32 = 1;
@@ -69,10 +70,13 @@ pub struct Restored {
 
 /// One request-scoped, compatibility-checked restore source.
 ///
-/// Preparing a source performs the expensive rootfs hash and parses the
-/// snapshot metadata once. The value is immutable and may be shared (for
-/// example through an `Arc`) by every member of one clone batch. It is not a
-/// global cache: each invocation must prepare its own source, and every
+/// Preparing a source parses snapshot metadata and proves rootfs
+/// compatibility once. An exact still-immutable local publication may use the
+/// digest from Rooms' separate sealed state receipt; snapshot metadata can
+/// never attest itself. Legacy, copied, foreign, or mismatched inputs take the
+/// conservative full-hash path. The value may be shared
+/// (for example through an `Arc`) by every member of one clone batch. It is not
+/// a global cache: each invocation must prepare its own source, and every
 /// restore cheaply revalidates the exact files before publishing an intent,
 /// after staging, and at the final pre-resume boundary.
 #[derive(Debug)]
@@ -82,6 +86,10 @@ pub struct PreparedRestoreSource {
     meta: SnapshotMeta,
     ops: Vec<RestoreOp>,
     identity: RestoreSourceIdentity,
+    /// Content commitment for the copied (not bind-mounted) jail artifact.
+    vmstate_hash: String,
+    /// Pins the exact backing inode whose receipt/full hash was checked.
+    image_guard: File,
 }
 
 impl PreparedRestoreSource {
@@ -105,7 +113,41 @@ impl PreparedRestoreSource {
 
     fn revalidate(&self) -> anyhow::Result<()> {
         require_immutable_restore_source(&self.snapshot_dir, &self.image)?;
+        #[cfg(target_os = "linux")]
+        crate::inode_seal::require_file(&self.image_guard, &self.image, "backing image")?;
+        self.identity
+            .assert_open("backing image", &self.image_guard)?;
         self.identity.revalidate()
+    }
+
+    /// Prove that the exact files staged for Firecracker are the prepared
+    /// source, not objects observed during a transient A -> B -> A path swap.
+    /// Rootfs and memory are bind mounts, so device/inode identity is exact;
+    /// vmstate is deliberately copied, so its prepared content digest is the
+    /// identity that must survive staging.
+    fn verify_staged(&self, jail_root: &Path) -> anyhow::Result<()> {
+        self.identity
+            .assert_staged_bind("backing image", &jail_root.join(firecracker::JAIL_ROOTFS))?;
+        self.identity.assert_staged_bind(
+            "snapshot memory",
+            &jail_root.join(snapshot::SNAPSHOT_MEM_FILE),
+        )?;
+
+        let staged_vmstate_path = jail_root.join(snapshot::SNAPSHOT_VMSTATE_FILE);
+        let mut staged_vmstate = File::open(&staged_vmstate_path).map_err(|error| {
+            anyhow::anyhow!(
+                "open staged snapshot vmstate {}: {error}",
+                staged_vmstate_path.display()
+            )
+        })?;
+        let staged_hash = sha256_open_file(&mut staged_vmstate)?;
+        if staged_hash != self.vmstate_hash {
+            anyhow::bail!(
+                "staged snapshot vmstate {} differs from the prepared immutable source",
+                staged_vmstate_path.display()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -150,7 +192,7 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
     restore_prepared(config, req, &prepared).await
 }
 
-/// Canonicalize, validate, hash, and compatibility-check one restore source.
+/// Canonicalize, validate, and compatibility-check one restore source.
 ///
 /// This is deliberately request-scoped. Call it once for a clone batch and
 /// share the returned immutable value with [`restore_prepared`]; do not retain
@@ -159,7 +201,7 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
 /// # Errors
 /// Refuses missing, empty, symlinked, or non-regular artifacts; malformed or
 /// incompatible metadata; and any source whose identity changes while it is
-/// being read and hashed.
+/// being prepared.
 pub fn prepare_restore(
     config: &RoomsConfig,
     snapshot_dir: &Path,
@@ -180,19 +222,102 @@ fn prepare_restore_inner(
         require_immutable_restore_source(&snapshot_dir, &image)?;
     }
     let before = RestoreSourceIdentity::capture(&snapshot_dir, &image)?;
-    let meta = read_snapshot_meta(&snapshot_dir)?;
+    let mut image_guard = open_prepared_regular(&image, "backing image", require_immutable)?;
+    let meta_path = snapshot_dir.join(snapshot::SNAPSHOT_META_FILE);
+    let mut meta_guard = open_prepared_regular(&meta_path, "snapshot metadata", require_immutable)?;
+    let vmstate_path = snapshot_dir.join(snapshot::SNAPSHOT_VMSTATE_FILE);
+    let mut vmstate_guard =
+        open_prepared_regular(&vmstate_path, "snapshot vmstate", require_immutable)?;
+    before.assert_open("backing image", &image_guard)?;
+    before.assert_open("snapshot metadata", &meta_guard)?;
+    before.assert_open("snapshot vmstate", &vmstate_guard)?;
+    let meta = read_snapshot_meta(&mut meta_guard, &meta_path)?;
+    let vmstate_hash = sha256_open_file(&mut vmstate_guard)?;
     let host_fc = firecracker_version(config)?;
-    let rootfs_hash = sha256_file(&image)?;
+    let rootfs_hash = rootfs_compat_hash(
+        config,
+        &snapshot_dir,
+        &meta,
+        &mut image_guard,
+        &before,
+        require_immutable,
+    )?;
     let plan = restore::plan_restore(&meta, &host_fc, &rootfs_hash)?;
     let identity = RestoreSourceIdentity::capture(&snapshot_dir, &image)?;
     before.assert_same(&identity, "changed while being prepared")?;
+    identity.assert_open("backing image", &image_guard)?;
+    identity.assert_open("snapshot metadata", &meta_guard)?;
+    identity.assert_open("snapshot vmstate", &vmstate_guard)?;
+    #[cfg(target_os = "linux")]
+    if require_immutable {
+        crate::inode_seal::require_file(&image_guard, &image, "backing image")?;
+        crate::inode_seal::require_file(&meta_guard, &meta_path, "snapshot metadata")?;
+        crate::inode_seal::require_file(&vmstate_guard, &vmstate_path, "snapshot vmstate")?;
+    }
     Ok(PreparedRestoreSource {
         snapshot_dir,
         image,
         meta,
         ops: plan.ops,
         identity,
+        vmstate_hash,
+        image_guard,
     })
+}
+
+fn open_prepared_regular(
+    path: &Path,
+    label: &str,
+    require_immutable: bool,
+) -> anyhow::Result<File> {
+    #[cfg(target_os = "linux")]
+    if require_immutable {
+        return crate::inode_seal::open_regular(path, label);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = require_immutable;
+
+    let file = File::open(path)
+        .map_err(|error| anyhow::anyhow!("open {label} {}: {error}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("inspect {label} {}: {error}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        anyhow::bail!("{label} {} is empty or not a regular file", path.display());
+    }
+    Ok(file)
+}
+
+fn rootfs_compat_hash(
+    config: &RoomsConfig,
+    snapshot_dir: &Path,
+    meta: &SnapshotMeta,
+    image: &mut File,
+    source: &RestoreSourceIdentity,
+    immutable_source: bool,
+) -> anyhow::Result<String> {
+    if immutable_source {
+        #[cfg(target_os = "linux")]
+        {
+            let snapshot_dir_source = source.immutable_identity("snapshot directory")?;
+            let snapshot_meta_source = source.immutable_identity("snapshot metadata")?;
+            let rootfs_source = source.immutable_identity("backing image")?;
+            if let Some(hash) = crate::snapshot_exec::attested_rootfs_hash(
+                config,
+                snapshot_dir,
+                meta,
+                &snapshot_dir_source,
+                &snapshot_meta_source,
+                &rootfs_source,
+            )? {
+                return Ok(hash);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (config, snapshot_dir, meta, source);
+
+    sha256_open_file(image)
 }
 
 #[cfg(test)]
@@ -357,13 +482,18 @@ pub async fn restore_prepared(
         }
     };
 
-    // Staging opens the three prepared paths: vmstate is copied while rootfs
-    // and memory are bind-mounted. Revalidate once more while the child is
-    // still inert behind its launch barrier. A rename/substitution in the
-    // check-to-stage window is therefore detected before any lease, network,
-    // API load, or guest execution; the staged binds/copy are discarded with
-    // this launch.
-    if let Err(error) = prepared.revalidate() {
+    // The child is still inert behind its launch barrier. Compare what the
+    // jail actually contains to the prepared commitment, then also require
+    // the public source paths to retain their identities. The first check
+    // closes transient A -> B -> A staging substitution; the second refuses
+    // a source tree that was permanently moved out from under this request.
+    let jail_root = config
+        .jail_root_dir(&room_id)
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve jail root"))?;
+    if let Err(error) = prepared
+        .verify_staged(&jail_root)
+        .and_then(|()| prepared.revalidate())
+    {
         abort_launch(config, launch, &intent);
         return Err(error);
     }
@@ -479,6 +609,7 @@ async fn drive_to_ready(
                 // but the rootfs and memory binds still share their source
                 // inodes. Reject an in-place write made after staging/load at
                 // the last synchronous boundary before guest execution.
+                prepared.verify_staged(&jail_root)?;
                 prepared.revalidate()?;
                 transport::api_patch(
                     launch.socket(),
@@ -597,7 +728,7 @@ fn resume_payload(
     secrets: Option<&vsock::SecretsPayload>,
 ) -> anyhow::Result<vsock::ResumePayload> {
     let mut entropy = vec![0_u8; RESUME_ENTROPY_BYTES];
-    let mut urandom = std::fs::File::open("/dev/urandom")?;
+    let mut urandom = File::open("/dev/urandom")?;
     urandom.read_exact(&mut entropy)?;
     Ok(vsock::ResumePayload {
         room_id: room_id.to_owned(),
@@ -1020,6 +1151,51 @@ impl RestoreSourceIdentity {
         Ok(())
     }
 
+    fn stamped(&self, label: &str) -> anyhow::Result<&StampedRestorePath> {
+        self.paths
+            .iter()
+            .find(|path| path.label == label)
+            .ok_or_else(|| anyhow::anyhow!("prepared restore source set lost {label}"))
+    }
+
+    fn assert_open(&self, label: &str, file: &File) -> anyhow::Result<()> {
+        let expected = self.stamped(label)?;
+        let observed = RestoreSourceStamp::capture(&file.metadata()?);
+        if expected.stamp != observed {
+            anyhow::bail!(
+                "prepared restore source {label} {} differs from its open inode",
+                expected.path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn assert_staged_bind(&self, label: &str, staged: &Path) -> anyhow::Result<()> {
+        let expected = self.stamped(label)?;
+        let metadata = std::fs::symlink_metadata(staged).map_err(|error| {
+            anyhow::anyhow!("inspect staged {label} {}: {error}", staged.display())
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() == 0 {
+            anyhow::bail!(
+                "staged {label} {} is empty or not regular",
+                staged.display()
+            );
+        }
+        let observed = RestoreSourceStamp::capture(&metadata);
+        if expected.stamp != observed {
+            anyhow::bail!(
+                "staged {label} {} is not the prepared immutable source inode",
+                staged.display()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn immutable_identity(&self, label: &str) -> anyhow::Result<snapshot::ImmutableFileIdentity> {
+        Ok(self.stamped(label)?.stamp.immutable_identity())
+    }
+
     fn revalidate(&self) -> anyhow::Result<()> {
         for expected in &self.paths {
             let found = expected.recapture()?;
@@ -1068,6 +1244,20 @@ impl RestoreSourceStamp {
             ctime_nsec: metadata.ctime_nsec(),
         }
     }
+
+    #[cfg(target_os = "linux")]
+    const fn immutable_identity(self) -> snapshot::ImmutableFileIdentity {
+        snapshot::ImmutableFileIdentity {
+            device: self.device,
+            inode: self.inode,
+            len: self.len,
+            mode: self.mode,
+            mtime: self.mtime,
+            mtime_nsec: self.mtime_nsec,
+            ctime: self.ctime,
+            ctime_nsec: self.ctime_nsec,
+        }
+    }
 }
 
 /// Non-Unix builds retain a conservative fallback for portability. Rooms'
@@ -1094,21 +1284,23 @@ impl RestoreSourceStamp {
     }
 }
 
-fn read_snapshot_meta(snapshot_dir: &Path) -> anyhow::Result<SnapshotMeta> {
-    for name in [snapshot::SNAPSHOT_VMSTATE_FILE, snapshot::SNAPSHOT_MEM_FILE] {
-        let path = snapshot_dir.join(name);
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| anyhow::anyhow!("snapshot artifact {}: {e}", path.display()))?;
-        if !meta.file_type().is_file() || meta.len() == 0 {
-            anyhow::bail!(
-                "snapshot artifact missing, empty, or not regular: {}",
-                path.display()
-            );
-        }
+fn read_snapshot_meta(file: &mut File, meta_path: &Path) -> anyhow::Result<SnapshotMeta> {
+    const MAX_META_BYTES: u64 = 1024 * 1024;
+    let len = file
+        .metadata()
+        .map_err(|error| anyhow::anyhow!("snapshot metadata {}: {error}", meta_path.display()))?
+        .len();
+    if len > MAX_META_BYTES {
+        anyhow::bail!(
+            "snapshot metadata {} exceeds the {} byte limit",
+            meta_path.display(),
+            MAX_META_BYTES
+        );
     }
-    let meta_path = snapshot_dir.join(snapshot::SNAPSHOT_META_FILE);
-    let bytes = std::fs::read(&meta_path)
-        .map_err(|e| anyhow::anyhow!("snapshot metadata {}: {e}", meta_path.display()))?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut bytes = Vec::with_capacity(usize::try_from(len)?);
+    file.read_to_end(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("snapshot metadata {}: {error}", meta_path.display()))?;
     let meta: SnapshotMeta = serde_json::from_slice(&bytes)?;
     if !crate::registry::is_valid_room_id(&meta.snapshot_id)
         || !crate::registry::is_valid_room_id(&meta.base_room_id)
@@ -1224,7 +1416,7 @@ fn read_intents(config: &RoomsConfig) -> anyhow::Result<Vec<RestoreIntent>> {
 
 #[cfg(unix)]
 fn sync_dir(path: &Path) -> anyhow::Result<()> {
-    std::fs::File::open(path)?.sync_all()?;
+    File::open(path)?.sync_all()?;
     Ok(())
 }
 
@@ -1250,8 +1442,9 @@ mod tests {
     use super::prepare_restore;
     use super::{
         canonical_clone_net, create_intent_exclusive, finish_index, pending_all,
-        prepare_unsealed_restore_fixture, read_intents, validate_output_disjoint,
-        write_intent_atomic, Boundary, RestoreIntent, INTENT_SCHEMA_VERSION,
+        prepare_unsealed_restore_fixture, read_intents, rootfs_compat_hash,
+        validate_output_disjoint, write_intent_atomic, Boundary, RestoreIntent,
+        INTENT_SCHEMA_VERSION,
     };
     use crate::clonenet::{CloneNet, CLONENETS_DIR};
     use crate::config::RoomsConfig;
@@ -1388,6 +1581,77 @@ mod tests {
             .revalidate()
             .expect_err("in-place vmstate mutation must invalidate preparation");
         assert!(error.to_string().contains("snapshot vmstate"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_restore_artifacts_must_match_the_prepared_source() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let jail = root.path().join("jail");
+        std::fs::create_dir(&jail).unwrap();
+        std::fs::hard_link(&image, jail.join(crate::firecracker::JAIL_ROOTFS)).unwrap();
+        std::fs::hard_link(
+            snapshot_dir.join(SNAPSHOT_MEM_FILE),
+            jail.join(SNAPSHOT_MEM_FILE),
+        )
+        .unwrap();
+        std::fs::copy(
+            snapshot_dir.join(SNAPSHOT_VMSTATE_FILE),
+            jail.join(SNAPSHOT_VMSTATE_FILE),
+        )
+        .unwrap();
+
+        let prepared =
+            prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
+        prepared.verify_staged(&jail).expect("exact staged set");
+
+        std::fs::write(jail.join(SNAPSHOT_VMSTATE_FILE), b"vmstate-b").unwrap();
+        let error = prepared
+            .verify_staged(&jail)
+            .expect_err("copied vmstate substitution must be refused");
+        assert!(
+            error.to_string().contains("staged snapshot vmstate"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_metadata_cannot_attest_its_own_rootfs_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let mut meta: SnapshotMeta =
+            serde_json::from_slice(&std::fs::read(snapshot_dir.join(SNAPSHOT_META_FILE)).unwrap())
+                .unwrap();
+        meta.rootfs_hash = "forged-without-reread".to_owned();
+        let source = super::RestoreSourceIdentity::capture(&snapshot_dir, &image).unwrap();
+        let mut image_file = std::fs::File::open(&image).unwrap();
+        assert_eq!(
+            rootfs_compat_hash(
+                &config,
+                &snapshot_dir,
+                &meta,
+                &mut image_file,
+                &source,
+                true,
+            )
+            .unwrap(),
+            sha256_file(&image).unwrap(),
+            "an exact inode identity inside attacker-controlled snapshot.json is not authority"
+        );
+        assert_eq!(
+            rootfs_compat_hash(
+                &config,
+                &snapshot_dir,
+                &meta,
+                &mut image_file,
+                &source,
+                false,
+            )
+            .unwrap(),
+            sha256_file(&image).unwrap()
+        );
     }
 
     #[cfg(target_os = "linux")]

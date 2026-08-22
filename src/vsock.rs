@@ -420,8 +420,10 @@ pub fn serve_resume(
     ))
 }
 
-/// Serve the nudge to the first agent connection: preface in, identity /
-/// clock / entropy / secrets frames out, then require the exact terminal ack.
+/// Serve the nudge to the first agent connection: preface in, entropy first,
+/// then identity / clock / secrets frames out and the exact terminal ack.
+/// Entropy is deliberately first so the retained receiver can force a kernel
+/// CRNG reseed before it parses any other post-resume field or forks.
 /// The endpoint retires on accept, like the secrets one-shot — the nudge
 /// carries secrets, so a second reader must find nothing.
 #[cfg(unix)]
@@ -445,6 +447,7 @@ async fn serve_resume_inner(
         return Err(format!("resume preface malformed: {preface:?}"));
     }
     tracing::debug!("resume: preface ok, sending nudge frames");
+    write_typed_frame(&mut stream, "ENTROPY", &payload.entropy).await?;
     stream
         .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
         .await
@@ -453,7 +456,6 @@ async fn serve_resume_inner(
         .write_all(format!("CLOCK {}\n", payload.epoch_secs).as_bytes())
         .await
         .map_err(|e| format!("write clock: {e}"))?;
-    write_typed_frame(&mut stream, "ENTROPY", &payload.entropy).await?;
     write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0).await?;
     write_typed_frame(&mut stream, "END", &[]).await?;
     tracing::debug!("resume: frames sent, awaiting hygiene steps + ack");
@@ -678,17 +680,17 @@ mod tests {
 
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
-        // The guest speaks first: preface, then reads identity/clock/frames.
+        // The guest speaks first; entropy must be the first host frame.
         guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        assert_eq!(
+            read_typed_frame(&mut guest).await,
+            ("ENTROPY".to_owned(), vec![7_u8; 64])
+        );
         assert_eq!(
             read_line(&mut guest).await,
             "IDENTITY 01resumeroomidresumeroomid"
         );
         assert_eq!(read_line(&mut guest).await, "CLOCK 1700000000");
-        assert_eq!(
-            read_typed_frame(&mut guest).await,
-            ("ENTROPY".to_owned(), vec![7_u8; 64])
-        );
         assert_eq!(
             read_typed_frame(&mut guest).await,
             ("SECRETS".to_owned(), b"GH_TOKEN=t-9\n".to_vec())

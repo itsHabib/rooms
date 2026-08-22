@@ -86,7 +86,7 @@ Check README status and spec docs for the exact landed boundary. In particular, 
 | --- | --- |
 | **Cold substrate (landed)** | `run`: jailer boot, SSH command/runner execution, artifact collection, exact teardown, runner contract, rootfs builder, and host diagnostics. |
 | **Warm Rooms substrate (implemented on this branch)** | `base-create` → immutable `snapshot` → `restore` / `clone -n 1..8`; namespace/NAT isolation, restore hygiene, bounded leases, witness custody, and exact teardown. Exact-head killer, review, and Gate still precede landing. |
-| **Replay evidence (future)** | Receipts and comparison semantics that make two restored executions meaningfully replayable, beyond the witness and custody substrate. |
+| **Replay evidence (future)** | Run receipts and comparison semantics that make two restored executions meaningfully replayable, beyond the state-local compatibility attestation, witness, and custody substrate. |
 | **Consumer adoption (future)** | Ship backend plus a `/work-driver` fleet adapter that assigns distinct commands, outputs, and lifecycle streams to the warm clones. |
 | **Deps (future)** | Nix flake as the deps spec (`--flake`). |
 

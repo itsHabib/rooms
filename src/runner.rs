@@ -22,6 +22,11 @@ use crate::error::FirecrackerError;
 /// unprivileged `rooms` user (uid 1000); `PermitRootLogin no`.
 const GUEST_USER: &str = "rooms";
 
+/// A readiness probe performs a complete SSH handshake and pubkey login. Give
+/// concurrent guests enough time to finish that work while keeping connection
+/// establishment and the protocol handshake bounded.
+const SSH_PROBE_CONNECT_TIMEOUT_OPTION: &str = "ConnectTimeout=10";
+
 /// Absolute path of the baked cursor runner script inside the guest image.
 const CURSOR_RUNNER_JS: &str = "/opt/rooms/cursor-runner/cursor-runner.js";
 
@@ -171,7 +176,24 @@ pub async fn wait_for_ssh_observed(
             });
         }
 
-        match probe_ssh_once(target, key).await? {
+        // OpenSSH's per-connection bound is deliberately generous enough for
+        // an eight-way handshake on a contended host. The caller's deadline
+        // is still authoritative: dropping the timed-out future kills its
+        // child (`kill_on_drop` below) instead of allowing one probe to extend
+        // a short configured reachability timeout by ten seconds.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let probed = tokio::time::timeout(remaining, probe_ssh_once(target, key)).await;
+        let probe = match probed {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(FirecrackerError::GuestUnreachable {
+                    reason: format!(
+                        "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
+                    ),
+                });
+            }
+        };
+        match probe {
             None => {
                 info!(guest_ip, "sshd accepted pubkey connection");
                 signal_ready(&mut observe, guest_seen);
@@ -181,12 +203,25 @@ pub async fn wait_for_ssh_observed(
         }
         debug!(guest_ip, stderr = %last_err, "sshd probe failed; retrying");
 
-        if probe_ping && !guest_seen && probe_ping_once(target).await {
-            info!(guest_ip, "guest answered ping (kernel up; sshd not yet)");
-            guest_seen = true;
-            observe(GuestSignal::GuestReady);
+        if probe_ping && !guest_seen {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, probe_ping_once(target)).await {
+                Ok(true) => {
+                    info!(guest_ip, "guest answered ping (kernel up; sshd not yet)");
+                    guest_seen = true;
+                    observe(GuestSignal::GuestReady);
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    return Err(FirecrackerError::GuestUnreachable {
+                        reason: format!(
+                            "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
+                        ),
+                    });
+                }
+            }
         }
-        sleep(poll).await;
+        sleep(poll.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
 }
 
@@ -206,27 +241,11 @@ async fn probe_ssh_once(
     target: GuestTarget<'_>,
     key: &str,
 ) -> Result<Option<String>, FirecrackerError> {
-    let mut command = guest_process(target, "ssh");
-    let output = command
-        .args([
-            "-i",
-            key,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=2",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            &format!("{GUEST_USER}@{}", target.guest_ip),
-            "true",
-        ])
+    let output = ssh_probe_command(target, key)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| FirecrackerError::Internal(format!("ssh probe spawn failed: {e}")))?;
@@ -239,6 +258,28 @@ async fn probe_ssh_once(
     ))
 }
 
+fn ssh_probe_command(target: GuestTarget<'_>, key: &str) -> Command {
+    let destination = format!("{GUEST_USER}@{}", target.guest_ip);
+    let mut command = guest_process(target, "ssh");
+    command.args([
+        "-i",
+        key,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        SSH_PROBE_CONNECT_TIMEOUT_OPTION,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        destination.as_str(),
+        "true",
+    ]);
+    command
+}
+
 /// One ICMP echo probe (`ping -c 1 -W 1`). Best-effort observation: any
 /// failure — no ping binary, ICMP filtered, no reply — is just `false`.
 async fn probe_ping_once(target: GuestTarget<'_>) -> bool {
@@ -246,6 +287,7 @@ async fn probe_ping_once(target: GuestTarget<'_>) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .status()
         .await
         .is_ok_and(|status| status.success())
@@ -1112,7 +1154,8 @@ mod tests {
 
     use super::{
         cursor_command_argv, ping_command, repo_url_has_userinfo, shell_single_quote, ssh_command,
-        tar_member_is_safe, validate_neutral_warm, wait_for_ssh, CursorMeta, GuestTarget,
+        ssh_probe_command, tar_member_is_safe, validate_neutral_warm, wait_for_ssh, CursorMeta,
+        GuestTarget,
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
@@ -1247,6 +1290,40 @@ mod tests {
         assert_eq!(
             netns_ping_args,
             ["netns", "exec", "rooms-c3", "ping", "-c", "1", "-W", "1", "10.0.0.1",]
+        );
+    }
+
+    #[test]
+    fn ssh_readiness_probe_allows_a_contended_full_handshake() {
+        let command = ssh_probe_command(
+            GuestTarget::new("10.0.0.1", Some("rooms-c3")),
+            "/tmp/id_rooms",
+        );
+        let (program, args) = command_parts(&command);
+
+        assert_eq!(program, "ip");
+        assert_eq!(
+            args,
+            [
+                "netns",
+                "exec",
+                "rooms-c3",
+                "ssh",
+                "-i",
+                "/tmp/id_rooms",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                "rooms@10.0.0.1",
+                "true",
+            ]
         );
     }
 

@@ -358,32 +358,78 @@ mod tests {
         assert!(!agent.contains("install -d -m 0700 \"$PROVISION_DIR\""));
         assert!(agent.contains("revoke_workload_sudo"));
         assert!(agent.contains("rooms_sudo_is_revoked"));
+        assert!(agent.contains("/usr/bin/sudo -U rooms -ll"));
+        for executable in [
+            "/usr/bin/ssh-keygen",
+            "/usr/bin/sudo",
+            "/usr/sbin/sshd",
+            "/usr/sbin/visudo",
+        ] {
+            assert!(agent.contains(executable), "unprotected: {executable}");
+        }
         assert!(agent.contains("verify_protected_state"));
         assert_eq!(agent.matches("credential_state_is_safe || fail").count(), 2);
 
         let resume = include_str!("../scripts/lib/rooms-resume-agent.sh");
-        assert!(resume.contains("fresh_git_identity \"$room_id\""));
-        assert!(resume.contains("destination=/home/rooms/.gitconfig"));
-        assert!(resume.contains("chmod 0600 \"$pending\""));
-        assert!(resume.contains("@rooms.invalid"));
-        assert!(!resume.contains("credential.helper"));
-        let open = '{';
-        let close = '}';
-        let library_guard = format!("&& [ \"${open}1:-{close}\" = __rooms_test_library__ ]");
-        assert!(resume.contains(&library_guard));
-        assert!(resume.contains("interval=0.1"));
-        assert!(!resume.contains("interval=2"));
-        assert!(resume.contains("ssh-keygen -q -t ed25519 -N '' -f \"$SSH_HOST_KEY\""));
-        assert_eq!(resume.matches("-t ed25519").count(), 1);
-        assert!(!resume.contains("ssh-keygen -A"));
-        assert!(!resume.to_ascii_lowercase().contains("rsa"));
-        assert!(!resume.to_ascii_lowercase().contains("ecdsa"));
-        assert!(resume.contains("printf 'HostKey %s\\n' \"$SSH_HOST_KEY\""));
-        assert!(resume.contains("\"$SSHD_BIN\" -T -f \"$SSHD_CONFIG\""));
-        assert!(resume.contains("restore_workload_sudo"));
-        assert!(resume.contains("chmod 0440 \"$pending\""));
-        assert!(resume.contains("\"$SSHD_BIN\" -f \"$SSHD_CONFIG\""));
-        assert!(!resume.contains("rc-service sshd"));
+        assert!(resume.contains("exec /sbin/rooms-resume-apply --loop"));
+        assert!(!resume.contains("socat"));
+        assert!(!resume.contains("EXEC:"));
+
+        let apply = include_str!("../scripts/lib/rooms-resume-apply.c");
+        assert!(apply.contains("#define ENTROPY_LEN 64U"));
+        assert!(apply.contains("#define MAX_SECRETS_LEN"));
+        assert!(apply.contains("clock_settime(CLOCK_REALTIME"));
+        assert!(apply.contains("open(\"/dev/urandom\", O_WRONLY"));
+        assert!(apply.contains("ioctl(fd, RNDRESEEDCRNG, 0)"));
+        assert!(apply.contains("socket(AF_VSOCK"));
+        assert!(apply.contains("SOCK_NONBLOCK"));
+        assert!(apply.contains("connect_resume_stream"));
+        let resume_session = apply
+            .split_once("static int resume_session")
+            .expect("native resume transaction")
+            .1
+            .split_once("static int prewarm")
+            .expect("native resume transaction boundary")
+            .0;
+        let entropy_parse = resume_session
+            .find("parse_entropy_frame")
+            .expect("entropy-first parse");
+        let forced_reseed = resume_session
+            .find("reseed(sensitive_payload.entropy)")
+            .expect("forced CRNG reseed");
+        let metadata_parse = resume_session
+            .find("parse_payload(&sensitive_payload)")
+            .expect("post-reseed metadata parse");
+        assert!(entropy_parse < forced_reseed && forced_reseed < metadata_parse);
+        assert!(apply.contains("\"-t\", \"ed25519\""));
+        assert!(!apply.contains("ssh-keygen -A"));
+        assert!(!apply.to_ascii_lowercase().contains("ssh_host_rsa"));
+        assert!(!apply.to_ascii_lowercase().contains("ssh_host_ecdsa"));
+        assert!(apply.contains("effective_sshd_config_is_safe"));
+        assert!(apply.contains("\"/usr/sbin/visudo\", \"-cf\""));
+        assert!(apply.contains("tcp22_is_listening"));
+        assert!(apply.contains("sshd_owns_reachable_listener"));
+        assert!(apply.contains("/run/rooms/secrets.env"));
+        assert!(!apply.contains("/run/rooms-secrets/env"));
+        assert!(!apply.contains("/usr/bin/git"));
+        assert!(!apply.contains("/bin/sh"));
+        assert!(apply.contains("\"/usr/bin/sudo\", \"-n\", \"/bin/true\""));
+
+        assert!(build.contains("-static-pie"));
+        assert!(build.contains("-fno-stack-protector"));
+        assert!(!build.contains("-fstack-protector-strong"));
+        assert!(build.contains(".rooms-resume-build-deps"));
+        assert!(build.contains("gcc musl-dev linux-headers"));
+        assert!(build.contains("apk del .rooms-resume-build-deps"));
+        assert!(build.contains("native post-resume helper rejected the final built image policy"));
+        assert_eq!(
+            build
+                .matches("HostKey /etc/ssh/ssh_host_ed25519_key")
+                .count(),
+            1
+        );
+        assert!(!build.contains("HostCertificate"));
+        assert!(!build.contains("HostKeyAgent"));
         assert!(build.contains("command_args=\"loop\""));
     }
 
@@ -405,18 +451,218 @@ mod tests {
             .expect("run provisioning-agent shell test")
     }
 
-    // Git-identity rendering is pure POSIX shell and never touches guest-only
-    // paths, so keep these focused resume-agent tests active on every host.
-    fn run_resume_agent_shell(body: &str) -> std::process::Output {
-        let agent = format!(
-            "{}/scripts/lib/rooms-resume-agent.sh",
+    #[cfg(unix)]
+    fn compile_resume_helper() -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().expect("resume-helper build directory");
+        let binary = directory.path().join("rooms-resume-apply-test");
+        let source = format!(
+            "{}/scripts/lib/rooms-resume-apply.c",
             env!("CARGO_MANIFEST_DIR")
         );
-        std::process::Command::new("/bin/sh")
-            .args(["-c", body])
-            .env("AGENT", agent)
+        let output = std::process::Command::new("cc")
+            .args([
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-fno-stack-protector",
+                "-DROOMS_RESUME_TEST",
+                "-o",
+            ])
+            .arg(&binary)
+            .arg(source)
             .output()
-            .expect("run resume-agent shell test")
+            .expect("compile native resume helper");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (directory, binary)
+    }
+
+    fn canonical_resume_sshd_config() -> String {
+        let build = include_str!("../scripts/build-rootfs-alpine.sh");
+        let marker = "cat >\"$MNT/etc/ssh/sshd_config.rooms-resume\" <<'EOF'\n";
+        let (_, after_marker) = build
+            .split_once(marker)
+            .expect("canonical resume sshd heredoc");
+        let (config, _) = after_marker
+            .split_once("\nEOF\n")
+            .expect("canonical resume sshd heredoc terminator");
+        format!("{config}\n")
+    }
+
+    #[cfg(unix)]
+    fn git_in_repo(
+        repo: &std::path::Path,
+        home: &std::path::Path,
+        arguments: &[&str],
+    ) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(arguments)
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .output()
+            .expect("run git in staged repository")
+    }
+
+    #[cfg(unix)]
+    fn prepare_hostile_worktree_config(root: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for directory in ["run", "home/rooms", "workspace"] {
+            let path = root.join(directory);
+            std::fs::create_dir_all(&path).expect("create staging directory");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("protect staging directory");
+        }
+        let repo = root.join("workspace/repo");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&repo)
+            .status()
+            .expect("initialize repository")
+            .success());
+        let home = root.join("home/rooms");
+        for arguments in [
+            &["config", "extensions.worktreeConfig", "true"][..],
+            &["config", "rooms.keep", "unchanged"][..],
+            &["config", "--worktree", "user.name", "warm hostile"][..],
+            &["config", "--worktree", "user.email", "warm@evil.invalid"][..],
+        ] {
+            assert!(git_in_repo(&repo, &home, arguments).status.success());
+        }
+        repo
+    }
+
+    #[cfg(unix)]
+    fn assert_staged_identity_is_effective(root: &std::path::Path, room_id: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let repo = root.join("workspace/repo");
+        let home = root.join("home/rooms");
+        let expected_name = format!("rooms {room_id}");
+        let expected_email = format!("{room_id}@rooms.invalid");
+        let name = git_in_repo(&repo, &home, &["config", "--get", "user.name"]);
+        assert_eq!(String::from_utf8_lossy(&name.stdout).trim(), expected_name);
+        let email = git_in_repo(&repo, &home, &["config", "--get", "user.email"]);
+        assert_eq!(
+            String::from_utf8_lossy(&email.stdout).trim(),
+            expected_email
+        );
+        assert_eq!(
+            git_in_repo(&repo, &home, &["config", "--get", "rooms.keep"]).stdout,
+            b"unchanged\n"
+        );
+
+        let commit = git_in_repo(
+            &repo,
+            &home,
+            &[
+                "commit",
+                "--allow-empty",
+                "--no-gpg-sign",
+                "-m",
+                "identity proof",
+            ],
+        );
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let ident = git_in_repo(
+            &repo,
+            &home,
+            &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD"],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&ident.stdout).trim(),
+            format!("{expected_name} <{expected_email}>|{expected_name} <{expected_email}>")
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".git/rooms-identity"))
+                .expect("read repository identity include"),
+            format!("[user]\n\tname = {expected_name}\n\temail = {expected_email}\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("run/rooms/identity")).expect("read room identity"),
+            format!("{room_id}\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("run/rooms/secrets.env"))
+                .expect("read staged secrets"),
+            "TOKEN=test\n"
+        );
+        for (path, mode) in [("run/rooms/secrets.env", 0o600), ("run/rooms", 0o1770)] {
+            assert_eq!(
+                std::fs::metadata(root.join(path))
+                    .expect("staged path metadata")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                mode
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_native_stage_rejects_config_symlink(binary: &std::path::Path, room_id: &str) {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let hostile = tempfile::tempdir().expect("hostile staging root");
+        for directory in ["run", "home/rooms", "workspace/repo/.git"] {
+            let path = hostile.path().join(directory);
+            std::fs::create_dir_all(&path).expect("create hostile directory");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("protect hostile directory");
+        }
+        let hostile_config = hostile.path().join("workspace/repo/.git/config");
+        let sentinel = hostile.path().join("sentinel");
+        std::fs::write(&sentinel, "unchanged\n").expect("write sentinel");
+        symlink(&sentinel, &hostile_config).expect("install hostile config symlink");
+        let output = std::process::Command::new(binary)
+            .args([
+                "--test-stage",
+                hostile.path().to_str().expect("hostile path"),
+                room_id,
+            ])
+            .output()
+            .expect("reject hostile native resume path");
+        assert!(!output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(sentinel).expect("read unchanged sentinel"),
+            "unchanged\n"
+        );
+    }
+
+    #[cfg(unix)]
+    fn run_resume_parser(input: &[u8]) -> std::process::Output {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let (_directory, binary) = compile_resume_helper();
+        let mut child = std::process::Command::new(binary)
+            .arg("--test-parse")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start native resume parser");
+        child
+            .stdin
+            .take()
+            .expect("parser stdin")
+            .write_all(input)
+            .expect("write parser input");
+        child.wait_with_output().expect("wait for resume parser")
     }
 
     #[cfg(target_os = "linux")]
@@ -488,6 +734,30 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn neutral_sudo_policy_rejects_every_matching_rooms_rule() {
+        let output = run_agent_shell(
+            r#"
+            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
+            . "$AGENT"
+            sudo_policy_lists_no_rooms_rules \
+                'User rooms is not allowed to run sudo on rooms-agent.'
+            ! sudo_policy_lists_no_rooms_rules \
+                'User rooms may run the following commands on rooms-agent:'
+            ! sudo_policy_lists_no_rooms_rules 'Sudoers entry: /etc/sudoers.d/rooms'
+            ! sudo_policy_lists_no_rooms_rules "$(printf '%s\n%s' \
+                'User rooms is not allowed to run sudo on rooms-agent.' \
+                'Sudoers entry: /etc/sudoers.d/rooms')"
+            "#,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn root_owned_0711_payload_is_readable_only_by_its_named_unprivileged_owner() {
         let output = run_agent_shell(
             r#"
@@ -521,15 +791,13 @@ mod tests {
 
     #[test]
     fn neutral_credential_seal_rejects_files_directives_and_authenticated_urls() {
-        let output = run_resume_agent_shell(
+        #[cfg(not(target_os = "linux"))]
+        return;
+        #[cfg(target_os = "linux")]
+        let output = run_agent_shell(
             r#"
-            set -- __rooms_test_library__
             ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
             . "$AGENT"
-            PROVISION_AGENT="$AGENT"
-            # The resume agent and provision agent intentionally have different
-            # library guards; source the policy helpers from the latter too.
-            ROOMS_AGENT_LIBRARY_ONLY=1 . "$(dirname "$PROVISION_AGENT")/rooms-provision-agent.sh"
 
             tmp="$(mktemp -d)"
             trap 'rm -rf "$tmp"' EXIT
@@ -585,6 +853,7 @@ mod tests {
             [ "$(git config --file "$ROOMS_HOME/.gitconfig" rooms.keep)" = unchanged ]
             "#,
         );
+        #[cfg(target_os = "linux")]
         assert!(
             output.status.success(),
             "{}",
@@ -592,213 +861,113 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn resume_git_identity_is_deterministic_distinct_and_credential_free() {
-        let output = run_resume_agent_shell(
-            r#"
-            set -- __rooms_test_library__
-            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
-            . "$AGENT"
-            tmp="$(mktemp -d)"
-            trap 'rm -rf "$tmp"' EXIT
-            first_id=01aaaaaaaaaaaaaaaaaaaaaaaa
-            second_id=01bbbbbbbbbbbbbbbbbbbbbbbb
-            write_git_identity "$first_id" "$tmp/first"
-            write_git_identity "$first_id" "$tmp/repeat"
-            write_git_identity "$second_id" "$tmp/second"
-            printf '[user]\n\tname = rooms %s\n\temail = %s@rooms.invalid\n' \
-                "$first_id" "$first_id" >"$tmp/expected"
-            cmp -s "$tmp/first" "$tmp/expected"
-            cmp -s "$tmp/first" "$tmp/repeat"
-            ! cmp -s "$tmp/first" "$tmp/second"
-            [ "$(git config --file "$tmp/first" --get user.name)" = "rooms $first_id" ]
-            [ "$(git config --file "$tmp/first" --get user.email)" = "$first_id@rooms.invalid" ]
-            ! grep -qi credential "$tmp/first"
-            "#,
+    fn native_resume_parser_accepts_exact_frames_without_consuming_the_next_header() {
+        let mut input = b"ENTROPY 64\n".to_vec();
+        input
+            .extend_from_slice(b"0123456789012345678901234567890123456789012345678901234567890123");
+        input.extend_from_slice(
+            b"IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK 1700000000\nSECRETS 11\nTOKEN=test\nEND 0\n",
         );
+        let output = run_resume_parser(&input);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.starts_with("ROOMS-RESUME/1\n"), "{stdout}");
+        assert!(
+            stdout.contains("PARSED 01aaaaaaaaaaaaaaaaaaaaaaaa 1700000000 11"),
+            "{stdout}"
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn resume_generates_one_fresh_ed25519_key_and_pins_sshd_to_it() {
-        let output = run_resume_agent_shell(
-            r#"
-            set -- __rooms_test_library__
-            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
-            . "$AGENT"
-            tmp="$(mktemp -d)"
-            trap 'rm -rf "$tmp"' EXIT
-            SSH_HOST_KEY_DIR="$tmp/ssh"
-            SSH_HOST_KEY="$SSH_HOST_KEY_DIR/ssh_host_ed25519_key"
-            SSHD_SOURCE_CONFIG="$tmp/sshd_config.source"
-            SSHD_CONFIG="$tmp/sshd_config.runtime"
-            SSHD_RUNTIME_DIR="$tmp/run-sshd"
-            ROOT_UID="$(id -u)"
-            ROOT_GID="$(id -g)"
-            # Production validates Linux ownership with GNU/BusyBox stat. This
-            # cross-platform unit owns only config/key semantics; the Linux
-            # guest test exercises the real runtime-directory helper.
-            prepare_sshd_runtime_dir() { mkdir -p "$SSHD_RUNTIME_DIR"; }
-            mkdir "$SSH_HOST_KEY_DIR"
-            printf old >"$SSH_HOST_KEY_DIR/ssh_host_rsa_key"
-            printf sentinel >"$tmp/sentinel"
-            ln -s "$tmp/sentinel" "$SSH_HOST_KEY_DIR/ssh_host_ecdsa_key"
-            cat >"$SSHD_SOURCE_CONFIG" <<'EOF'
-HostKey /etc/ssh/ssh_host_rsa_key
-Include /etc/ssh/sshd_config.d/*.conf
-HostKey=/tmp/equal-alternate
-HostCertificate = /tmp/equal-certificate
-HostKeyAgent=/tmp/equal-agent
-Include=/tmp/equal-include.conf
-PermitRootLogin no
-Match User nobody
-    X11Forwarding no
-EOF
-
-            fresh_ssh_host_key
-            first="$(cat "$SSH_HOST_KEY.pub")"
-            [ "$(find "$SSH_HOST_KEY_DIR" -mindepth 1 -maxdepth 1 -print | wc -l)" -eq 2 ]
-            [ -f "$SSH_HOST_KEY" ] && [ ! -L "$SSH_HOST_KEY" ]
-            [ -f "$SSH_HOST_KEY.pub" ] && [ ! -L "$SSH_HOST_KEY.pub" ]
-            [ "$(cat "$tmp/sentinel")" = sentinel ]
-            ssh_host_key_pair_matches "$SSH_HOST_KEY" "$SSH_HOST_KEY.pub"
-            pin_sshd_to_fresh_host_key
-            pinned_sshd_config_is_safe "$SSHD_CONFIG" "$SSH_HOST_KEY"
-            [ "$(grep -ci '^[[:space:]]*HostKey[[:space:]]' "$SSHD_CONFIG")" -eq 1 ]
-            ! grep -Eqi '^[[:space:]]*(HostKey|HostCertificate|HostKeyAgent|Include)[[:space:]]*=' \
-                "$SSHD_CONFIG"
-            ! grep -qi '^[[:space:]]*Include[[:space:]]' "$SSHD_CONFIG"
-            printf 'hostkey %s\n' "$SSH_HOST_KEY" \
-                | effective_sshd_host_keys_are_safe "$SSH_HOST_KEY"
-            ! printf 'hostkey %s\nhostkey /tmp/alternate\n' "$SSH_HOST_KEY" \
-                | effective_sshd_host_keys_are_safe "$SSH_HOST_KEY"
-
-            fresh_ssh_host_key
-            second="$(cat "$SSH_HOST_KEY.pub")"
-            [ "$first" != "$second" ]
-            mkdir "$SSH_HOST_KEY_DIR/ssh_host_bad_key"
-            if (fresh_ssh_host_key) >/dev/null 2>&1; then
-                exit 1
-            fi
-            "#,
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    fn native_resume_parser_rejects_unbounded_or_malformed_control_data() {
+        let cases: &[&[u8]] = &[
+            b"ENTROPY 65\n",
+            b"ENTROPY 64\nshort",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01abc;touchxxxxxxxxxxxxxxxx\nCLOCK 1700000000\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa extra\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK -1\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK 1700000000\nSECRETS 1048577\n",
+        ];
+        for input in cases {
+            let output = run_resume_parser(input);
+            assert!(
+                !output.status.success(),
+                "malformed input unexpectedly passed: {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
-    fn resume_prepares_an_exact_owned_sshd_runtime_directory() {
-        let output = run_resume_agent_shell(
-            r#"
-            set -- __rooms_test_library__
-            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
-            . "$AGENT"
-            tmp="$(mktemp -d)"
-            trap 'rm -rf "$tmp"' EXIT
-            SSHD_RUNTIME_DIR="$tmp/run-sshd"
-            ROOT_UID="$(id -u)"
-            ROOT_GID="$(id -g)"
-            prepare_sshd_runtime_dir
-            [ ! -L "$SSHD_RUNTIME_DIR" ] && [ -d "$SSHD_RUNTIME_DIR" ]
-            [ "$(stat -c '%u:%g' "$SSHD_RUNTIME_DIR")" = "$ROOT_UID:$ROOT_GID" ]
-            [ "$(stat -c '%a' "$SSHD_RUNTIME_DIR")" = 755 ]
-            "#,
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    fn native_resume_requires_the_exact_safe_reachable_sshd_policy() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_build, binary) = compile_resume_helper();
+        let root = tempfile::tempdir().expect("native sshd-config root");
+        let ssh_dir = root.path().join("etc/ssh");
+        std::fs::create_dir_all(&ssh_dir).expect("create ssh config directory");
+        let config = ssh_dir.join("sshd_config.rooms-resume");
+        let run = |content: &str| {
+            std::fs::write(&config, content).expect("write native sshd config fixture");
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644))
+                .expect("protect native sshd config fixture");
+            std::process::Command::new(&binary)
+                .args([
+                    "--test-config",
+                    root.path().to_str().expect("utf-8 config root"),
+                ])
+                .output()
+                .expect("validate native sshd config fixture")
+        };
+        let safe = canonical_resume_sshd_config();
+        assert!(run(&safe).status.success());
+        let unsafe_configs = [
+            safe.replace("ListenAddress 0.0.0.0", "ListenAddress 127.0.0.1"),
+            safe.replace("PermitRootLogin no", "PermitRootLogin yes"),
+            safe.replace("PasswordAuthentication no", "PasswordAuthentication yes"),
+            safe.replace("AllowTcpForwarding no", "AllowTcpForwarding yes"),
+            safe.replace(
+                "HostKey /etc/ssh/ssh_host_ed25519_key\n",
+                "HostKey /etc/ssh/ssh_host_ed25519_key\nHostKey /tmp/alternate\n",
+            ),
+            safe.replace("AllowUsers rooms\n", ""),
+        ];
+        for unsafe_config in unsafe_configs {
+            assert!(!run(&unsafe_config).status.success(), "{unsafe_config}");
+        }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn resume_repository_git_identity_overrides_only_author_and_rejects_symlink() {
-        let output = run_resume_agent_shell(
-            r#"
-            set -- __rooms_test_library__
-            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
-            . "$AGENT"
-            tmp="$(mktemp -d)"
-            trap 'rm -rf "$tmp"' EXIT
-            room_id=01aaaaaaaaaaaaaaaaaaaaaaaa
+    fn native_resume_stages_exact_identity_and_rejects_symlink_destinations() {
+        let (_build, binary) = compile_resume_helper();
+        let root = tempfile::tempdir().expect("native resume staging root");
+        prepare_hostile_worktree_config(root.path());
 
-            git init -q "$tmp/repo"
-            git -C "$tmp/repo" config user.name inherited
-            git -C "$tmp/repo" config user.email inherited@example.com
-            git -C "$tmp/repo" config rooms.keep unchanged
-            update_repository_git_identity "$room_id" "$tmp/repo"
-            [ "$(git -C "$tmp/repo" config user.name)" = "rooms $room_id" ]
-            [ "$(git -C "$tmp/repo" config user.email)" = "$room_id@rooms.invalid" ]
-            [ "$(git -C "$tmp/repo" config rooms.keep)" = unchanged ]
-
-            git init -q "$tmp/hostile"
-            cp "$tmp/hostile/.git/config" "$tmp/sentinel"
-            rm "$tmp/hostile/.git/config"
-            ln -s "$tmp/sentinel" "$tmp/hostile/.git/config"
-            cp "$tmp/sentinel" "$tmp/before"
-            if (update_repository_git_identity "$room_id" "$tmp/hostile") >/dev/null 2>&1; then
-                exit 1
-            fi
-            cmp -s "$tmp/sentinel" "$tmp/before"
-            "#,
-        );
+        let room_id = "01aaaaaaaaaaaaaaaaaaaaaaaa";
+        let output = std::process::Command::new(&binary)
+            .args([
+                "--test-stage",
+                root.path().to_str().expect("utf-8 temp path"),
+                room_id,
+            ])
+            .output()
+            .expect("stage native resume metadata");
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    #[test]
-    fn resume_library_hook_requires_both_private_argument_and_environment() {
-        let output = run_resume_agent_shell(
-            r#"
-            if ROOMS_AGENT_LIBRARY_ONLY=1 /bin/sh "$AGENT" invalid >/dev/null 2>&1; then
-                exit 1
-            fi
-            if /bin/sh "$AGENT" __rooms_test_library__ >/dev/null 2>&1; then
-                exit 1
-            fi
-            "#,
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn resume_git_identity_rejects_shell_metacharacters_before_writing() {
-        let output = run_resume_agent_shell(
-            r#"
-            set -- __rooms_test_library__
-            ROOMS_AGENT_LIBRARY_ONLY=1; export ROOMS_AGENT_LIBRARY_ONLY
-            . "$AGENT"
-            tmp="$(mktemp -d)"
-            trap 'rm -rf "$tmp"' EXIT
-            sentinel="$tmp/pwned"
-            bad="01abc; touch $sentinel"
-            if (write_git_identity "$bad" "$tmp/config") >/dev/null 2>&1; then
-                exit 1
-            fi
-            [ ! -e "$tmp/config" ]
-            [ ! -e "$sentinel" ]
-            "#,
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_staged_identity_is_effective(root.path(), room_id);
+        assert_native_stage_rejects_config_symlink(&binary, room_id);
     }
 
     #[cfg(target_os = "linux")]

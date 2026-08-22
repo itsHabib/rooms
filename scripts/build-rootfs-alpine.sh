@@ -173,6 +173,34 @@ apk update
 apk add --no-cache "claude-code=$CLAUDE_VERSION"
 CHROOT_INSTALL
 
+log "building static post-resume hygiene helper inside native Alpine chroot"
+install -m 0644 "${SCRIPT_DIR}/lib/rooms-resume-apply.c" \
+    "$MNT/tmp/rooms-resume-apply.c"
+chroot "$MNT" /bin/sh -s <<'CHROOT_RESUME_HELPER'
+set -e
+apk add --no-cache --virtual .rooms-resume-build-deps gcc musl-dev linux-headers
+# This is the sole process retained in the clone snapshot. It is compiled
+# without a stack canary deliberately: a canary initialized before the
+# snapshot would become shared secret state across every clone. The receiver
+# has no userspace DRBG, parses bounded trusted-host frames, reseeds the kernel
+# immediately after the first ENTROPY frame, and exits before workload ingress.
+cc -std=c11 -Os -static-pie -fno-stack-protector -D_FORTIFY_SOURCE=2 \
+    -Wall -Wextra -Werror -Wl,-z,relro,-z,now \
+    -o /sbin/rooms-resume-apply /tmp/rooms-resume-apply.c
+if readelf -l /sbin/rooms-resume-apply | grep -q 'INTERP'; then
+    echo "rooms-resume-apply unexpectedly has a dynamic interpreter" >&2
+    exit 1
+fi
+if readelf -sW /sbin/rooms-resume-apply | grep -Eq '__stack_chk_(fail|guard)'; then
+    echo "retained rooms-resume-apply unexpectedly carries a shared stack canary" >&2
+    exit 1
+fi
+strip /sbin/rooms-resume-apply
+chmod 0755 /sbin/rooms-resume-apply
+rm -f /tmp/rooms-resume-apply.c
+apk del .rooms-resume-build-deps
+CHROOT_RESUME_HELPER
+
 log "installing overlay-init (read-only rootfs + tmpfs overlay at boot)"
 install -d -m 0755 "$MNT/mnt" "$MNT/oldroot"
 install -m 0755 "${SCRIPT_DIR}/lib/overlay-init.sh" "$MNT/sbin/overlay-init"
@@ -284,6 +312,39 @@ for env_var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN; d
     fi
 done
 
+# Snapshot restores never use the distribution config directly. This small,
+# immutable policy has exactly one guest-generated HostKey and no include,
+# certificate, or agent escape hatch. The native helper validates both this
+# source and one `sshd -T` expansion before it starts the daemon.
+cat >"$MNT/etc/ssh/sshd_config.rooms-resume" <<'EOF'
+Port 22
+AddressFamily inet
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+UseDNS no
+AllowUsers rooms
+AuthorizedKeysFile .ssh/authorized_keys
+StrictModes yes
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PrintMotd no
+AcceptEnv ANTHROPIC_API_KEY
+AcceptEnv CLAUDE_CODE_OAUTH_TOKEN
+AcceptEnv ANTHROPIC_AUTH_TOKEN
+Subsystem sftp internal-sftp
+EOF
+chmod 0644 "$MNT/etc/ssh/sshd_config.rooms-resume"
+
 log "creating ${GUEST_USER} user + enabling services"
 chroot "$MNT" /bin/sh -s -- "$GUEST_USER" "$GUEST_UID" <<'CHROOT_CONFIG'
 set -e
@@ -377,6 +438,18 @@ if [[ -n "$EXTEND" ]]; then
         rm -f "$MNT/tmp/$(basename "$asset")"
     done
 fi
+
+# The extension hook is trusted customization but must not silently replace a
+# root executable or weaken the exact restore policy that the sealed snapshot
+# relies on. Validate after the hook, immediately before publication.
+for executable in \
+    /sbin/rooms-resume-apply /usr/bin/ssh-keygen /usr/bin/sudo \
+    /usr/sbin/sshd /usr/sbin/visudo; do
+    [[ -f "$MNT$executable" && ! -L "$MNT$executable" && -x "$MNT$executable" ]] \
+        || fatal "post-resume executable is missing, linked, or not executable: $executable"
+done
+chroot "$MNT" /sbin/rooms-resume-apply --prewarm \
+    || fatal "native post-resume helper rejected the final built image policy"
 
 log "syncing and unmounting"
 sync
