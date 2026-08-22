@@ -4,6 +4,9 @@ All notable changes to rooms are documented here. Format adapted from [keepachan
 
 ## [Unreleased]
 
+### Added
+- `rooms clone <snapshot> -n 1..8` for bounded snapshot fan-out with per-clone network namespaces, veth/NAT identity, post-resume hygiene, witness/egress custody, deterministic batch records, and exact teardown.
+
 ## [0.1.0] — TBD
 
 ### Added

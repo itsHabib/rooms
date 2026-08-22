@@ -1,6 +1,6 @@
 # snapshot / fork / replay — Technical Design Document
 
-**Status:** Phase 2 implemented; exact-head killer, review, and Gate remain before landing.
+**Status:** Phase 2 Rooms substrate implemented; one retained exact-head run reached terminal audit with every named hard check green but both performance gates failed; distinct-task consumer, review, and Gate remain before landing.
 **Owner:** @itsHabib
 **Date:** 2026-07-26
 **Related:** [`docs/vision.md`](../../vision.md) (v0.2 roadmap line) · [`docs/features/vsock-secrets/spec.md`](../vsock-secrets/spec.md) (the per-clone identity channel this extends) · [`docs/features/host-witness/spec.md`](../host-witness/spec.md) + egress work (the per-clone observability this composes with) · memory `rooms-redirect-away-from-custody` (why this is the bet) · Firecracker `docs/snapshotting/{snapshot-support,random-for-clones,network-for-clones,versioning}.md`
@@ -26,6 +26,15 @@
 > performs the clock/identity/key/daemon transaction and ACKs only after effective-policy probes pass.
 > `scripts/phase2-killer.sh` is the fail-closed host gate. No performance or `/work-driver`
 > integration claim is complete until its named evidence exists.
+>
+> **v7 (2026-08-22)** — exact-head host-proof reconciliation. The retained run at code head
+> `52a361c` ([public summary projection](../../experiments/phase2-killer-2026-08-22-summary.public.json)) reached terminal audit with zero hard failures: flat
+> restore, eight-clone readiness, topology, two-hop return, identity/clock/RNG/key hygiene,
+> cross-clone isolation, eight distinct witnesses, exact teardown, and the final leak audit all
+> passed. The harness exited 1 and the full gate remains open: readiness measured 48.608 s against `<1s`, fleet PSS measured
+> 156,474 KiB against a `<114,696 KiB` bound, and the workload was an eight-way broadcast rather
+> than eight independently dispatched `/work-driver` tasks. Tasks 2b/2c are therefore functionally
+> demonstrated pending reviewed landing; task 2d remains open.
 >
 > **Reviewers — focus areas:**
 > - **§4 D2 + §7 A** — neutrality *by construction*: the sealed neutral-base boot mode + monotonic `provenance` state. This is the load-bearing security rule; if a base can be tainted after the neutrality check, the design leaks secrets into `snapshot.mem`.
@@ -505,7 +514,7 @@ stale clock, or a secret from the base snapshot.**
 | Phase | Goal | High-level tasks | Depends on | Gate |
 |---|---|---|---|---|
 | **1. snapshot-restore — landed** | a sealed neutral base snapshots and restores to a single working room **with full hygiene** | `base-create`, neutral provenance, recoverable Full snapshot, persistent reservation, `restore` sibling, immutable backing artifacts, pre-resume custody, hygiene ACK, and exact teardown | Firecracker snapshot GA | current branch re-exercises the neutral base → snapshot → one-clone host path |
-| **2. fork-clones — implemented, not yet landed** | N clones from one snapshot, each isolated — the differentiated payoff | indexed CloneNet allocator + namespace/veth/two-hop NAT; multi-lessee reservation; prepared-source concurrent restore; namespace-aware runner/witness/egress; deterministic `rooms clone -n 1..8`; crash/cancellation cleanup | phase 1 | **VALIDATION GATE** (killer demo) below, then exact-head review and Gate |
+| **2. fork-clones — implemented, hard-check evidence retained, not yet landed** | N clones from one snapshot, each isolated — the differentiated payoff | indexed CloneNet allocator + namespace/veth/two-hop NAT; multi-lessee reservation; prepared-source concurrent restore; namespace-aware runner/witness/egress; deterministic `rooms clone -n 1..8`; crash/cancellation cleanup | phase 1 | one terminal-audit run passed every named hard check; literal performance and consumer gates remain below; then review and Gate |
 | **3. checkpoint-receipts + hardening** (stub) | replay-rescope vocabulary + fleet ergonomics | checkpoint receipt as a first-class artifact (D5); snapshot GC/retention; FC-upgrade library-invalidation ergonomics; UFFD only if density missed | phase 2 + gate | each item needs a demonstrated need first |
 
 Phase 2 is intentionally one integrated reviewed slice because the safety argument crosses allocator,
@@ -544,6 +553,14 @@ dispatch path selected Rooms and produced eight independently tracked tasks. Tha
 require a separate Ship change and cannot be inferred from eight broadcast shell commands.
 Phase 3 is not committed until this passes.
 
+**Observed 2026-08-22:** [retained proof `zA3P`](../../experiments/phase2-killer-2026-08-22.md)
+at code head `52a361c` passed every
+Rooms-owned functional and safety assertion with zero hard failures, including (d), (e), the
+unchanged flat restore path, shared snapshot inode, reservation return, and terminal cleanup. It
+missed (a) at 48.608 s and the literal `<2×` form of (b) at 156,474 KiB versus a 57,348 KiB
+single-clone baseline; (c) was deliberately not claimed. The summary therefore records
+`rooms_subgate_completed: true` and `full_phase2_gate_completed: false`.
+
 ## 10. Remaining questions
 
 1. **Consumer selection.** What is the smallest Ship `/work-driver` adapter that selects
@@ -567,10 +584,18 @@ fleet, tears it down exactly, then runs eight witnessed command-mode repository 
 fails on `>=1s`, aggregate fleet PSS `>=2×` the one-clone baseline, duplicated post-reseed draws or
 fresh-key evidence,
 missing namespace/NAT return traffic, sibling reachability, mutable/substituted artifacts, incomplete
-or aliased pcaps, reservation drift, or any proof-owned residue. A passing Rooms subgate summary has
-`status: "partial"` and still records that
-`/work-driver` consumer integration is outside its evidence; that separately tracked acceptance item
-must remain open until an actual consumer run exists.
+or aliased pcaps, reservation drift, or any proof-owned residue. The field
+`rooms_subgate_completed: true` means the harness reached its terminal audit; it is not a pass
+verdict. A Rooms-subgate pass additionally requires zero hard and performance failures, exit 0,
+and summary `status: "partial"`. The overall summary keeps
+`full_phase2_gate_completed: false` because
+`/work-driver` consumer integration is outside this evidence and its separately tracked acceptance
+item remains open until an actual consumer run exists.
+
+The host's AppArmor profile denies `tcpdump` direct access beneath the hidden proof home. Raw-pcap
+verification therefore has a privileged shell pre-open the already-canonical custody file before it
+execs `tcpdump -r -` on stdin, and requires nonempty filtered output because `tcpdump` returns zero at
+a clean no-match EOF.
 
 ## 12. Changelog
 
@@ -657,3 +682,10 @@ verified accurate; the holes were in ordering, verifiability, and staging.
   latency, PSS, shared inode, bidirectional two-hop NAT, isolation, key/RNG/clock identity, eight
   witnesses, reservation return, and terminal leak checks. `/work-driver` adoption remains a
   separately named consumer gate.
+
+**v7 (2026-08-22) — exact host proof.**
+- Closed proof-clock, finalizer, streamed-JSON custody, signal-time summary, and AppArmor-confined
+  pcap-verification gaps without weakening the safety path or host confinement.
+- Retained a terminal-audit eight-clone run with zero hard failures and split its result honestly: the Rooms-owned 2b/2c
+  substrate is demonstrated, while 2d keeps the measured latency, PSS, and distinct-task consumer
+  gaps open.

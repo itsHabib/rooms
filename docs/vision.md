@@ -10,7 +10,7 @@ The primitive:
 
 `rooms` is a Rust CLI that turns that lifecycle into an isolation substrate. A consumer passes a deps spec (today: a prebuilt rootfs image), a repo, and a command. The cold `run` path boots an ephemeral microVM, lands the repo inside, runs the command, collects stdout/stderr/exit code and any output artifacts back to the host, and tears the VM down.
 
-The warm path creates a credential-free base, snapshots it, and restores one room or up to eight isolated clones from the shared immutable state. That Phase-2 substrate is implemented on the current branch; it is not landed until its exact-head killer, review, and Gate pass. Snapshot artifacts persist as explicit operator-retained evidence. Live rooms remain ephemeral.
+The warm path creates a credential-free base, snapshots it, and restores one room or up to eight isolated clones from the shared immutable state. That Phase-2 Rooms substrate is implemented on the current branch. One retained exact-head host run reached terminal audit with every named hard check green, but it exited 1 because both performance gates failed; the code is not landed until review and Gate pass. Its distinct-task consumer adapter also remains open. Snapshot artifacts persist as explicit operator-retained evidence. Live rooms remain ephemeral.
 
 **Lifecycle (canonical interface):**
 
@@ -85,7 +85,7 @@ Check README status and spec docs for the exact landed boundary. In particular, 
 | Milestone | Scope |
 | --- | --- |
 | **Cold substrate (landed)** | `run`: jailer boot, SSH command/runner execution, artifact collection, exact teardown, runner contract, rootfs builder, and host diagnostics. |
-| **Warm Rooms substrate (implemented on this branch)** | `base-create` → immutable `snapshot` → `restore` / `clone -n 1..8`; namespace/NAT isolation, restore hygiene, bounded leases, witness custody, and exact teardown. Exact-head killer, review, and Gate still precede landing. |
+| **Warm Rooms substrate (implemented; hard-check evidence retained)** | `base-create` → immutable `snapshot` → `restore` / `clone -n 1..8`; namespace/NAT isolation, restore hygiene, bounded leases, witness custody, and exact teardown. One retained run passed every named hard check but failed both performance gates; review and Gate still precede landing. |
 | **Replay evidence (future)** | Run receipts and comparison semantics that make two restored executions meaningfully replayable, beyond the state-local compatibility attestation, witness, and custody substrate. |
 | **Consumer adoption (future)** | Ship backend plus a `/work-driver` fleet adapter that assigns distinct commands, outputs, and lifecycle streams to the warm clones. |
 | **Deps (future)** | Nix flake as the deps spec (`--flake`). |

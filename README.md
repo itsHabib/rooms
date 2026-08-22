@@ -16,12 +16,14 @@ Disposable Firecracker microVMs with specified deps. The cold path takes a rootf
 - `rooms doctor [--json]` — host-environment checks (KVM, Firecracker + jailer version, dedicated user, TAP, kernel/rootfs, nested virt, checksum drift, `ANTHROPIC_API_KEY`).
 - Firecracker runs under the **jailer** as a dedicated unprivileged `firecracker` user (chroot + bind-mounts); the Alpine agent rootfs boots to sshd in ~2 s.
 
-**Phase 2 is implemented on this branch; its exact-head rooms-host killer, review, and Gate remain before it lands.** It adds:
+**Phase 2's Rooms substrate is implemented on this branch. One retained exact-head rooms-host run reached terminal audit with every named hard check green, but both performance gates failed; review and Gate remain before it lands.** It adds:
 
 - `base-create` → `snapshot` → `restore` for a credential-free warm base and one hygiene-gated restored room.
 - `clone <snapshot> -n 1..8` for bounded concurrent fan-out. Every clone gets its own host network namespace, veth/NAT identity, post-resume identity, fresh SSH host key, and exact teardown; command mode can add per-clone egress enforcement and witness custody.
 - A Linux immutable-inode lifecycle for snapshot backing state: the rootfs builder seals its output, snapshot publication seals `snapshot.vmstate`, `snapshot.mem`, `snapshot.json`, and their directory, and restore verifies the exact bind-mounted/copied jail artifacts before launch and resume. A separate sealed, state-local receipt binds an exact local publication to its rootfs digest; copied, foreign, legacy, or mismatched snapshots fall back to a full image hash.
 - Crash-recoverable snapshot/restore intents, a persistent snapshot slot reservation with bounded clone leases, and deterministic JSON batch records.
+
+The [retained 2026-08-22 rooms-host run](docs/experiments/phase2-killer-2026-08-22.md) at code head `52a361c` reached terminal audit with zero hard failures. It demonstrated the unchanged flat restore, one shared immutable snapshot, eight isolated workload-ready clones, bidirectional two-hop networking, cross-clone blocking, fresh clock/RNG/host/application identity, eight distinct witnessed workloads, exact reservation return, and clean teardown. The harness still exited 1: authenticated fleet readiness took 48.608 s rather than less than one second, fleet PSS was 156,474 KiB rather than less than twice the 57,348 KiB single-clone baseline, and the broadcast workload is not eight independently assigned `/work-driver` tasks.
 
 Still separate work: a Nix flake as the deps spec (`--flake`), ship's `backend: "rooms"`, and the Ship `/work-driver` adapter that maps distinct tasks onto one warm fleet. `rooms clone --command` currently broadcasts the **same command** to every clone; eight independently assigned `/work-driver` tasks are not yet a claim this repository makes. See [`docs/features/snapshot-fork-replay/spec.md`](docs/features/snapshot-fork-replay/spec.md) for the Phase-2 contract and [`docs/vision.md`](docs/vision.md) for the wider roadmap.
 

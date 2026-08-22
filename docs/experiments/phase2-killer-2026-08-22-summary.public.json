@@ -1,0 +1,197 @@
+{
+  "projection_schema_version": 1,
+  "kind": "rooms.phase2-killer.public-summary-projection",
+  "retained_proof_id": "zA3P",
+  "retained_summary_sha256": "40b454048f28500d9b03d502a7f047c8d850d5e987e33e9771fa5e6db01ba2cf",
+  "redactions": [
+    {
+      "json_path": "$.proof_root",
+      "reason": "operator-local filesystem path omitted"
+    },
+    {
+      "json_path": "$.unix_socket_path_budget.worst_case_path",
+      "reason": "operator-local filesystem path omitted; measured_bytes and passes retain the raw summary values"
+    }
+  ],
+  "summary": {
+    "checks": {
+      "cleanup": true,
+      "cross_clone_isolation": true,
+      "eight_witnesses": true,
+      "final_leak_audit": true,
+      "flat_restore_command_path": true,
+      "fresh_image_hash_and_agent": true,
+      "full_phase2_gate_completed": false,
+      "identity_clock_rng_host_keys": true,
+      "pss_density": false,
+      "readiness": true,
+      "rooms_subgate_completed": true,
+      "topology_and_shared_inode": true,
+      "two_hop_return_path": true,
+      "warm_neutral_snapshot": true
+    },
+    "clock_scope_note": "the bounded clock proof assumes host CLOCK_REALTIME makes no offsetting discontinuous steps inside one SSH bracket; the full 100ms endpoint uncertainty is charged against the five-second tolerance",
+    "created_room_ids": [
+      "01m0mpbse7kqw1q50wa49y5xz1",
+      "01m0mpd4be1cwgj5pzrq7htynj",
+      "01m0mpdmd7sshfdvcp22ajkct6",
+      "01m0mpdte243t4wmxtkw3xayph",
+      "01m0mpdte244bk54geyxkgv91d",
+      "01m0mpdte24ekf0vsg8dmx3j0h",
+      "01m0mpdte2ff2g9b9drm3d8sy5",
+      "01m0mpdte2mkxc26xb0jbt46c8",
+      "01m0mpdte2qm9fmtqs1a0n2qmh",
+      "01m0mpdte2wfagaf42f6g4k53j",
+      "01m0mpdte2y8cg6hq3dfjxk3z8",
+      "01m0mpgta35psq9zdr680tqbqp",
+      "01m0mpgta37cdvw5wa26mmbk4p",
+      "01m0mpgta3bn75jy44rh6hr3n7",
+      "01m0mpgta3dfm26anxnjjt3a4t",
+      "01m0mpgta3eprxmrtwjnz8vkvt",
+      "01m0mpgta3fxh8xr16m1wahmdp",
+      "01m0mpgta3gwaqb3spwq77rnqn",
+      "01m0mpgta3p5ctjzt3c7kybe9d"
+    ],
+    "evidence": {
+      "build_hashes": "build-artifacts.sha256",
+      "cargo_config": "cargo-home/config.toml",
+      "cleanup_log": "logs/cleanup.log",
+      "failures": "failures.ndjson",
+      "flat_restore_record": "flat-restore.json",
+      "flat_restore_resource_audit": "flat-restore-resource-audit.tsv",
+      "flat_restore_result": "artifacts/flat-restore/result.json",
+      "fleet_latency": "fleet-ready.ns",
+      "fleet_pss": "fleet-pss.tsv",
+      "fleet_record": "fleet.json",
+      "fleet_topology": "fleet-topology.ndjson",
+      "frozen_repository_after": "frozen-repository.after.manifest",
+      "frozen_repository_before": "frozen-repository.before.manifest",
+      "frozen_repository_manifest": "frozen-repository.manifest.txt",
+      "frozen_source_after": "frozen-source.after.manifest",
+      "frozen_source_archive": "source-tree.tar",
+      "frozen_source_before": "frozen-source.before.manifest",
+      "guest_hygiene": "fleet-guest-evidence.tsv",
+      "host_substrate_after": "host-substrate.after.txt",
+      "host_substrate_before": "host-substrate.before.txt",
+      "native_resume_artifacts": "native-resume-artifacts.tsv",
+      "provenance": "provenance.txt",
+      "pss_tsv_columns": [
+        "room_id",
+        "pid",
+        "pid_starttime",
+        "pss_kb",
+        "pss_anon_kb",
+        "pss_file_kb",
+        "private_dirty_kb",
+        "shared_clean_kb"
+      ],
+      "sealed_artifacts_after": "sealed-proof.after.tsv",
+      "sealed_artifacts_before": "sealed-proof.before.tsv",
+      "single_clone_pss": "single-pss.tsv",
+      "snapshot_hashes": "snapshot-artifacts.sha256",
+      "source_repository_before": "source-repository.before.txt",
+      "source_repository_final": "source-repository.final.txt",
+      "terminal_roster": "final-ls.json",
+      "two_hop_endpoint": {
+        "ip": "198.18.255.254",
+        "port": 37925
+      },
+      "two_hop_requests": "endpoint-requests.ndjson",
+      "vendor_after": "vendor.after.manifest",
+      "vendor_before": "vendor.before.manifest",
+      "witness_batch": "witness-batch.json",
+      "witness_manifest": "witness-manifest.tsv"
+    },
+    "exit_code": 1,
+    "failures": [
+      {
+        "code": "fleet_not_under_one_second",
+        "message": "the eight-clone CLI plus authenticated readiness gate completed in 48607564485ns; literal requirement is <1s (<1000000000ns)",
+        "phase": "eight-clone-live",
+        "severity": "performance"
+      },
+      {
+        "code": "pss_density_missed",
+        "message": "fleet PSS 156474KiB is not below 2x one-clone PSS 57348KiB",
+        "phase": "fleet-memory",
+        "severity": "performance"
+      },
+      {
+        "code": "killer_gate_failed",
+        "message": "killer gate completed with 0 hard and 2 performance failures",
+        "phase": "complete",
+        "severity": "fatal"
+      }
+    ],
+    "flat_restore": {
+      "cleanup_complete": true,
+      "command_succeeded": true,
+      "exact_reservation_returned": true,
+      "live_flat_path": true,
+      "passed": true,
+      "room_id": "01m0mpd4be1cwgj5pzrq7htynj"
+    },
+    "fresh_image": {
+      "image_native_apply_sha256": "cb572a0a67a1a54ee6f2389997f014f8af79e740bb5a48e6ff49aee09dec0573",
+      "image_resume_agent_sha256": "43158e2d8d8092578662d9062d68e453f1361503b2257dbbafb64c7e69650700",
+      "proof_ssh_key_fingerprint": "SHA256:yr6aPu9mvoa+5rilA6jBPDpkm5Bw1PT+yJ2phNS30Jg",
+      "rootfs_sha256": "fd2fcde2a633ab7c79411ea93ef8970bb419d99dfe62f97bfc427d7a2ede0bb7",
+      "source_native_apply_sha256": "84d9c6d31ea36a8935486d2511f7e45fc2fdb7414e6cb17ad4f23219e126e321",
+      "source_resume_agent_sha256": "43158e2d8d8092578662d9062d68e453f1361503b2257dbbafb64c7e69650700",
+      "verified": true
+    },
+    "gate_scope": "rooms_snapshot_fleet_substrate",
+    "performance": {
+      "fleet_pss_kb": 156474,
+      "fleet_ready_elapsed_ns": 48607564485,
+      "fleet_to_naive_pss_ratio": 0.341062,
+      "literal_requirement": "<1s",
+      "literal_under_one_second": false,
+      "memory_breakdown_kb": {
+        "fleet": {
+          "private_dirty": 95496,
+          "pss": 156474,
+          "pss_anon": 95432,
+          "pss_file": 60946,
+          "shared_clean": 346756
+        },
+        "single_clone": {
+          "private_dirty": 14048,
+          "pss": 57348,
+          "pss_anon": 11868,
+          "pss_file": 45472,
+          "shared_clean": 4
+        }
+      },
+      "required_max_ns": 1000000000,
+      "single_clone_pss_kb": 57348
+    },
+    "rng_scope_note": "the retained static receiver has no stack canary or userspace DRBG; it reads ENTROPY first and forces RNDRESEEDCRNG before every post-resume fork/exec; kernel draws plus newly spawned ssh-keygen and sshd keys prove downstream divergence",
+    "schema_version": 2,
+    "snapshot": {
+      "frozen_guest_ip": "172.16.0.6",
+      "id": "01m0mpcsq1e2y1gh2p2vj2rvfv",
+      "local_attestation_sha256": "795d59b3d8dd54c110a6149e4b4b82a9133b98b172eb320bb9c225c67ef97dc2",
+      "memory_bytes": 268435456,
+      "memory_dev_inode": "64769:4980793"
+    },
+    "source": {
+      "head": "52a361c474cc503a293d82c75a98d90063fe8f83",
+      "manifest_sha256": "686f1e48de16b268310efc564966353fe422571ec43f459dd3fec66061219e08",
+      "warmed_repo_head": "52a361c474cc503a293d82c75a98d90063fe8f83"
+    },
+    "status": "failed",
+    "terminal_phase": "complete",
+    "unix_socket_path_budget": {
+      "measured_bytes": 105,
+      "passes": true,
+      "sun_len_bytes": 108
+    },
+    "witness_workload": {
+      "command_exit_code": 0,
+      "max_wall_seconds": 180,
+      "passed": true
+    },
+    "workload_scope_note": "broadcast git-fsck commands prove eight parallel real repo workloads; this gate does not claim /work-driver consumer integration"
+  }
+}
