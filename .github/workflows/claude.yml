@@ -10,25 +10,38 @@ on:
   pull_request_review:
     types: [submitted]
 
-# Serialize the runs that can attest, and ONLY those. The attestation's
-# evidence check looks for claude[bot] output postdating this job's start, so
-# two overlapping review runs on one thread could credit one request with the
-# other's completion comment.
+# Group by thread if and only if this run will invoke Claude — the condition
+# below mirrors the job's `if:` exactly, and must keep mirroring it. Two
+# invariants meet here, and only that equivalence satisfies both:
 #
-# The group must exclude every run that cannot attest, because GitHub keeps a
-# single pending run per group and cancels the older one — and this workflow
-# feeds its own group: claude[bot]'s completion comment and the attestation
-# from github-actions[bot] are both issue_comment events on the same thread.
-# A blanket `claude-<n>` group lets those evict a queued review that then
-# never runs, silently, on exactly the path the group exists to protect.
-# Anything that cannot attest therefore gets a run-unique group.
+#   1. Any two runs that invoke Claude on one thread must serialize. The
+#      attestation's evidence check accepts claude[bot] output postdating this
+#      job's start, so a concurrent run's completion comment would otherwise
+#      credit a review this job never got. `@claude` inside a review body
+#      counts: pull_request_review* invoke Claude too.
+#   2. No run that will NOT invoke Claude may join a thread group. GitHub keeps
+#      one pending run per group and cancels the older, and this workflow feeds
+#      its own group — claude[bot]'s completion comment and the attestation
+#      from github-actions[bot] are both issue_comment events on this thread.
+#      Sharing a group with those lets them silently evict a queued review.
+#
+# Narrower than the `if:` reopens (1); broader reopens (2).
 concurrency:
   group: >-
     ${{
-      (github.event_name == 'issue_comment'
-        && github.event.issue.pull_request
-        && contains(github.event.comment.body, '@claude'))
-      && format('claude-{0}', github.event.issue.number)
+      (
+        (github.event_name == 'issue_comment'
+          && contains(github.event.comment.body, '@claude'))
+        || (github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, '@claude'))
+        || (github.event_name == 'pull_request_review'
+          && contains(github.event.review.body, '@claude'))
+        || (github.event_name == 'issues'
+          && (contains(github.event.issue.body, '@claude')
+            || contains(github.event.issue.title, '@claude')))
+      )
+      && format('claude-{0}',
+        github.event.issue.number || github.event.pull_request.number)
       || format('claude-run-{0}', github.run_id)
     }}
   cancel-in-progress: false
@@ -112,10 +125,10 @@ jobs:
       # original comment timestamp, so "postdates the request" would accept a
       # PREVIOUS serialized run's output; "postdates this job's own start"
       # cannot — under the per-thread concurrency group, nothing else claude
-      # runs on this thread between here and the attestation — the group covers
-      # exactly the attesting runs. It is load-bearing, not hygiene: without it
-      # two overlapping runs race and the one whose own review stubbed can
-      # attest on the other's comment.
+      # runs on this thread between here and the attestation. The window is the
+      # outer bound only — correctness rests on correlating the evidence to
+      # this run's id below, so that a mis-drawn group cannot forge an
+      # attestation on its own.
       - name: Open the evidence window
         id: attest_window
         run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
@@ -229,24 +242,36 @@ jobs:
           # that a review exists: a quota error, a setup failure, or a "I
           # could not inspect the diff" reply all exit 0 — this repo has already
           # shipped a stub review from exactly that path. Require published
-          # evidence from claude[bot], created inside this job's own evidence
-          # window: either a formal review, or an issue comment whose task list
-          # is fully checked ("working…" stubs and error replies have unchecked
-          # boxes or none at all). Missing evidence skips the attestation —
-          # precision over recall, same as the trigger match above.
-          reviews=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
-            | jq -s --arg since "${WINDOW_STARTED_AT}" \
-              '[.[][] | select(.user.login == "claude[bot]" and .submitted_at > $since)] | length' \
-            || echo 0)
+          # evidence from claude[bot]: an issue comment whose task list is fully
+          # checked ("working…" stubs and error replies have unchecked boxes or
+          # none at all). Missing evidence skips the attestation — precision
+          # over recall, same as the trigger match above.
+          #
+          # The evidence must come from THIS invocation, not merely postdate it.
+          # A window alone is only as sound as the serialization around it, and
+          # every trigger that mentions @claude — review bodies and review
+          # comments included — runs Claude and publishes into this same thread.
+          # claude[bot] links the job that produced each comment, so matching
+          # this run's URL correlates the evidence to the exact invocation and
+          # makes a concurrent run's output unusable here however the
+          # concurrency groups happen to be drawn. The window stays as a second
+          # bound. If the action ever drops that link the attestation simply
+          # stops, which is a park — the safe direction.
+          #
+          # No formal-review branch on purpose: a claude[bot] review pinned to
+          # the head is evidence gate counts directly, so it never needed an
+          # attestation, and accepting it here would only add a cross-credit
+          # surface for a path that does not use this step.
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           finished=$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-            | jq -s --arg since "${WINDOW_STARTED_AT}" \
+            | jq -s --arg since "${WINDOW_STARTED_AT}" --arg run "${run_url}" \
               '[.[][] | select(.user.login == "claude[bot]" and .created_at > $since)
+                | select(.body | contains($run))
                 | select((.body | contains("- [x]")) and ((.body | contains("- [ ]")) | not))] | length' \
             || echo 0)
-          if [ "${reviews}" = "0" ] && [ "${finished}" = "0" ]; then
-            echo "no completed claude review published for this request — no attestation"
+          if [ "${finished}" = "0" ]; then
+            echo "no completed claude review published by this run — no attestation"
             exit 0
           fi
           echo "attesting claude review of ${head_sha}"
