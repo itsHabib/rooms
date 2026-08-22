@@ -10,6 +10,14 @@ on:
   pull_request_review:
     types: [submitted]
 
+# One run per PR/issue at a time: the attestation's evidence check looks for
+# claude[bot] output postdating the triggering request, and overlapping runs
+# on the same thread could credit one request with another job's completion
+# comment. Serializing removes the race; queued runs still execute.
+concurrency:
+  group: claude-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   claude:
     if: |
@@ -85,6 +93,13 @@ jobs:
           # kills @claude review on any PR that adds files.
           fetch-depth: 0
 
+      # Anchors the attestation's evidence window. A queued request keeps its
+      # original comment timestamp, so "postdates the request" would accept a
+      # PREVIOUS serialized run's output; "postdates this job's own start"
+      # cannot — under the per-thread concurrency group, nothing else claude
+      # runs on this thread between here and the attestation. The group is
+      # load-bearing, not hygiene: without it two overlapping runs race and the
+      # one whose own review stubbed can attest on the other's comment.
       - name: Open the evidence window
         id: attest_window
         run: echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
