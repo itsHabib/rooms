@@ -31,11 +31,16 @@ pub const QUIESCED_PORT: u32 = 5002;
 pub const RESUME_PORT: u32 = 5003;
 
 #[cfg(unix)]
-const RESUME_PREFACE: &str = "ROOMS-RESUME/1";
+const RESUME_PREFACE: &str = "ROOMS-RESUME/2";
 #[cfg(unix)]
 const RESUME_PREFACE_MAX_CANDIDATES: usize = 8;
 #[cfg(unix)]
 const RESUME_PREFACE_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+/// CLOCK carries integer seconds. Requiring the matching application proof in
+/// strictly less than four seconds leaves the remaining second for truncation,
+/// so the guest cannot start sshd with a clock five seconds stale.
+#[cfg(unix)]
+const RESUME_CLOCK_APPLY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// The guest's own CID (must be ≥ 3). With the hybrid UDS model there is no
 /// host-wide CID namespace to collide in — isolation comes from the per-jail
@@ -338,9 +343,10 @@ async fn read_bounded_line(stream: &mut tokio::net::UnixStream) -> Result<String
 /// Carries the new room/run identity, fresh entropy, and the admitted secrets
 /// (empty when none were requested — the guest still walks one deterministic
 /// protocol either way). The host clock is sampled only after the resumed
-/// guest supplies the exact protocol preface, immediately before the CLOCK
-/// frame is written; capturing it when this payload is armed would bake the
-/// snapshot-load and resume latency into every restored guest's clock skew.
+/// guest finishes expensive pre-ingress hygiene and sends `READY clock`.
+/// Capturing it when this payload is armed, or even at the initial preface,
+/// would bake snapshot-load, key-generation, and scheduling latency into the
+/// restored guest's clock skew.
 pub struct ResumePayload {
     /// The restored room's id — the guest's new identity.
     pub room_id: String,
@@ -351,6 +357,8 @@ pub struct ResumePayload {
     /// [`SecretsPayload`] wire shape; overwritten on drop with it.
     pub secrets: SecretsPayload,
     clock: ResumeClock,
+    clock_challenge: String,
+    continue_challenge: String,
 }
 
 enum ResumeClock {
@@ -360,14 +368,19 @@ enum ResumeClock {
 }
 
 impl ResumePayload {
-    /// Build a production payload whose wall clock is sampled at delivery.
+    /// Build a production payload whose wall clock is sampled at the guest's
+    /// late application barrier. One challenge remains private until CLOCK,
+    /// and an independent challenge remains private until CONTINUE, so the
+    /// guest cannot prequeue either application or ingress acknowledgement.
     #[must_use]
-    pub const fn new(room_id: String, entropy: Vec<u8>, secrets: SecretsPayload) -> Self {
+    pub fn new(room_id: String, entropy: Vec<u8>, secrets: SecretsPayload) -> Self {
         Self {
             room_id,
             entropy,
             secrets,
             clock: ResumeClock::AtDelivery,
+            clock_challenge: ulid::Ulid::new().to_string().to_lowercase(),
+            continue_challenge: ulid::Ulid::new().to_string().to_lowercase(),
         }
     }
 
@@ -380,7 +393,7 @@ impl ResumePayload {
     }
 
     #[cfg(test)]
-    const fn with_fixed_epoch(
+    fn with_fixed_epoch(
         room_id: String,
         epoch_secs: i64,
         entropy: Vec<u8>,
@@ -391,6 +404,8 @@ impl ResumePayload {
             entropy,
             secrets,
             clock: ResumeClock::Fixed(epoch_secs),
+            clock_challenge: ulid::Ulid::new().to_string().to_lowercase(),
+            continue_challenge: ulid::Ulid::new().to_string().to_lowercase(),
         }
     }
 }
@@ -585,10 +600,244 @@ async fn accept_resume_agent(
     ))
 }
 
+#[cfg(unix)]
+async fn read_resume_record(
+    stream: &mut tokio::net::UnixStream,
+    room_id: &str,
+    connected_at: &std::time::Instant,
+    last_step: Option<&str>,
+) -> Result<String, String> {
+    let step = last_step.unwrap_or("none");
+    let line = read_bounded_line(stream).await.map_err(|error| {
+        tracing::warn!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+            last_step = step, %error, "resume: guest stream ended before ack");
+        format!(
+            "resume protocol for room {room_id} ended after last successful STEP {step}: {error}"
+        )
+    })?;
+    if let Some(error) = line.strip_prefix("ERR ").filter(|value| !value.is_empty()) {
+        tracing::warn!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+            last_step = step, guest_error = error, "resume: guest hygiene failed");
+        return Err(format!(
+            "resume guest error for room {room_id} after last successful STEP {step}: {error}"
+        ));
+    }
+    Ok(line)
+}
+
+#[cfg(unix)]
+async fn expect_resume_record(
+    stream: &mut tokio::net::UnixStream,
+    room_id: &str,
+    connected_at: &std::time::Instant,
+    last_step: Option<&str>,
+    expected: &str,
+) -> Result<(), String> {
+    let line = read_resume_record(stream, room_id, connected_at, last_step).await?;
+    if line != expected {
+        return Err(format!(
+            "resume protocol for room {room_id}: expected {expected:?}, got {line:?} after last successful STEP {}",
+            last_step.unwrap_or("none")
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn record_resume_step(
+    room_id: &str,
+    connected_at: &std::time::Instant,
+    progress: &std::sync::Mutex<Option<String>>,
+    last_step: &mut Option<String>,
+    step: &str,
+) {
+    tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+        step, "resume: guest hygiene step");
+    if let Ok(mut latest) = progress.lock() {
+        *latest = Some(step.to_owned());
+    }
+    *last_step = Some(step.to_owned());
+}
+
+#[cfg(unix)]
+async fn expect_resume_step(
+    stream: &mut tokio::net::UnixStream,
+    room_id: &str,
+    connected_at: &std::time::Instant,
+    progress: &std::sync::Mutex<Option<String>>,
+    last_step: &mut Option<String>,
+    expected_step: &str,
+) -> Result<(), String> {
+    let expected = format!("STEP {expected_step}");
+    expect_resume_record(
+        stream,
+        room_id,
+        connected_at,
+        last_step.as_deref(),
+        &expected,
+    )
+    .await?;
+    record_resume_step(room_id, connected_at, progress, last_step, expected_step);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_clock_application_elapsed(
+    room_id: &str,
+    last_step: Option<&str>,
+    elapsed: std::time::Duration,
+) -> Result<(), String> {
+    if elapsed < RESUME_CLOCK_APPLY_MAX {
+        return Ok(());
+    }
+    Err(format!(
+        "resume protocol for room {room_id}: CLOCK application took {}ms, exceeding the strict <{}s freshness budget after last successful STEP {}",
+        elapsed.as_millis(),
+        RESUME_CLOCK_APPLY_MAX.as_secs(),
+        last_step.unwrap_or("none")
+    ))
+}
+
+#[cfg(unix)]
+async fn send_initial_resume_payload(
+    stream: &mut tokio::net::UnixStream,
+    room_id: &str,
+    payload: &ResumePayload,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    write_typed_frame(stream, "ENTROPY", &payload.entropy)
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
+    stream
+        .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: write identity: {error}"))?;
+    write_typed_frame(stream, "SECRETS", &payload.secrets.0)
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
+    write_typed_frame(stream, "END", &[])
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))
+}
+
+#[cfg(unix)]
+async fn complete_resume_protocol(
+    stream: &mut tokio::net::UnixStream,
+    room_id: &str,
+    connected_at: &std::time::Instant,
+    payload: &ResumePayload,
+    progress: &std::sync::Mutex<Option<String>>,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut last_step: Option<String> = None;
+    for step in ["reseeded", "identity", "hostkeys", "privilege"] {
+        expect_resume_step(
+            stream,
+            room_id,
+            connected_at,
+            progress,
+            &mut last_step,
+            step,
+        )
+        .await?;
+    }
+    expect_resume_record(
+        stream,
+        room_id,
+        connected_at,
+        last_step.as_deref(),
+        "READY clock",
+    )
+    .await?;
+
+    // Start the monotonic budget before sampling and writing. CLOCK contains
+    // whole seconds, so <4s sample-to-APPLIED plus <1s truncation proves the
+    // value was less than five seconds stale when the guest set it.
+    let clock_started = tokio::time::Instant::now();
+    let epoch_secs = payload.epoch_secs();
+    let challenge = &payload.clock_challenge;
+    stream
+        .write_all(format!("CLOCK {epoch_secs} {challenge}\n").as_bytes())
+        .await
+        .map_err(|error| format!("resume protocol for room {room_id}: write clock: {error}"))?;
+    let expected_applied = format!("APPLIED clock {challenge}");
+    tokio::time::timeout_at(
+        clock_started + RESUME_CLOCK_APPLY_MAX,
+        expect_resume_record(
+            stream,
+            room_id,
+            connected_at,
+            last_step.as_deref(),
+            &expected_applied,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "resume protocol for room {room_id}: CLOCK was not applied within the {}s freshness budget after last successful STEP {}",
+            RESUME_CLOCK_APPLY_MAX.as_secs(),
+            last_step.as_deref().unwrap_or("none")
+        )
+    })??;
+    // Tokio's timeout checks its deadline before polling the inner future. An
+    // immediately-ready socket read may complete in one poll even if that poll
+    // itself was descheduled across the deadline, so the explicit post-read
+    // monotonic check is load-bearing and precedes CONTINUE.
+    let clock_apply_elapsed = clock_started.elapsed();
+    validate_clock_application_elapsed(room_id, last_step.as_deref(), clock_apply_elapsed)?;
+    let continue_challenge = &payload.continue_challenge;
+    stream
+        .write_all(format!("CONTINUE clock {continue_challenge}\n").as_bytes())
+        .await
+        .map_err(|error| {
+            format!("resume protocol for room {room_id}: write clock continuation: {error}")
+        })?;
+    tracing::debug!(room = %room_id,
+        elapsed_ms = %connected_at.elapsed().as_millis(),
+        clock_apply_ms = %clock_apply_elapsed.as_millis(),
+        "resume: fresh clock application acknowledged; releasing ingress gate");
+
+    let expected_clock_step = format!("STEP clock {continue_challenge}");
+    expect_resume_record(
+        stream,
+        room_id,
+        connected_at,
+        last_step.as_deref(),
+        &expected_clock_step,
+    )
+    .await?;
+    record_resume_step(room_id, connected_at, progress, &mut last_step, "clock");
+    expect_resume_step(
+        stream,
+        room_id,
+        connected_at,
+        progress,
+        &mut last_step,
+        "sshd",
+    )
+    .await?;
+    expect_resume_record(
+        stream,
+        room_id,
+        connected_at,
+        last_step.as_deref(),
+        "ACK resume",
+    )
+    .await?;
+    tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
+        last_step = "sshd", "resume: ack received");
+    Ok(())
+}
+
 /// Serve the nudge to the first agent candidate that sends the exact preface:
-/// entropy first, then identity / clock / secrets frames and the terminal ack.
-/// Entropy is deliberately first so the retained receiver can force a kernel
-/// CRNG reseed before it parses any other post-resume field or forks.
+/// entropy first, then identity / secrets frames. The clock is deliberately a
+/// second exchange after expensive hygiene: guest READY, host CLOCK+challenge,
+/// guest APPLIED+challenge, host CONTINUE+fresh challenge, guest STEP+that
+/// challenge. Only then may sshd start and the guest emit the terminal ack.
+/// Entropy remains first so the retained receiver can force a kernel CRNG
+/// reseed before parsing other post-resume fields.
 /// Empty or exact-prefix candidates are retried without sending data; after
 /// the complete preface, the endpoint retires before entropy or secrets leave.
 #[cfg(unix)]
@@ -598,8 +847,6 @@ async fn serve_resume_inner(
     payload: ResumePayload,
     progress: &std::sync::Mutex<Option<String>>,
 ) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
     let room_id = payload.room_id.clone();
     let (mut stream, connected_at) = accept_resume_agent(&listener, &room_id).await?;
     drop(listener);
@@ -607,83 +854,13 @@ async fn serve_resume_inner(
         .map_err(|error| format!("resume protocol for room {room_id}: retire endpoint: {error}"))?;
     tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
         "resume: preface ok, sending nudge frames");
-    write_typed_frame(&mut stream, "ENTROPY", &payload.entropy)
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
-    stream
-        .write_all(format!("IDENTITY {}\n", payload.room_id).as_bytes())
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: write identity: {error}"))?;
-    let epoch_secs = payload.epoch_secs();
-    stream
-        .write_all(format!("CLOCK {epoch_secs}\n").as_bytes())
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: write clock: {error}"))?;
-    write_typed_frame(&mut stream, "SECRETS", &payload.secrets.0)
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
-    write_typed_frame(&mut stream, "END", &[])
-        .await
-        .map_err(|error| format!("resume protocol for room {room_id}: {error}"))?;
+    send_initial_resume_payload(&mut stream, &room_id, &payload).await?;
     tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
-        "resume: frames sent, awaiting hygiene steps + ack");
-    // The guest streams `STEP <name>` progress lines as it applies each
-    // hygiene action, then the terminal `ACK resume`. Logging the steps gives
-    // host-side visibility a snapshot-resumed guest's detached serial can't.
-    // Bounded so a chatty/looping peer can't stream forever.
-    let mut last_step: Option<String> = None;
-    for _ in 0..64 {
-        let line = match read_bounded_line(&mut stream).await {
-            Ok(line) => line,
-            Err(error) => {
-                let step = last_step.as_deref().unwrap_or("none");
-                tracing::warn!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
-                    last_step = step, %error,
-                    "resume: guest stream ended before ack");
-                return Err(format!(
-                    "resume protocol for room {room_id} ended after last successful STEP {step}: {error}"
-                ));
-            }
-        };
-        if line == "ACK resume" {
-            let step = last_step.as_deref().unwrap_or("none");
-            tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
-                last_step = step, "resume: ack received");
-            return Ok(());
-        }
-        if let Some(error) = line.strip_prefix("ERR ").filter(|value| !value.is_empty()) {
-            let step = last_step.as_deref().unwrap_or("none");
-            tracing::warn!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
-                last_step = step, guest_error = error,
-                "resume: guest hygiene failed");
-            return Err(format!(
-                "resume guest error for room {room_id} after last successful STEP {step}: {error}"
-            ));
-        }
-        if let Some(step) = line.strip_prefix("STEP ") {
-            if step.is_empty() {
-                return Err(format!(
-                    "resume protocol for room {room_id}: empty STEP after {:?}",
-                    last_step.as_deref().unwrap_or("none")
-                ));
-            }
-            tracing::debug!(room = %room_id, elapsed_ms = %connected_at.elapsed().as_millis(),
-                step, "resume: guest hygiene step");
-            if let Ok(mut latest) = progress.lock() {
-                *latest = Some(step.to_owned());
-            }
-            last_step = Some(step.to_owned());
-            continue;
-        }
-        return Err(format!(
-            "resume protocol for room {room_id}: unexpected line {line:?} after last successful STEP {}",
-            last_step.as_deref().unwrap_or("none")
-        ));
-    }
-    Err(format!(
-        "resume protocol for room {room_id}: too many lines without an ack after last successful STEP {}",
-        last_step.as_deref().unwrap_or("none")
-    ))
+        "resume: initial frames sent, awaiting ordered hygiene protocol");
+
+    // Exact order is part of the gate. In particular, an early ACK or a
+    // prequeued clock acknowledgement cannot bypass the late clock barrier.
+    complete_resume_protocol(&mut stream, &room_id, &connected_at, &payload, progress).await
 }
 
 /// Bind `listen_path` and serve `payload` to the first connection ever made.
@@ -826,8 +1003,9 @@ mod tests {
 
     use super::{
         listener_path, listener_path_for, serve_one_shot, serve_provisioning, serve_resume,
-        ProvisioningPayload, ResumePayload, SecretsPayload, PROVISION_PORT, QUIESCED_PORT,
-        RESUME_PORT, RESUME_PREFACE_MAX_CANDIDATES, SECRETS_PORT,
+        validate_clock_application_elapsed, ProvisioningPayload, ResumePayload, SecretsPayload,
+        PROVISION_PORT, QUIESCED_PORT, RESUME_CLOCK_APPLY_MAX, RESUME_PORT,
+        RESUME_PREFACE_MAX_CANDIDATES, SECRETS_PORT,
     };
 
     fn payload() -> SecretsPayload {
@@ -875,6 +1053,61 @@ mod tests {
         (kind.to_owned(), bytes)
     }
 
+    fn parse_clock_record(clock: &str) -> (i64, String) {
+        let mut fields = clock.split_whitespace();
+        assert_eq!(fields.next(), Some("CLOCK"), "{clock}");
+        let epoch = fields.next().unwrap().parse().unwrap();
+        let challenge = fields.next().unwrap().to_owned();
+        assert_eq!(fields.next(), None, "{clock}");
+        (epoch, challenge)
+    }
+
+    async fn read_initial_resume_payload(
+        guest: &mut tokio::net::UnixStream,
+    ) -> (Vec<u8>, String, Vec<u8>) {
+        let (entropy_kind, entropy) = read_typed_frame(guest).await;
+        assert_eq!(entropy_kind, "ENTROPY");
+        let identity = read_line(guest).await;
+        let (secrets_kind, secrets) = read_typed_frame(guest).await;
+        assert_eq!(secrets_kind, "SECRETS");
+        assert_eq!(
+            read_typed_frame(guest).await,
+            ("END".to_owned(), Vec::new())
+        );
+        (entropy, identity, secrets)
+    }
+
+    async fn enter_clock_barrier(guest: &mut tokio::net::UnixStream) -> (i64, String) {
+        guest
+            .write_all(
+                b"STEP reseeded\nSTEP identity\nSTEP hostkeys\nSTEP privilege\nREADY clock\n",
+            )
+            .await
+            .unwrap();
+        let clock = read_line(guest).await;
+        parse_clock_record(&clock)
+    }
+
+    async fn acknowledge_clock_and_resume(guest: &mut tokio::net::UnixStream, challenge: &str) {
+        guest
+            .write_all(format!("APPLIED clock {challenge}\n").as_bytes())
+            .await
+            .unwrap();
+        let continuation = read_line(guest).await;
+        let mut fields = continuation.split_whitespace();
+        assert_eq!(fields.next(), Some("CONTINUE"), "{continuation}");
+        assert_eq!(fields.next(), Some("clock"), "{continuation}");
+        let continue_challenge = fields.next().unwrap();
+        assert_eq!(fields.next(), None, "{continuation}");
+        assert_ne!(continue_challenge, challenge);
+        guest
+            .write_all(
+                format!("STEP clock {continue_challenge}\nSTEP sshd\nACK resume\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn resume_nudge_streams_frames_then_gates_on_the_ack() {
         let dir = tempfile::tempdir().unwrap();
@@ -889,29 +1122,14 @@ mod tests {
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
         // The guest speaks first; entropy must be the first host frame.
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        assert_eq!(
-            read_typed_frame(&mut guest).await,
-            ("ENTROPY".to_owned(), vec![7_u8; 64])
-        );
-        assert_eq!(
-            read_line(&mut guest).await,
-            "IDENTITY 01resumeroomidresumeroomid"
-        );
-        assert_eq!(read_line(&mut guest).await, "CLOCK 1700000000");
-        assert_eq!(
-            read_typed_frame(&mut guest).await,
-            ("SECRETS".to_owned(), b"GH_TOKEN=t-9\n".to_vec())
-        );
-        assert_eq!(
-            read_typed_frame(&mut guest).await,
-            ("END".to_owned(), Vec::new())
-        );
-        // Progress steps are logged and tolerated; only ACK resume completes it.
-        guest
-            .write_all(b"STEP reseeded\nSTEP sshd\nACK resume\n")
-            .await
-            .unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let (entropy, identity, secrets) = read_initial_resume_payload(&mut guest).await;
+        assert_eq!(entropy, vec![7_u8; 64]);
+        assert_eq!(identity, "IDENTITY 01resumeroomidresumeroomid");
+        assert_eq!(secrets, b"GH_TOKEN=t-9\n".to_vec());
+        let (epoch, challenge) = enter_clock_barrier(&mut guest).await;
+        assert_eq!(epoch, 1_700_000_000);
+        acknowledge_clock_and_resume(&mut guest, &challenge).await;
         drop(guest);
 
         delivery
@@ -920,8 +1138,30 @@ mod tests {
             .expect("a well-formed hygiene handshake acks");
     }
 
+    #[test]
+    fn resume_clock_freshness_rejects_the_exact_post_poll_deadline_and_beyond() {
+        let room_id = "01resumeroomidresumeroomid";
+        assert!(validate_clock_application_elapsed(
+            room_id,
+            Some("privilege"),
+            RESUME_CLOCK_APPLY_MAX
+                .checked_sub(Duration::from_nanos(1))
+                .unwrap()
+        )
+        .is_ok());
+        for elapsed in [
+            RESUME_CLOCK_APPLY_MAX,
+            RESUME_CLOCK_APPLY_MAX + Duration::from_nanos(1),
+        ] {
+            let error = validate_clock_application_elapsed(room_id, Some("privilege"), elapsed)
+                .expect_err("deadline is a strict upper bound");
+            assert!(error.contains("strict <4s freshness budget"), "{error}");
+            assert!(error.contains("STEP privilege"), "{error}");
+        }
+    }
+
     #[tokio::test]
-    async fn resume_nudge_samples_the_clock_after_the_guest_preface() {
+    async fn resume_nudge_samples_the_clock_after_the_guest_is_ready_to_apply_it() {
         let dir = tempfile::tempdir().unwrap();
         let payload = ResumePayload::new(
             "01resumeroomidresumeroomid".to_owned(),
@@ -930,36 +1170,220 @@ mod tests {
         );
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
 
-        // A payload may be armed and its socket accepted well before the guest
-        // supplies the exact preface. Delay after connect so this also rejects
-        // sampling immediately after accept instead of at frame delivery.
+        // Consume the eager payload, then simulate expensive key/config/sudo
+        // hygiene. CLOCK must not exist until the late READY barrier.
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
         tokio::time::sleep(Duration::from_millis(1_100)).await;
-        let delivery_not_before = chrono::Utc::now().timestamp();
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        assert_eq!(read_typed_frame(&mut guest).await.0, "ENTROPY");
-        assert!(read_line(&mut guest).await.starts_with("IDENTITY "));
-        let clock = read_line(&mut guest).await;
-        let epoch_secs = clock
-            .strip_prefix("CLOCK ")
-            .unwrap()
-            .parse::<i64>()
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), read_line(&mut guest))
+                .await
+                .is_err(),
+            "CLOCK arrived before READY"
+        );
+        guest
+            .write_all(b"STEP reseeded\nSTEP identity\nSTEP hostkeys\nSTEP privilege\n")
+            .await
             .unwrap();
+        let delivery_not_before = chrono::Utc::now().timestamp();
+        guest.write_all(b"READY clock\n").await.unwrap();
+        let clock = read_line(&mut guest).await;
+        let (epoch_secs, challenge) = parse_clock_record(&clock);
         let delivery_not_after = chrono::Utc::now().timestamp();
         assert!(
             (delivery_not_before..=delivery_not_after).contains(&epoch_secs),
             "{clock}"
         );
-        assert_eq!(read_typed_frame(&mut guest).await.0, "SECRETS");
-        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
-        guest.write_all(b"ACK resume\n").await.unwrap();
+        acknowledge_clock_and_resume(&mut guest, &challenge).await;
         drop(guest);
 
         delivery
             .await_acked(Duration::from_secs(5))
             .await
-            .expect("a delivery-time clock payload acks");
+            .expect("a clock-ready-time payload acks");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_rejects_the_incompatible_v1_preface_without_disclosing_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let delivery = serve_resume(
+            dir.path(),
+            ResumePayload::with_fixed_epoch(
+                "01resumeroomidresumeroomid".to_owned(),
+                1_700_000_000,
+                vec![7_u8; 64],
+                SecretsPayload::encode(&[("TOKEN".to_owned(), "never".to_owned())]),
+            ),
+            None,
+        )
+        .unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
+        guest.shutdown().await.unwrap();
+        let mut disclosed = Vec::new();
+        guest.read_to_end(&mut disclosed).await.unwrap();
+        assert!(disclosed.is_empty());
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("v1 must fail closed");
+        assert!(error.contains("preface malformed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_rejects_early_ack_before_any_hygiene_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let delivery = serve_resume(
+            dir.path(),
+            ResumePayload::with_fixed_epoch(
+                "01resumeroomidresumeroomid".to_owned(),
+                1_700_000_000,
+                vec![7_u8; 64],
+                SecretsPayload::encode(&[]),
+            ),
+            None,
+        )
+        .unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
+        guest.write_all(b"ACK resume\n").await.unwrap();
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("early ACK must not satisfy hygiene");
+        assert!(error.contains("expected \"STEP reseeded\""), "{error}");
+        assert!(error.contains("got \"ACK resume\""), "{error}");
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_rejects_a_prequeued_or_replayed_clock_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let delivery = serve_resume(
+            dir.path(),
+            ResumePayload::with_fixed_epoch(
+                "01resumeroomidresumeroomid".to_owned(),
+                1_700_000_000,
+                vec![7_u8; 64],
+                SecretsPayload::encode(&[]),
+            ),
+            None,
+        )
+        .unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
+        guest
+            .write_all(
+                b"STEP reseeded\nSTEP identity\nSTEP hostkeys\nSTEP privilege\nREADY clock\nAPPLIED clock 01dddddddddddddddddddddddd\n",
+            )
+            .await
+            .unwrap();
+        let clock = read_line(&mut guest).await;
+        let (_, real_challenge) = parse_clock_record(&clock);
+        assert_ne!(real_challenge, "01dddddddddddddddddddddddd");
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("wrong clock challenge must fail");
+        assert!(error.contains("expected \"APPLIED clock"), "{error}");
+        assert!(error.contains("got \"APPLIED clock 01dddd"), "{error}");
+        let mut continuation = Vec::new();
+        guest.read_to_end(&mut continuation).await.unwrap();
+        assert!(
+            continuation.is_empty(),
+            "host released ingress after bad ACK"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_nudge_requires_proof_that_the_guest_observed_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let delivery = serve_resume(
+            dir.path(),
+            ResumePayload::with_fixed_epoch(
+                "01resumeroomidresumeroomid".to_owned(),
+                1_700_000_000,
+                vec![7_u8; 64],
+                SecretsPayload::encode(&[]),
+            ),
+            None,
+        )
+        .unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
+        let (_, clock_challenge) = enter_clock_barrier(&mut guest).await;
+
+        // Queue every old terminal record with the valid CLOCK challenge,
+        // without first reading CONTINUE. The fresh continuation challenge
+        // makes these buffered records unusable.
+        guest
+            .write_all(
+                format!("APPLIED clock {clock_challenge}\nSTEP clock\nSTEP sshd\nACK resume\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let continuation = read_line(&mut guest).await;
+        assert!(
+            continuation.starts_with("CONTINUE clock "),
+            "{continuation}"
+        );
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("prequeued final records must not cross CONTINUE");
+        assert!(error.contains("expected \"STEP clock "), "{error}");
+        assert!(error.contains("got \"STEP clock\""), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_nudge_withholds_ingress_when_clock_application_exceeds_freshness_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let delivery = serve_resume(
+            dir.path(),
+            ResumePayload::with_fixed_epoch(
+                "01resumeroomidresumeroomid".to_owned(),
+                1_700_000_000,
+                vec![7_u8; 64],
+                SecretsPayload::encode(&[]),
+            ),
+            None,
+        )
+        .unwrap();
+        let path = listener_path_for(dir.path(), RESUME_PORT);
+        let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
+        let (_, challenge) = enter_clock_barrier(&mut guest).await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+
+        let error = delivery
+            .await_acked(Duration::from_secs(5))
+            .await
+            .expect_err("stale CLOCK application must fail closed");
+        assert!(error.contains("freshness budget"), "{error}");
+        let _ = guest
+            .write_all(format!("APPLIED clock {challenge}\n").as_bytes())
+            .await;
+        let mut continuation = Vec::new();
+        guest.read_to_end(&mut continuation).await.unwrap();
+        assert!(
+            continuation.is_empty(),
+            "host released ingress after stale CLOCK"
+        );
     }
 
     #[tokio::test]
@@ -983,19 +1407,12 @@ mod tests {
         );
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        assert_eq!(read_typed_frame(&mut guest).await.0, "ENTROPY");
-        assert!(read_line(&mut guest).await.starts_with("IDENTITY "));
-        assert!(read_line(&mut guest).await.starts_with("CLOCK "));
-        assert_eq!(
-            read_typed_frame(&mut guest).await,
-            ("SECRETS".to_owned(), b"TOKEN=once\n".to_vec())
-        );
-        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
-        guest
-            .write_all(b"STEP reseeded\nSTEP sshd\nACK resume\n")
-            .await
-            .unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let (_, _, secrets) = read_initial_resume_payload(&mut guest).await;
+        assert_eq!(secrets, b"TOKEN=once\n".to_vec());
+        let (epoch, challenge) = enter_clock_barrier(&mut guest).await;
+        assert_eq!(epoch, 1_700_000_000);
+        acknowledge_clock_and_resume(&mut guest, &challenge).await;
         drop(guest);
 
         delivery
@@ -1025,16 +1442,12 @@ mod tests {
         assert!(leaked.is_empty(), "partial candidate received host data");
 
         let mut guest = tokio::net::UnixStream::connect(&path).await.unwrap();
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        assert_eq!(read_typed_frame(&mut guest).await.0, "ENTROPY");
-        assert!(read_line(&mut guest).await.starts_with("IDENTITY "));
-        assert!(read_line(&mut guest).await.starts_with("CLOCK "));
-        assert_eq!(
-            read_typed_frame(&mut guest).await,
-            ("SECRETS".to_owned(), b"TOKEN=once\n".to_vec())
-        );
-        assert_eq!(read_typed_frame(&mut guest).await.0, "END");
-        guest.write_all(b"ACK resume\n").await.unwrap();
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let (_, _, secrets) = read_initial_resume_payload(&mut guest).await;
+        assert_eq!(secrets, b"TOKEN=once\n".to_vec());
+        let (epoch, challenge) = enter_clock_barrier(&mut guest).await;
+        assert_eq!(epoch, 1_700_000_000);
+        acknowledge_clock_and_resume(&mut guest, &challenge).await;
         drop(guest);
 
         delivery
@@ -1110,12 +1523,8 @@ mod tests {
 
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        let _ = read_typed_frame(&mut guest).await;
-        let _ = read_line(&mut guest).await;
-        let _ = read_line(&mut guest).await;
-        let _ = read_typed_frame(&mut guest).await;
-        let _ = read_typed_frame(&mut guest).await;
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
         guest
             .write_all(b"STEP reseeded\nSTEP identity\nERR hostkeys key generation failed\n")
             .await
@@ -1145,12 +1554,8 @@ mod tests {
 
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        let _ = read_typed_frame(&mut guest).await;
-        let _ = read_line(&mut guest).await;
-        let _ = read_line(&mut guest).await;
-        let _ = read_typed_frame(&mut guest).await;
-        let _ = read_typed_frame(&mut guest).await;
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
         guest.write_all(b"STEP reseeded\n").await.unwrap();
         drop(guest);
 
@@ -1176,15 +1581,11 @@ mod tests {
         let delivery = serve_resume(dir.path(), payload, None).unwrap();
         let path = listener_path_for(dir.path(), RESUME_PORT);
         let mut guest = tokio::net::UnixStream::connect(path).await.unwrap();
-        guest.write_all(b"ROOMS-RESUME/1\n").await.unwrap();
-        let _ = read_typed_frame(&mut guest).await;
-        let _ = read_line(&mut guest).await;
-        let _ = read_line(&mut guest).await;
-        let _ = read_typed_frame(&mut guest).await;
-        let _ = read_typed_frame(&mut guest).await;
+        guest.write_all(b"ROOMS-RESUME/2\n").await.unwrap();
+        let _ = read_initial_resume_payload(&mut guest).await;
         // Report progress but never ack — hygiene stalled in-guest.
         guest
-            .write_all(b"STEP reseeded\nSTEP hostkeys\n")
+            .write_all(b"STEP reseeded\nSTEP identity\nSTEP hostkeys\n")
             .await
             .unwrap();
         let err = delivery

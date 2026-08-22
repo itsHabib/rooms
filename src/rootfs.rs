@@ -393,23 +393,8 @@ mod tests {
             .find("dup2(fd, STDIN_FILENO)")
             .expect("resume transport attachment");
         assert!(preface_write < transport_attach);
-        let resume_session = apply
-            .split_once("static int resume_session")
-            .expect("native resume transaction")
-            .1
-            .split_once("static int prewarm")
-            .expect("native resume transaction boundary")
-            .0;
-        let entropy_parse = resume_session
-            .find("parse_entropy_frame")
-            .expect("entropy-first parse");
-        let forced_reseed = resume_session
-            .find("reseed(sensitive_payload.entropy)")
-            .expect("forced CRNG reseed");
-        let metadata_parse = resume_session
-            .find("parse_payload(&sensitive_payload)")
-            .expect("post-reseed metadata parse");
-        assert!(entropy_parse < forced_reseed && forced_reseed < metadata_parse);
+        assert_native_resume_hygiene_order(apply);
+        assert!(apply.contains("ROOMS-RESUME/2"));
         assert!(apply.contains("\"-t\", \"ed25519\""));
         assert!(!apply.contains("ssh-keygen -A"));
         assert!(!apply.to_ascii_lowercase().contains("ssh_host_rsa"));
@@ -500,6 +485,47 @@ mod tests {
             .split_once("\nEOF\n")
             .expect("canonical resume sshd heredoc terminator");
         format!("{config}\n")
+    }
+
+    fn assert_native_resume_hygiene_order(apply: &str) {
+        let resume_session = apply
+            .split_once("static int resume_session")
+            .expect("native resume transaction")
+            .1
+            .split_once("static int prewarm")
+            .expect("native resume transaction boundary")
+            .0;
+        let entropy_parse = resume_session
+            .find("parse_entropy_frame")
+            .expect("entropy-first parse");
+        let forced_reseed = resume_session
+            .find("reseed(sensitive_payload.entropy)")
+            .expect("forced CRNG reseed");
+        let metadata_parse = resume_session
+            .find("parse_payload(&sensitive_payload)")
+            .expect("post-reseed metadata parse");
+        assert!(entropy_parse < forced_reseed && forced_reseed < metadata_parse);
+
+        let apply_payload = apply
+            .split_once("static int apply_payload")
+            .expect("native hygiene application")
+            .1
+            .split_once("static int resume_session")
+            .expect("native hygiene application boundary")
+            .0;
+        let positions = [
+            "stage_identity",
+            "generate_host_key",
+            "restore_sudo",
+            "READY clock",
+            "parse_clock",
+            "step_clock",
+            "APPLIED clock",
+            "parse_clock_continue",
+            "launch_sshd",
+        ]
+        .map(|needle| apply_payload.find(needle).expect(needle));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[cfg(unix)]
@@ -881,12 +907,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_resume_parser_accepts_exact_frames_without_consuming_the_next_header() {
+        const CHALLENGE: &str = "01cccccccccccccccccccccccc";
+        const CONTINUE_CHALLENGE: &str = "01eeeeeeeeeeeeeeeeeeeeeeee";
         let mut input = b"ENTROPY 64\n".to_vec();
         input
             .extend_from_slice(b"0123456789012345678901234567890123456789012345678901234567890123");
-        input.extend_from_slice(
-            b"IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK 1700000000\nSECRETS 11\nTOKEN=test\nEND 0\n",
-        );
+        input.extend_from_slice(format!(
+            "IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 11\nTOKEN=test\nEND 0\nCLOCK 1700000000 {CHALLENGE}\nCONTINUE clock {CONTINUE_CHALLENGE}\n"
+        ).as_bytes());
         let output = run_resume_parser(&input);
         assert!(
             output.status.success(),
@@ -894,9 +922,22 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.starts_with("ROOMS-RESUME/1\n"), "{stdout}");
         assert!(
-            stdout.contains("PARSED 01aaaaaaaaaaaaaaaaaaaaaaaa 1700000000 11"),
+            stdout.starts_with("ROOMS-RESUME/2\nREADY clock\n"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("APPLIED clock {CHALLENGE}\n")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("STEP clock {CONTINUE_CHALLENGE}\n")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "PARSED 01aaaaaaaaaaaaaaaaaaaaaaaa 1700000000 11 {CHALLENGE}"
+            )),
             "{stdout}"
         );
     }
@@ -907,10 +948,15 @@ mod tests {
         let cases: &[&[u8]] = &[
             b"ENTROPY 65\n",
             b"ENTROPY 64\nshort",
-            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01abc;touchxxxxxxxxxxxxxxxx\nCLOCK 1700000000\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01abc;touchxxxxxxxxxxxxxxxx\nSECRETS 0\nEND 0\n",
             b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa extra\n",
-            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK -1\n",
-            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK 1700000000\nSECRETS 1048577\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nCLOCK 1700000000\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 0\nEND 0\nCLOCK -1 01cccccccccccccccccccccccc\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 1048577\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 0\nEND 0\nCLOCK 9223372036854775808 01cccccccccccccccccccccccc\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 0\nEND 0\nCLOCK 1700000000 short\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 0\nEND 0\nCLOCK 1700000000 01cccccccccccccccccccccccc extra\n",
+            b"ENTROPY 64\n0123456789012345678901234567890123456789012345678901234567890123IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 0\nEND 0\nCLOCK 1700000000 01cccccccccccccccccccccccc\nCONTINUE clock short\n",
         ];
         for input in cases {
             let output = run_resume_parser(input);
@@ -920,6 +966,30 @@ mod tests {
                 String::from_utf8_lossy(input)
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_resume_clock_application_does_not_release_ingress_without_continuation() {
+        const CHALLENGE: &str = "01cccccccccccccccccccccccc";
+        let mut input = b"ENTROPY 64\n".to_vec();
+        input
+            .extend_from_slice(b"0123456789012345678901234567890123456789012345678901234567890123");
+        input.extend_from_slice(
+            format!(
+                "IDENTITY 01aaaaaaaaaaaaaaaaaaaaaaaa\nSECRETS 0\nEND 0\nCLOCK 1700000000 {CHALLENGE}\n"
+            )
+            .as_bytes(),
+        );
+        let output = run_resume_parser(&input);
+        assert!(!output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(&format!("APPLIED clock {CHALLENGE}\n")),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("STEP clock "), "{stdout}");
+        assert!(!stdout.contains("PARSED "), "{stdout}");
     }
 
     #[cfg(unix)]

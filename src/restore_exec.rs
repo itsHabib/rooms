@@ -723,7 +723,9 @@ fn verify_clone_custody(
 
 /// Build the per-restore nudge payload: identity, fresh entropy, and the
 /// admitted secrets (empty when none). The vsock sender samples the host clock
-/// at delivery so snapshot-load latency cannot make the guest stale.
+/// only at the guest's late application barrier, after expensive hygiene and
+/// immediately before ingress, so restore and scheduling latency cannot make
+/// the guest stale.
 fn resume_payload(
     room_id: &str,
     secrets: Option<&vsock::SecretsPayload>,

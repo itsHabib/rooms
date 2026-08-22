@@ -62,7 +62,7 @@
 static const char sudo_grant[] = "rooms ALL=(ALL) NOPASSWD: ALL\n";
 static const char repo_include[] = "\n[include]\n\tpath = rooms-identity\n";
 #ifdef __linux__
-static const char resume_preface[] = "ROOMS-RESUME/1\n";
+static const char resume_preface[] = "ROOMS-RESUME/2\n";
 #endif
 static const char canonical_sshd_config[] =
     "Port 22\n"
@@ -331,26 +331,15 @@ static int parse_entropy_frame(struct payload *payload)
 static int parse_payload(struct payload *payload)
 {
     char line[MAX_LINE_LEN];
-    char *value = NULL;
     bool at_eof = false;
-    uint64_t epoch = 0U;
     size_t length = 0U;
+    char *value = NULL;
 
     if (read_line(STDIN_FILENO, line, sizeof(line), &at_eof) < 0 || at_eof ||
         parse_pair(line, "IDENTITY", &value) < 0 || !valid_room_id(value)) {
         return fail("invalid IDENTITY line");
     }
     memcpy(payload->room_id, value, ROOM_ID_LEN + 1U);
-
-    if (read_line(STDIN_FILENO, line, sizeof(line), &at_eof) < 0 || at_eof ||
-        parse_pair(line, "CLOCK", &value) < 0 ||
-        parse_decimal(value, (uint64_t)INT64_MAX, &epoch) < 0 || epoch == 0U) {
-        return fail("invalid CLOCK line");
-    }
-    payload->epoch = (time_t)epoch;
-    if ((uint64_t)payload->epoch != epoch) {
-        return fail("CLOCK epoch is outside time_t range");
-    }
 
     if (read_line(STDIN_FILENO, line, sizeof(line), &at_eof) < 0 || at_eof ||
         parse_header(line, "SECRETS", MAX_SECRETS_LEN, &length) < 0) {
@@ -369,6 +358,72 @@ static int parse_payload(struct payload *payload)
         parse_header(line, "END", 0U, &length) < 0 || length != 0U) {
         return fail("malformed END frame");
     }
+    return 0;
+}
+
+static int parse_clock(struct payload *payload,
+                       char challenge[ROOM_ID_LEN + 1U])
+{
+    char line[MAX_LINE_LEN];
+    char *epoch_text = NULL;
+    char *challenge_text = NULL;
+    bool at_eof = false;
+    uint64_t epoch = 0U;
+
+    if (read_line(STDIN_FILENO, line, sizeof(line), &at_eof) < 0 || at_eof) {
+        return fail("invalid CLOCK line");
+    }
+    epoch_text = strchr(line, ' ');
+    if (epoch_text == NULL) return fail("invalid CLOCK line");
+    *epoch_text++ = '\0';
+    challenge_text = strchr(epoch_text, ' ');
+    if (challenge_text == NULL) return fail("invalid CLOCK line");
+    *challenge_text++ = '\0';
+    if (strcmp(line, "CLOCK") != 0 || strchr(challenge_text, ' ') != NULL ||
+        parse_decimal(epoch_text, (uint64_t)INT64_MAX, &epoch) < 0 ||
+        epoch == 0U || !valid_room_id(challenge_text)) {
+        return fail("invalid CLOCK line");
+    }
+    payload->epoch = (time_t)epoch;
+    if ((uint64_t)payload->epoch != epoch) {
+        return fail("CLOCK epoch is outside time_t range");
+    }
+    memcpy(challenge, challenge_text, ROOM_ID_LEN + 1U);
+    return 0;
+}
+
+static int protocol_challenge_line(const char *prefix, const char *challenge)
+{
+    char line[MAX_LINE_LEN];
+    int count = snprintf(line, sizeof(line), "%s %s\n", prefix, challenge);
+    if (count <= 0 || (size_t)count >= sizeof(line)) {
+        return fail("clock challenge line is too long");
+    }
+    return write_all(STDOUT_FILENO, line, (size_t)count);
+}
+
+static int parse_clock_continue(char challenge[ROOM_ID_LEN + 1U])
+{
+    char line[MAX_LINE_LEN];
+    char *verb = NULL;
+    char *challenge_text = NULL;
+    bool at_eof = false;
+
+    if (read_line(STDIN_FILENO, line, sizeof(line), &at_eof) < 0 || at_eof) {
+        return fail("invalid clock continuation");
+    }
+    verb = strchr(line, ' ');
+    if (verb == NULL) return fail("invalid clock continuation");
+    *verb++ = '\0';
+    challenge_text = strchr(verb, ' ');
+    if (challenge_text == NULL) return fail("invalid clock continuation");
+    *challenge_text++ = '\0';
+    if (strcmp(line, "CONTINUE") != 0 || strcmp(verb, "clock") != 0 ||
+        strchr(challenge_text, ' ') != NULL ||
+        !valid_room_id(challenge_text)) {
+        return fail("invalid clock continuation");
+    }
+    memcpy(challenge, challenge_text, ROOM_ID_LEN + 1U);
     return 0;
 }
 
@@ -1368,8 +1423,9 @@ static int prepare_control_paths(const struct paths *paths,
 static int apply_payload(const struct paths *paths, struct payload *payload,
                          uid_t rooms_uid, gid_t rooms_gid)
 {
-    set_protocol_stage("clock");
-    if (step_clock(payload->epoch) < 0 || protocol_line("STEP clock\n") < 0) return -1;
+    char clock_challenge[ROOM_ID_LEN + 1U] = {0};
+    char continue_challenge[ROOM_ID_LEN + 1U] = {0};
+
     set_protocol_stage("identity");
     if (prepare_control_paths(paths, rooms_uid, rooms_gid) < 0) return -1;
     if (stage_identity(paths, payload->room_id, 0U, 0U) < 0 ||
@@ -1388,6 +1444,22 @@ static int apply_payload(const struct paths *paths, struct payload *payload,
     set_protocol_stage("privilege");
     if (restore_sudo(paths, rooms_uid, rooms_gid) < 0 ||
         protocol_line("STEP privilege\n") < 0) return -1;
+
+    /* Key generation and policy validation can take seconds when a clone
+     * fleet oversubscribes the host. Ask for wall time only after those
+     * expensive steps, then apply it before sshd can become reachable. The
+     * CLOCK challenge binds the application acknowledgement to that frame;
+     * an independently fresh CONTINUE challenge proves this helper observed
+     * the host's release before it can open ingress. */
+    set_protocol_stage("clock");
+    if (protocol_line("READY clock\n") < 0 ||
+        parse_clock(payload, clock_challenge) < 0 ||
+        step_clock(payload->epoch) < 0 ||
+        protocol_challenge_line("APPLIED clock", clock_challenge) < 0 ||
+        parse_clock_continue(continue_challenge) < 0 ||
+        protocol_challenge_line("STEP clock", continue_challenge) < 0) {
+        return -1;
+    }
     set_protocol_stage("sshd");
     if (launch_sshd(paths) < 0 || protocol_line("STEP sshd\n") < 0) return -1;
     set_protocol_stage("complete");
@@ -1438,11 +1510,20 @@ static int prewarm(const struct paths *paths)
 #ifdef ROOMS_RESUME_TEST
 static int test_parse_only(void)
 {
-    if (protocol_line("ROOMS-RESUME/1\n") < 0 ||
+    char clock_challenge[ROOM_ID_LEN + 1U] = {0};
+    char continue_challenge[ROOM_ID_LEN + 1U] = {0};
+
+    if (protocol_line("ROOMS-RESUME/2\n") < 0 ||
         parse_entropy_frame(&sensitive_payload) < 0 ||
-        parse_payload(&sensitive_payload) < 0) return 1;
-    dprintf(STDOUT_FILENO, "PARSED %s %lld %zu\n", sensitive_payload.room_id,
-            (long long)sensitive_payload.epoch, sensitive_payload.secrets_len);
+        parse_payload(&sensitive_payload) < 0 ||
+        protocol_line("READY clock\n") < 0 ||
+        parse_clock(&sensitive_payload, clock_challenge) < 0 ||
+        protocol_challenge_line("APPLIED clock", clock_challenge) < 0 ||
+        parse_clock_continue(continue_challenge) < 0 ||
+        protocol_challenge_line("STEP clock", continue_challenge) < 0) return 1;
+    dprintf(STDOUT_FILENO, "PARSED %s %lld %zu %s\n",
+            sensitive_payload.room_id, (long long)sensitive_payload.epoch,
+            sensitive_payload.secrets_len, clock_challenge);
     return 0;
 }
 
