@@ -294,6 +294,16 @@ jobs:
           # holds "0\n0", which is not "0" — a transient API error would read
           # as evidence and attest. Fail closed on anything that is not a
           # successful lookup returning a count.
+          #
+          # The window bound is inclusive. Comment timestamps and
+          # WINDOW_STARTED_AT both carry only second precision, so a tracking
+          # comment created in the same second the window opened would be
+          # excluded forever by a strict `>` — created_at does not move when
+          # the action later edits that comment into a completed task list, so
+          # the failure is permanent for that PR, not transient. Inclusive
+          # costs nothing: the run-URL match below is what makes the evidence
+          # this run's, and a comment carrying this run's URL cannot predate
+          # this run whatever the second boundary does.
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           if ! comments=$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"); then
@@ -302,7 +312,7 @@ jobs:
           fi
           if ! finished=$(jq -s \
             --arg since "${WINDOW_STARTED_AT}" --arg run "${run_url}" \
-              '[.[][] | select(.user.login == "claude[bot]" and .created_at > $since)
+              '[.[][] | select(.user.login == "claude[bot]" and .created_at >= $since)
                 | select(.body | contains($run))
                 | select((.body | contains("- [x]")) and ((.body | contains("- [ ]")) | not))] | length' \
             <<<"${comments}"); then
