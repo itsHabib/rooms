@@ -925,6 +925,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn native_sshd_pid_poll_is_quiet_until_terminal_failure() {
+        let (_build, binary) = compile_resume_helper();
+        let root = tempfile::tempdir().expect("missing sshd pid root");
+        let root = root.path().to_str().expect("utf-8 temp root");
+
+        let probe = std::process::Command::new(&binary)
+            .args(["--test-sshd-pid-absent", root])
+            .output()
+            .expect("probe absent sshd pid");
+        assert!(probe.status.success());
+        assert!(probe.stdout.is_empty(), "{:?}", probe.stdout);
+
+        let terminal = std::process::Command::new(binary)
+            .args(["--test-sshd-terminal", root])
+            .output()
+            .expect("emit terminal sshd launch failure");
+        assert!(!terminal.status.success());
+        let stdout = String::from_utf8(terminal.stdout).expect("terminal error is utf-8");
+        assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+        assert!(
+            stdout.starts_with("ERR sshd launched sshd did not own"),
+            "{stdout:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn native_resume_requires_the_exact_safe_reachable_sshd_policy() {
         use std::os::unix::fs::PermissionsExt as _;
 

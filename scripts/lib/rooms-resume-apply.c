@@ -1160,17 +1160,34 @@ static bool tcp22_is_listening(void)
 
 static int read_sshd_pid(const struct paths *paths, pid_t *pid)
 {
-    unsigned char *content = NULL;
-    size_t length = 0U;
-    if (read_regular_file(paths->sshd_pid, 0U, 0U, &content, &length) < 0 ||
-        length == 0U || length > 31U) {
-        free(content);
+    int fd = open(paths->sshd_pid,
+                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return -1;
+
+    struct stat status;
+    if (fstat(fd, &status) < 0 || !S_ISREG(status.st_mode) ||
+        status.st_uid != 0U || status.st_gid != 0U ||
+        mode_has_unsafe_write(status.st_mode) || status.st_size <= 0 ||
+        status.st_size > 31) {
+        close(fd);
         return -1;
     }
+    size_t length = (size_t)status.st_size;
+    unsigned char content[32];
+    unsigned char trailing = 0U;
+    int read_result = read_exact(fd, content, length);
+    ssize_t trailing_result = -1;
+    if (read_result == 0) {
+        do {
+            trailing_result = read(fd, &trailing, 1U);
+        } while (trailing_result < 0 && errno == EINTR);
+    }
+    int close_result = close(fd);
+    if (read_result < 0 || trailing_result != 0 || close_result < 0) return -1;
+    content[length] = '\0';
     if (content[length - 1U] == '\n') content[--length] = '\0';
     uint64_t parsed = 0U;
     int result = parse_decimal((char *)content, (uint64_t)INT_MAX, &parsed);
-    free(content);
     if (result < 0 || parsed <= 1U) return -1;
     *pid = (pid_t)parsed;
     return 0;
@@ -1406,6 +1423,19 @@ static int test_protocol_error(void)
     set_protocol_stage("hostkeys");
     return fail("this deliberately overlong diagnostic is truncated at the protocol boundary");
 }
+
+static int test_missing_sshd_pid(const char *root, bool terminal)
+{
+    struct paths paths;
+    pid_t pid = 0;
+    if (init_paths(&paths, root) < 0) return 1;
+    resume_stream_attached = true;
+    set_protocol_stage("sshd");
+    if (read_sshd_pid(&paths, &pid) == 0) return 1;
+    if (!terminal) return 0;
+    (void)fail("launched sshd did not own the reachable port 22 listener");
+    return 1;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -1417,6 +1447,12 @@ int main(int argc, char **argv)
 #ifdef ROOMS_RESUME_TEST
     if (argc == 2 && strcmp(argv[1], "--test-parse") == 0) return test_parse_only();
     if (argc == 2 && strcmp(argv[1], "--test-error") == 0) return test_protocol_error();
+    if (argc == 3 && strcmp(argv[1], "--test-sshd-pid-absent") == 0) {
+        return test_missing_sshd_pid(argv[2], false);
+    }
+    if (argc == 3 && strcmp(argv[1], "--test-sshd-terminal") == 0) {
+        return test_missing_sshd_pid(argv[2], true);
+    }
     if (argc == 4 && strcmp(argv[1], "--test-stage") == 0) return test_stage(argv[2], argv[3]);
     if (argc == 3 && strcmp(argv[1], "--test-config") == 0) return test_config(argv[2]);
 #endif
