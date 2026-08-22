@@ -837,7 +837,7 @@ fn classify_route(route: &str) -> RouteClass {
     // that table's lookup as though no route was found, so the RPDB continues.
     // Do not extend this exemption to `main`, where a more-specific throw can
     // beat the Rooms /30 before lookup continues past the table.
-    if cidr.kind == RouteKind::Throw && in_local_table(route, cidr) {
+    if cidr.kind == RouteKind::Throw && in_local_table(route) {
         return RouteClass::Disjoint;
     }
     // A catch-all does not claim the clone supernet: our /30s are longer and win
@@ -850,7 +850,7 @@ fn classify_route(route: &str) -> RouteClass {
     // priority-0 rule hits `local` first, and a match there ends RPDB processing,
     // so a catch-all in `local` shadows the /30 allocation installs in `main` no
     // matter how much longer that prefix is.
-    if cidr.prefix <= 1 && !in_local_table(route, cidr) {
+    if cidr.prefix <= 1 && !in_local_table(route) {
         return RouteClass::Disjoint;
     }
     rooms_route_index(route, cidr).map_or(RouteClass::Foreign, RouteClass::Rooms)
@@ -859,16 +859,16 @@ fn classify_route(route: &str) -> RouteClass {
 /// Whether a route lives in the `local` table, which the kernel's priority-0 rule
 /// consults before `main`.
 ///
-/// `local`/`broadcast` types default to that table, but an explicit table always
-/// wins. That matters for shapes such as `local default table default`: the
-/// route type describes delivery, while the table controls RPDB precedence.
+/// Only the printed `table` qualifier decides. Preflight reads
+/// `ip -4 route show table all`, and iproute2 prints `table` for every table
+/// except `main`, so an omitted qualifier means `main` even for a `local` or
+/// `broadcast` route type: the type describes delivery, while the table
+/// controls RPDB precedence. Inferring `local` from the type would reject a
+/// `local default` installed in `main`, where the Rooms /30 wins longest-prefix
+/// match.
 #[cfg(any(target_os = "linux", test))]
-fn in_local_table(route: &str, cidr: RouteCidr) -> bool {
-    match route_pair(route, "table") {
-        Some("local" | "255") => true,
-        Some(_) => false,
-        None => matches!(cidr.kind, RouteKind::Local | RouteKind::Broadcast),
-    }
+fn in_local_table(route: &str) -> bool {
+    matches!(route_pair(route, "table"), Some("local" | "255"))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1340,6 +1340,10 @@ mod tests {
             "local default dev lo table default",
             "local default dev lo table 253",
             "local default dev lo table main",
+            // `ip route show table all` omits the qualifier for `main`, so a
+            // typed route without one lives there, not in `local`.
+            "local default dev lo",
+            "broadcast 128.0.0.0/1 dev lo",
             "0.0.0.0/0 via 192.168.5.2 dev eth0",
             "172.18.0.0/16 dev docker0",
             // VPN split-defaults: a catch-all pair, not a claim on clone space.
