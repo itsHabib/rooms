@@ -22,10 +22,12 @@ use crate::error::FirecrackerError;
 /// unprivileged `rooms` user (uid 1000); `PermitRootLogin no`.
 const GUEST_USER: &str = "rooms";
 
-/// A readiness probe performs a complete SSH handshake and pubkey login. Give
-/// concurrent guests enough time to finish that work while keeping connection
-/// establishment and the protocol handshake bounded.
-const SSH_PROBE_CONNECT_TIMEOUT_OPTION: &str = "ConnectTimeout=10";
+/// One authenticated readiness attempt may consume most, but never all, of
+/// the overall reachability budget. This is long enough for the measured
+/// eight-way handshake on rooms-host without recreating the old ten-second
+/// retry storm, while preserving a bounded chance to recover when one accepted
+/// connection stalls and a later sshd child is healthy.
+const SSH_PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// Short connection bound for best-effort post-run operations. Workload setup
 /// uses the configured guest-reach budget instead: clone fan-out opens those
@@ -182,22 +184,16 @@ pub async fn wait_for_ssh_observed(
             });
         }
 
-        // OpenSSH's per-connection bound is deliberately generous enough for
-        // an eight-way handshake on a contended host. The caller's deadline
-        // is still authoritative: dropping the timed-out future kills its
-        // child (`kill_on_drop` below) instead of allowing one probe to extend
-        // a short configured reachability timeout by ten seconds.
+        // Give a connected OpenSSH process most of the remaining reachability
+        // budget. The old ten-second cap turned a contended eight-way
+        // handshake into a retry storm; consuming the entire outer budget,
+        // however, would let one stalled connection suppress a healthy retry.
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let probed = tokio::time::timeout(remaining, probe_ssh_once(target, key)).await;
+        let attempt = remaining.min(SSH_PROBE_ATTEMPT_TIMEOUT);
+        let probed = tokio::time::timeout(attempt, probe_ssh_once(target, key, attempt)).await;
         let probe = match probed {
             Ok(result) => result?,
-            Err(_) => {
-                return Err(FirecrackerError::GuestUnreachable {
-                    reason: format!(
-                        "sshd at {guest_ip} did not accept connections within {timeout:?} (last stderr: {last_err})"
-                    ),
-                });
-            }
+            Err(_) => Some(format!("authenticated SSH attempt exceeded {attempt:?}")),
         };
         match probe {
             None => {
@@ -246,8 +242,9 @@ fn signal_ready(observe: &mut impl FnMut(GuestSignal), guest_seen: bool) {
 async fn probe_ssh_once(
     target: GuestTarget<'_>,
     key: &str,
+    connect_timeout: Duration,
 ) -> Result<Option<String>, FirecrackerError> {
-    let output = ssh_probe_command(target, key)
+    let output = ssh_probe_command(target, key, connect_timeout)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -264,8 +261,9 @@ async fn probe_ssh_once(
     ))
 }
 
-fn ssh_probe_command(target: GuestTarget<'_>, key: &str) -> Command {
+fn ssh_probe_command(target: GuestTarget<'_>, key: &str, connect_timeout: Duration) -> Command {
     let destination = format!("{GUEST_USER}@{}", target.guest_ip);
+    let connect_timeout = ssh_connect_timeout_option(connect_timeout);
     let mut command = guest_process(target, "ssh");
     command.args([
         "-i",
@@ -273,7 +271,7 @@ fn ssh_probe_command(target: GuestTarget<'_>, key: &str) -> Command {
         "-o",
         "BatchMode=yes",
         "-o",
-        SSH_PROBE_CONNECT_TIMEOUT_OPTION,
+        connect_timeout.as_str(),
         "-o",
         "StrictHostKeyChecking=no",
         "-o",
@@ -1247,6 +1245,7 @@ mod tests {
         cursor_command_argv, ping_command, repo_url_has_userinfo, shell_single_quote, ssh_command,
         ssh_connect_timeout_option, ssh_probe_command, tar_member_is_safe, validate_neutral_warm,
         wait_for_ssh, CursorMeta, GuestTarget, SSH_AUXILIARY_CONNECT_TIMEOUT,
+        SSH_PROBE_ATTEMPT_TIMEOUT,
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
@@ -1402,6 +1401,7 @@ mod tests {
         let command = ssh_probe_command(
             GuestTarget::new("10.0.0.1", Some("rooms-c3")),
             "/tmp/id_rooms",
+            SSH_PROBE_ATTEMPT_TIMEOUT,
         );
         let (program, args) = command_parts(&command);
 
@@ -1418,7 +1418,7 @@ mod tests {
                 "-o",
                 "BatchMode=yes",
                 "-o",
-                "ConnectTimeout=10",
+                "ConnectTimeout=75",
                 "-o",
                 "StrictHostKeyChecking=no",
                 "-o",
@@ -1429,6 +1429,7 @@ mod tests {
                 "true",
             ]
         );
+        assert!(SSH_PROBE_ATTEMPT_TIMEOUT < RoomsConfig::default().guest_reach_timeout);
     }
 
     #[test]
