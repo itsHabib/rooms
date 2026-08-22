@@ -2530,8 +2530,8 @@ application_key="$(ssh-keygen -lf "$probe.pub" -E sha256 | cut -d ' ' -f2)"
 rm -f "$probe" "$probe.pub"
 global_name="$(git config --global --get user.name)"
 global_email="$(git config --global --get user.email)"
-local_name="$(git -C /workspace/repo config --local --get user.name)"
-local_email="$(git -C /workspace/repo config --local --get user.email)"
+local_name="$(git -C /workspace/repo config --get user.name)"
+local_email="$(git -C /workspace/repo config --get user.email)"
 repo_head="$(git -C /workspace/repo rev-parse HEAD)"
 sudo -n /bin/true
 sudo_ready=ready
