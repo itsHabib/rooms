@@ -98,7 +98,7 @@ struct SnapshotArtifactCleanup {
 }
 
 impl SnapshotArtifactCleanup {
-    fn new(directory: PathBuf) -> Self {
+    const fn new(directory: PathBuf) -> Self {
         Self { directory }
     }
 }
