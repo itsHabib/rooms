@@ -205,7 +205,7 @@ async fn guest_unreachable() {
 
     let key = PathBuf::from(std::env::var("HOME").expect("HOME") + "/.ssh/id_rooms");
 
-    let err = runner::wait_for_ssh("172.16.0.2", &key, &config)
+    let err = runner::wait_for_ssh(runner::GuestTarget::flat("172.16.0.2"), &key, &config)
         .await
         .expect_err("SSH should fail without network");
 

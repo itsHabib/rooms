@@ -30,6 +30,55 @@ pub const SNAPSHOT_VMSTATE_FILE: &str = "snapshot.vmstate";
 /// credential even though a neutral base holds no secret.
 pub const SNAPSHOT_MEM_FILE: &str = "snapshot.mem";
 
+/// Stable host-local identity of an immutable snapshot input.
+///
+/// This is transaction/receipt data, never portable `snapshot.json` authority.
+/// A copied snapshot or image therefore cannot carry its own permission to
+/// bypass content hashing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImmutableFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub len: u64,
+    pub mode: u32,
+    pub mtime: i64,
+    pub mtime_nsec: i64,
+    pub ctime: i64,
+    pub ctime_nsec: i64,
+}
+
+impl ImmutableFileIdentity {
+    /// Capture the Unix inode identity and mutation stamps for `path`.
+    #[cfg(unix)]
+    pub fn capture(path: &Path) -> std::io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(Self::from_metadata(&metadata))
+    }
+
+    /// Capture identity from an already-open file without reopening its path.
+    #[cfg(unix)]
+    pub fn capture_file(file: &std::fs::File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self::from_metadata(&metadata))
+    }
+
+    #[cfg(unix)]
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            mode: metadata.mode(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+}
+
 /// Why a snapshot was refused before any Firecracker call. Both are fail-closed
 /// security preconditions, not transient errors — nothing is written on either.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -442,6 +491,10 @@ mod tests {
         let p = plan(&base, req(dir.path().to_str().unwrap()), Utc::now()).expect("plans");
         write_meta_atomic(&p.meta_path, &p.meta).expect("write meta");
         let bytes = std::fs::read(&p.meta_path).expect("read");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("rootfs_source"),
+            "host-local attestation identity must stay out of portable metadata"
+        );
         let back: SnapshotMeta = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(back, p.meta);
         assert!(

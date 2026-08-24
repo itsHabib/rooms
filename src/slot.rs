@@ -49,6 +49,13 @@ const SLOT_POOL: Pool = Pool {
 /// override to lower it can land later.
 pub const DEFAULT_MAX_POOL: u8 = 8;
 
+/// Maximum simultaneous namespace-isolated restores sharing one snapshot's
+/// frozen slot.
+///
+/// Keeping the complete owner set in one bounded token makes each
+/// add/remove a single atomic rewrite and prevents unbounded slot-file growth.
+pub const MAX_CLONE_LEASES: usize = 8;
+
 /// Claim a slot for `room_id`, whose identity the caller pre-minted.
 ///
 /// With `target: None`, walks k = 1..=cap (clamped to [`MAX_SLOT`]) and
@@ -160,15 +167,16 @@ pub fn claimed_by(state: &Path, slot_index: u8, room_id: &str) -> Result<bool, S
     ))
 }
 
-/// Whether an index currently holds `room_id`'s live lease against
-/// `snapshot_id`'s reservation.
+/// Whether an index currently includes `room_id` in the live flat or clone
+/// lease state for `snapshot_id`'s reservation.
 ///
-/// A restored room's teardown reads this under the free-lock before deleting
-/// the slot's tap: the tap is named by slot index alone, so a teardown that
-/// already returned its lease (a crash-then-GC-retry, or `rooms kill` racing a
-/// re-lease) must NOT delete a tap a *different* room has since re-leased and
-/// recreated. The same never-act-on-a-resource-a-reused-identity-now-owns rule
-/// as [`free`]'s compare-and-delete.
+/// Teardown reads this under the free-lock before touching lease-owned network
+/// state.
+///
+/// On the flat path the tap is named by slot index alone, so a teardown
+/// that already returned its lease must not delete a tap another room has since
+/// re-leased and recreated. Clone membership follows the same exact-identity
+/// rule as [`free`]'s compare-and-delete.
 pub fn leased_by(
     state: &Path,
     slot_index: u8,
@@ -183,13 +191,22 @@ pub fn leased_by(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(SlotError::Io(error)),
     };
-    Ok(matches!(
-        parse_token(&contents),
+    Ok(match parse_token(&contents) {
         SlotToken::Leased {
             snapshot_id: owner,
             lessee,
-        } if owner == snapshot_id && lessee == room_id
-    ))
+        } => owner == snapshot_id && lessee == room_id,
+        SlotToken::CloneLeases {
+            snapshot_id: owner,
+            lessees,
+        } => {
+            owner == snapshot_id
+                && lessees
+                    .binary_search_by(|id| id.as_str().cmp(room_id))
+                    .is_ok()
+        }
+        _ => false,
+    })
 }
 
 /// The on-disk body of a reservation the walk allocator skips (the file exists,
@@ -203,6 +220,13 @@ fn reservation_token(snapshot_id: &str) -> String {
 /// currently holding the single live lease.
 fn lease_token(snapshot_id: &str, lessee_room_id: &str) -> String {
     format!("@lease {snapshot_id} {lessee_room_id}\n")
+}
+
+/// The canonical on-disk body of a namespace-isolated clone lease set.
+/// `lessees` is non-empty, strictly sorted, and bounded by
+/// [`MAX_CLONE_LEASES`] at every call site.
+fn clone_leases_token(snapshot_id: &str, lessees: &[String]) -> String {
+    format!("@clone-leases {snapshot_id} {}\n", lessees.join(" "))
 }
 
 /// Atomically replace slot `index`'s file body (temp-then-rename in the same
@@ -320,47 +344,131 @@ pub fn lease(
         SlotToken::Leased {
             snapshot_id: owner, ..
         } if owner == snapshot_id => Err(SlotError::LeaseHeld { index: slot_index }),
+        // Namespace-isolated clone leases and the flat lease are mutually
+        // exclusive even though clone members can share with one another.
+        SlotToken::CloneLeases {
+            snapshot_id: owner, ..
+        } if owner == snapshot_id => Err(SlotError::LeaseHeld { index: slot_index }),
         // Anything else — free, a claim, or a *different* snapshot's token — is
         // no reservation of ours; never a busy-signal the caller might retry.
         _ => Err(SlotError::NotReserved { index: slot_index }),
     }
 }
 
+/// Add one namespace-isolated restore to a snapshot's bounded clone lease set.
+///
+/// The first clone atomically converts the plain reservation into a canonical
+/// `@clone-leases` token. Further clones of the same snapshot are inserted in
+/// sorted order; retrying the same room is idempotent. A live flat lease or a
+/// full clone set is [`SlotError::LeaseHeld`]. Claims, malformed tokens, and
+/// another snapshot's tokens are [`SlotError::NotReserved`].
+///
+/// # Errors
+/// [`SlotError::NotReserved`] if the slot is not this snapshot's reservation;
+/// [`SlotError::LeaseHeld`] if flat-exclusive or at the clone bound;
+/// [`SlotError::InvalidIndex`] / [`SlotError::Io`] as for [`lease`].
+pub fn lease_clone(
+    state: &Path,
+    slot_index: u8,
+    snapshot_id: &str,
+    lessee_room_id: &str,
+) -> Result<Slot, SlotError> {
+    ensure_pool_index(slot_index)?;
+    if !is_id_shaped(snapshot_id) || !is_id_shaped(lessee_room_id) {
+        return Err(SlotError::NotReserved { index: slot_index });
+    }
+    let dir = state.join(SLOTS_DIR);
+    let path = dir.join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SlotError::NotReserved { index: slot_index });
+        }
+        Err(error) => return Err(SlotError::Io(error)),
+    };
+    match parse_token(&contents) {
+        SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id => {
+            let lessees = vec![lessee_room_id.to_owned()];
+            rewrite_slot_atomic(&dir, slot_index, &clone_leases_token(snapshot_id, &lessees))?;
+            Ok(derive(slot_index))
+        }
+        SlotToken::CloneLeases {
+            snapshot_id: owner,
+            mut lessees,
+        } if owner == snapshot_id => {
+            let Err(position) = lessees.binary_search_by(|id| id.as_str().cmp(lessee_room_id))
+            else {
+                sync_dir(&dir)?;
+                return Ok(derive(slot_index));
+            };
+            if lessees.len() == MAX_CLONE_LEASES {
+                return Err(SlotError::LeaseHeld { index: slot_index });
+            }
+            lessees.insert(position, lessee_room_id.to_owned());
+            rewrite_slot_atomic(&dir, slot_index, &clone_leases_token(snapshot_id, &lessees))?;
+            Ok(derive(slot_index))
+        }
+        SlotToken::Leased {
+            snapshot_id: owner, ..
+        } if owner == snapshot_id => Err(SlotError::LeaseHeld { index: slot_index }),
+        _ => Err(SlotError::NotReserved { index: slot_index }),
+    }
+}
+
+/// Compute the exact durable token after removing one clone member.
+fn clone_token_after_release(
+    snapshot_id: &str,
+    mut lessees: Vec<String>,
+    room_id: &str,
+) -> Option<String> {
+    let position = lessees
+        .binary_search_by(|id| id.as_str().cmp(room_id))
+        .ok()?;
+    lessees.remove(position);
+    if lessees.is_empty() {
+        return Some(reservation_token(snapshot_id));
+    }
+    Some(clone_leases_token(snapshot_id, &lessees))
+}
+
 /// A held free-lock proving this room's lease on a slot.
 ///
-/// The caller deletes the slot's tap and then calls
+/// The caller tears down the lease's owned network resources and then calls
 /// [`LeaseHold::return_to_reservation`] — the free-lock is held continuously
-/// across both, so no other slot operation can interleave. This closes the
-/// window a separate [`leased_by`] check followed by [`release_lease`] would
-/// leave open: the tap is named by slot index alone, so the check→delete→return
-/// sequence must be atomic against another room leasing the same index.
-#[must_use = "delete the tap, then call return_to_reservation (or drop to retain the lease)"]
+/// across cleanup and rewrite, so no other slot operation can interleave. This
+/// closes the window a separate [`leased_by`] check followed by
+/// [`release_lease`] would leave open.
+#[must_use = "clean up owned network resources, then return the lease (or drop to retain it)"]
 pub struct LeaseHold {
     // Held for its Drop side effect (releasing the flock), never read.
     _lock: std::fs::File,
     dir: std::path::PathBuf,
     index: u8,
-    snapshot_id: String,
+    post_cleanup_token: String,
 }
 
 impl LeaseHold {
-    /// Return the held lease to a plain reservation, still under the same lock,
-    /// then release the lock. Call only after the slot's tap is deleted.
+    /// Commit this lease's exact post-cleanup token under the same lock, then
+    /// release it.
+    ///
+    /// A flat or final clone lease returns to a plain reservation; removing one
+    /// of several clones preserves every sibling in the token.
     ///
     /// # Errors
     /// [`SlotError::Io`] if the atomic rewrite fails; the lease is retained
     /// (the lock drops without a rewrite) so teardown can be retried.
     pub fn return_to_reservation(self) -> Result<Released, SlotError> {
-        rewrite_slot_atomic(&self.dir, self.index, &reservation_token(&self.snapshot_id))?;
+        rewrite_slot_atomic(&self.dir, self.index, &self.post_cleanup_token)?;
         Ok(Released::Returned)
     }
 }
 
 /// Acquire the free-lock and confirm this room's live lease at `slot_index`.
 ///
-/// Returns a [`LeaseHold`] that keeps the lock held so the caller can delete
-/// the slot's tap and return the lease atomically (`snapshot_id` + `room_id`
-/// must both match the `@lease` token).
+/// Returns a [`LeaseHold`] that keeps the lock held so the caller can clean up
+/// this room's network resources and return the lease atomically. Both
+/// `snapshot_id` and `room_id` must match the flat token or clone membership.
 ///
 /// `Ok(None)` means the slot is not this room's lease (already returned, or
 /// re-leased by another room) — the caller must NOT delete the tap, since it
@@ -392,8 +500,23 @@ pub fn hold_lease_for_teardown(
             _lock: lock,
             dir,
             index: slot_index,
-            snapshot_id: snapshot_id.to_owned(),
+            post_cleanup_token: reservation_token(snapshot_id),
         })),
+        SlotToken::CloneLeases {
+            snapshot_id: owner,
+            lessees,
+        } if owner == snapshot_id => {
+            let Some(post_cleanup_token) = clone_token_after_release(snapshot_id, lessees, room_id)
+            else {
+                return Ok(None);
+            };
+            Ok(Some(LeaseHold {
+                _lock: lock,
+                dir,
+                index: slot_index,
+                post_cleanup_token,
+            }))
+        }
         // Not our lease — the lock drops here, and the caller keeps the tap.
         _ => Ok(None),
     }
@@ -402,7 +525,8 @@ pub fn hold_lease_for_teardown(
 /// What [`release_lease`] found at the slot index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Released {
-    /// The slot was this room's lease; it was returned to a plain reservation.
+    /// The room's lease was removed; the slot is now a reservation or the
+    /// remaining exact clone-member set.
     Returned,
     /// The slot already holds this snapshot's reservation (idempotent teardown
     /// retry — the lease was returned on an earlier pass).
@@ -412,9 +536,11 @@ pub enum Released {
     NotOurLease,
 }
 
-/// Return a leased reservation to its unleased state on teardown of a
-/// restored-from-snapshot room — never to the free pool, so a later restore of
-/// the same snapshot still reclaims its frozen slot (D8).
+/// Remove a restored room's lease from its snapshot reservation.
+///
+/// The last owner returns the slot to its unleased reservation; removing one
+/// clone preserves its siblings. Neither transition returns it to the free
+/// pool, so a later restore still reclaims the frozen slot (D8).
 ///
 /// Compare-and-rewrite under the free-lock, keyed on both the snapshot and the
 /// lessee, so a stale teardown of an already-relet slot cannot yank a live
@@ -445,6 +571,18 @@ pub fn release_lease(
             lessee,
         } if owner == snapshot_id && lessee == lessee_room_id => {
             rewrite_slot_atomic(&dir, slot_index, &reservation_token(snapshot_id))?;
+            Ok(Released::Returned)
+        }
+        SlotToken::CloneLeases {
+            snapshot_id: owner,
+            lessees,
+        } if owner == snapshot_id => {
+            let Some(post_cleanup_token) =
+                clone_token_after_release(snapshot_id, lessees, lessee_room_id)
+            else {
+                return Ok(Released::NotOurLease);
+            };
+            rewrite_slot_atomic(&dir, slot_index, &post_cleanup_token)?;
             Ok(Released::Returned)
         }
         SlotToken::Reserved { snapshot_id: owner } if owner == snapshot_id => {
@@ -515,6 +653,12 @@ enum SlotToken {
     /// [`SlotToken::Reserved`] on that room's teardown, never to the free pool,
     /// so a repeat restore of the same snapshot still finds its slot.
     Leased { snapshot_id: String, lessee: String },
+    /// A bounded set of namespace-isolated restores sharing the same frozen
+    /// guest network identity without sharing a host network namespace.
+    CloneLeases {
+        snapshot_id: String,
+        lessees: Vec<String>,
+    },
 }
 
 /// Parse a slot file into its token variant. The claim grammar is
@@ -540,7 +684,7 @@ fn parse_token(contents: &str) -> SlotToken {
     // snapshot id (both 26 lowercase-alphanumerics) can spell that, so a
     // reservation line never collides with a claim's room-id line.
     if let Some(rest) = first.strip_prefix("@reservation ") {
-        if !is_id_shaped(rest) {
+        if !is_id_shaped(rest) || lines.next().is_some() {
             return SlotToken::InProgress;
         }
         return SlotToken::Reserved {
@@ -548,7 +692,16 @@ fn parse_token(contents: &str) -> SlotToken {
         };
     }
     if let Some(rest) = first.strip_prefix("@lease ") {
+        if lines.next().is_some() {
+            return SlotToken::InProgress;
+        }
         return parse_lease(rest);
+    }
+    if let Some(rest) = first.strip_prefix("@clone-leases ") {
+        if lines.next().is_some() {
+            return SlotToken::InProgress;
+        }
+        return parse_clone_leases(rest);
     }
     let Some(claim) = indexed_claim::parse_claim(contents) else {
         return SlotToken::InProgress;
@@ -574,6 +727,34 @@ fn parse_lease(rest: &str) -> SlotToken {
     SlotToken::Leased {
         snapshot_id: snapshot_id.to_owned(),
         lessee: lessee.to_owned(),
+    }
+}
+
+/// Parse a canonical `@clone-leases <snapshot_id> <room_id>...` payload.
+/// The member list is non-empty, strictly sorted (therefore deduplicated), and
+/// bounded. Any non-canonical representation fails closed as in-progress.
+fn parse_clone_leases(rest: &str) -> SlotToken {
+    let mut parts = rest.split(' ');
+    let Some(snapshot_id) = parts.next() else {
+        return SlotToken::InProgress;
+    };
+    if !is_id_shaped(snapshot_id) {
+        return SlotToken::InProgress;
+    }
+    let lessees: Vec<String> = parts.map(str::to_owned).collect();
+    if lessees.is_empty() || lessees.len() > MAX_CLONE_LEASES {
+        return SlotToken::InProgress;
+    }
+    let mut previous = None;
+    for lessee in &lessees {
+        if !is_id_shaped(lessee) || previous.is_some_and(|prior: &str| prior >= lessee.as_str()) {
+            return SlotToken::InProgress;
+        }
+        previous = Some(lessee.as_str());
+    }
+    SlotToken::CloneLeases {
+        snapshot_id: snapshot_id.to_owned(),
+        lessees,
     }
 }
 
@@ -610,9 +791,9 @@ mod tests {
     )]
 
     use super::{
-        claim, claimed_by, classify_claimer_stat, free, lease, leased_by, parse_token, reconcile,
-        release_lease, reserve, Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken,
-        MAX_SLOT, SLOTS_DIR,
+        claim, claimed_by, classify_claimer_stat, free, hold_lease_for_teardown, lease,
+        lease_clone, leased_by, parse_token, reconcile, release_lease, reserve, Claimer, Freed,
+        Liveness, Released, Reserved, SlotError, SlotToken, MAX_CLONE_LEASES, MAX_SLOT, SLOTS_DIR,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -827,10 +1008,17 @@ mod tests {
             &format!("@reservation {}", room_id(2)), // reservation, uncommitted
             "@reservation short\n",                  // reservation, malformed id
             &format!("@reservation {} {}\n", room_id(2), room_id(3)), // reservation, extra token
+            &format!("@reservation {}\nextra\n", room_id(2)), // reservation, second line
             "@lease \n",                             // lease, no ids
             &format!("@lease {}\n", room_id(2)),     // lease, missing lessee
             &format!("@lease {} {}", room_id(2), room_id(3)), // lease, uncommitted
             &format!("@lease {} {} x\n", room_id(2), room_id(3)), // lease, trailing field
+            &format!("@lease {} {}\nextra\n", room_id(2), room_id(3)), // lease, second line
+            &format!("@clone-leases {}\n", room_id(2)), // clone leases, no members
+            &format!("@clone-leases {} short\n", room_id(2)), // malformed member
+            &format!("@clone-leases {} {}", room_id(2), room_id(3)), // uncommitted
+            &format!("@clone-leases {} {} x\n", room_id(2), room_id(3)), // malformed member
+            &format!("@clone-leases {} {}\nextra\n", room_id(2), room_id(3)), // second line
         ] {
             assert_eq!(
                 parse_token(partial),
@@ -859,6 +1047,47 @@ mod tests {
                 lessee: room_id(3)
             }
         );
+        assert_eq!(
+            parse_token(&format!(
+                "@clone-leases {} {} {}\n",
+                room_id(2),
+                room_id(3),
+                room_id(4)
+            )),
+            SlotToken::CloneLeases {
+                snapshot_id: room_id(2),
+                lessees: vec![room_id(3), room_id(4)]
+            }
+        );
+
+        for forged in [
+            format!(
+                "@clone-leases {} {} {}\n",
+                room_id(2),
+                room_id(4),
+                room_id(3)
+            ),
+            format!(
+                "@clone-leases {} {} {}\n",
+                room_id(2),
+                room_id(3),
+                room_id(3)
+            ),
+            format!(
+                "@clone-leases {} {}\n",
+                room_id(2),
+                (0..=MAX_CLONE_LEASES)
+                    .map(|n| room_id(u32::try_from(n).unwrap() + 10))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ] {
+            assert_eq!(
+                parse_token(&forged),
+                SlotToken::InProgress,
+                "non-canonical clone token {forged:?} must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -1133,6 +1362,184 @@ mod tests {
     }
 
     #[test]
+    fn clone_leases_are_canonical_bounded_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+
+        // Insert all eight members out of order. Every rewrite must converge on
+        // the same canonical sorted representation.
+        for n in [9, 2, 8, 3, 7, 4, 6, 5] {
+            assert_eq!(
+                lease_clone(dir.path(), 5, &snap, &room_id(n))
+                    .unwrap()
+                    .index,
+                5
+            );
+        }
+        let expected = format!(
+            "@clone-leases {snap} {}\n",
+            (2..=9).map(room_id).collect::<Vec<_>>().join(" ")
+        );
+        assert_eq!(
+            std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+            expected
+        );
+
+        lease_clone(dir.path(), 5, &snap, &room_id(5)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+            expected,
+            "retrying an existing clone lease must not rewrite membership"
+        );
+        assert!(matches!(
+            lease_clone(dir.path(), 5, &snap, &room_id(10)),
+            Err(SlotError::LeaseHeld { index: 5 })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+            expected,
+            "the bounded ninth lease must leave all eight owners intact"
+        );
+    }
+
+    #[test]
+    fn flat_and_clone_leases_are_mutually_exclusive() {
+        let flat = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(flat.path(), 5, &base);
+        reserve(flat.path(), 5, &snap, &base).unwrap();
+        lease(flat.path(), 5, &snap, &room_id(2)).unwrap();
+        assert!(matches!(
+            lease_clone(flat.path(), 5, &snap, &room_id(3)),
+            Err(SlotError::LeaseHeld { index: 5 })
+        ));
+
+        let clones = tempfile::tempdir().unwrap();
+        base_claim(clones.path(), 5, &base);
+        reserve(clones.path(), 5, &snap, &base).unwrap();
+        lease_clone(clones.path(), 5, &snap, &room_id(2)).unwrap();
+        assert!(matches!(
+            lease(clones.path(), 5, &snap, &room_id(3)),
+            Err(SlotError::LeaseHeld { index: 5 })
+        ));
+
+        assert!(matches!(
+            lease_clone(flat.path(), 5, &room_id(200), &room_id(3)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+        assert!(matches!(
+            lease(clones.path(), 5, &room_id(200), &room_id(3)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+    }
+
+    #[test]
+    fn clone_release_removes_only_the_exact_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        for n in 2..=4 {
+            lease_clone(dir.path(), 5, &snap, &room_id(n)).unwrap();
+        }
+
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(3)).unwrap(),
+            Released::Returned
+        );
+        assert!(leased_by(dir.path(), 5, &snap, &room_id(2)).unwrap());
+        assert!(!leased_by(dir.path(), 5, &snap, &room_id(3)).unwrap());
+        assert!(leased_by(dir.path(), 5, &snap, &room_id(4)).unwrap());
+        let siblings = std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap();
+        assert_eq!(
+            siblings,
+            format!("@clone-leases {snap} {} {}\n", room_id(2), room_id(4))
+        );
+
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(3)).unwrap(),
+            Released::NotOurLease
+        );
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(9)).unwrap(),
+            Released::NotOurLease
+        );
+        assert_eq!(
+            std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+            siblings,
+            "stale teardown must not remove either live sibling"
+        );
+
+        release_lease(dir.path(), 5, &snap, &room_id(2)).unwrap();
+        release_lease(dir.path(), 5, &snap, &room_id(4)).unwrap();
+        assert_eq!(
+            parse_token(&std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap()),
+            SlotToken::Reserved { snapshot_id: snap }
+        );
+    }
+
+    #[test]
+    fn clone_teardown_hold_preserves_the_exact_sibling_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, snap) = (room_id(1), room_id(100));
+        let (first, sibling) = (room_id(2), room_id(3));
+        base_claim(dir.path(), 5, &base);
+        reserve(dir.path(), 5, &snap, &base).unwrap();
+        lease_clone(dir.path(), 5, &snap, &first).unwrap();
+        lease_clone(dir.path(), 5, &snap, &sibling).unwrap();
+
+        let hold = hold_lease_for_teardown(dir.path(), 5, &snap, &first)
+            .unwrap()
+            .expect("the exact clone owner must acquire teardown custody");
+        hold.return_to_reservation().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+            format!("@clone-leases {snap} {sibling}\n")
+        );
+        assert!(leased_by(dir.path(), 5, &snap, &sibling).unwrap());
+        assert!(
+            hold_lease_for_teardown(dir.path(), 5, &snap, &first)
+                .unwrap()
+                .is_none(),
+            "a stale retry has no custody and cannot erase the sibling"
+        );
+    }
+
+    #[test]
+    fn malformed_clone_tokens_fail_closed_and_reconcile_stays_opaque() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(SLOTS_DIR)).unwrap();
+        let snap = room_id(100);
+        let forged = format!("@clone-leases {snap} {} {}\n", room_id(3), room_id(2));
+        std::fs::write(slot_path(dir.path(), 5), &forged).unwrap();
+
+        assert!(matches!(
+            lease_clone(dir.path(), 5, &snap, &room_id(4)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+        assert!(matches!(
+            lease(dir.path(), 5, &snap, &room_id(4)),
+            Err(SlotError::NotReserved { index: 5 })
+        ));
+        assert!(!leased_by(dir.path(), 5, &snap, &room_id(3)).unwrap());
+        assert_eq!(
+            release_lease(dir.path(), 5, &snap, &room_id(3)).unwrap(),
+            Released::NotOurLease
+        );
+        assert!(hold_lease_for_teardown(dir.path(), 5, &snap, &room_id(3))
+            .unwrap()
+            .is_none());
+        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(
+            std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+            forged,
+            "all @ tokens remain opaque to claimer reconciliation"
+        );
+    }
+
+    #[test]
     fn leased_by_is_true_only_for_the_exact_lessee_and_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let (base, snap) = (room_id(1), room_id(100));
@@ -1267,6 +1674,10 @@ mod tests {
             ));
             assert!(matches!(
                 lease(dir.path(), bad, &room_id(100), &room_id(2)),
+                Err(SlotError::InvalidIndex { index, .. }) if index == bad
+            ));
+            assert!(matches!(
+                lease_clone(dir.path(), bad, &room_id(100), &room_id(2)),
                 Err(SlotError::InvalidIndex { index, .. }) if index == bad
             ));
             assert!(matches!(
@@ -1418,8 +1829,10 @@ mod tests {
     }
 
     mod race {
-        use super::super::{claim, free, Claimer, Freed, SlotError};
-        use super::room_id;
+        use super::super::{
+            claim, free, lease_clone, reserve, Claimer, Freed, SlotError, MAX_CLONE_LEASES,
+        };
+        use super::{base_claim, room_id, slot_path};
         use proptest::prelude::*;
         use std::sync::{Arc, Barrier};
 
@@ -1443,6 +1856,45 @@ mod tests {
                 .into_iter()
                 .map(|t| t.join().expect("claimer thread panicked"))
                 .collect()
+        }
+
+        #[test]
+        fn eight_clone_leases_racing_one_reservation_all_survive() {
+            let dir = tempfile::tempdir().unwrap();
+            let state = dir.path().to_path_buf();
+            let (base, snap) = (room_id(1), room_id(100));
+            base_claim(&state, 5, &base);
+            reserve(&state, 5, &snap, &base).unwrap();
+
+            let barrier = Arc::new(Barrier::new(MAX_CLONE_LEASES));
+            let mut threads = Vec::with_capacity(MAX_CLONE_LEASES);
+            for n in 0..MAX_CLONE_LEASES {
+                let state = state.clone();
+                let snap = snap.clone();
+                let barrier = Arc::clone(&barrier);
+                threads.push(std::thread::spawn(move || {
+                    let room = room_id(u32::try_from(n).unwrap() + 2);
+                    barrier.wait();
+                    lease_clone(&state, 5, &snap, &room)
+                }));
+            }
+            for thread in threads {
+                assert_eq!(
+                    thread
+                        .join()
+                        .expect("clone lease thread panicked")
+                        .unwrap()
+                        .index,
+                    5
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(slot_path(&state, 5)).unwrap(),
+                format!(
+                    "@clone-leases {snap} {}\n",
+                    (2..=9).map(room_id).collect::<Vec<_>>().join(" ")
+                )
+            );
         }
 
         proptest! {
@@ -1499,8 +1951,7 @@ mod tests {
                 // The file records the winner's room id, no one else's.
                 let winner = results.iter().position(Result::is_ok).unwrap();
                 let winner = u32::try_from(winner).unwrap();
-                let contents =
-                    std::fs::read_to_string(super::slot_path(dir.path(), index)).unwrap();
+                let contents = std::fs::read_to_string(slot_path(dir.path(), index)).unwrap();
                 let winner_id = room_id(winner);
                 prop_assert_eq!(contents.lines().next(), Some(winner_id.as_str()));
             }
@@ -1552,8 +2003,7 @@ mod tests {
 
                 let removed = freed.iter().filter(|f| matches!(f, Freed::Removed)).count();
                 prop_assert_eq!(removed, 1, "exactly one free removes the old claim");
-                let contents =
-                    std::fs::read_to_string(super::slot_path(dir.path(), 1)).unwrap();
+                let contents = std::fs::read_to_string(slot_path(dir.path(), 1)).unwrap();
                 let new_id = room_id(2);
                 prop_assert_eq!(
                     contents.lines().next(),
@@ -1689,7 +2139,7 @@ mod tests {
     /// The slot-file token grammar, property-checked: full tokens round-trip,
     /// every truncation reads as claim-in-progress, and no input panics.
     mod token {
-        use super::super::{parse_token, SlotToken};
+        use super::super::{parse_token, SlotToken, MAX_CLONE_LEASES};
         use super::room_id;
         use proptest::prelude::*;
 
@@ -1746,6 +2196,22 @@ mod tests {
                 );
             }
 
+            #[test]
+            fn clone_lease_token_round_trips(
+                sid in any::<u32>(),
+                count in 1usize..=MAX_CLONE_LEASES,
+            ) {
+                let snap = room_id(sid);
+                let lessees = (0..count)
+                    .map(|n| room_id(u32::try_from(n).unwrap()))
+                    .collect::<Vec<_>>();
+                let contents = format!("@clone-leases {snap} {}\n", lessees.join(" "));
+                prop_assert_eq!(
+                    parse_token(&contents),
+                    SlotToken::CloneLeases { snapshot_id: snap, lessees }
+                );
+            }
+
             // Any strict prefix of a reservation/lease token — single-line, so
             // no prefix carries the terminal newline — must read as in-progress,
             // never a (mis)parsed reservation.
@@ -1761,6 +2227,22 @@ mod tests {
                 } else {
                     format!("@reservation {}\n", room_id(sid))
                 };
+                let prefix = &full[..cut.index(full.len())];
+                prop_assert_eq!(
+                    parse_token(prefix),
+                    SlotToken::InProgress,
+                    "truncated: {:?}",
+                    prefix
+                );
+            }
+
+            #[test]
+            fn every_clone_lease_truncation_is_in_progress(
+                sid in any::<u32>(),
+                lid in any::<u32>(),
+                cut in any::<proptest::sample::Index>(),
+            ) {
+                let full = format!("@clone-leases {} {}\n", room_id(sid), room_id(lid));
                 let prefix = &full[..cut.index(full.len())];
                 prop_assert_eq!(
                     parse_token(prefix),

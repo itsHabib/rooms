@@ -20,6 +20,7 @@
 //! capped capture is reported `capture_complete: false` like any other
 //! truncation.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +33,9 @@ use tracing::{debug, info, warn};
 
 /// The `tcpdump` binary, resolved on `PATH`.
 const TCPDUMP: &str = "tcpdump";
+
+/// The `ip` binary used to enter a clone's network namespace.
+const IP: &str = "ip";
 
 /// Prefix for the staged raw-capture file under the AppArmor-safe staging dir
 /// (`/tmp` on unix — see [`staging_dir`]); the full name is
@@ -103,8 +107,9 @@ fn is_executable_file(path: &Path) -> bool {
 ///
 /// Owns the `tcpdump` child, the tap/pcap it writes, and the cap watcher that
 /// stops it at [`CAPTURE_CAP_BYTES`]. Dropping it without [`Self::stop`] kills
-/// the child (kill-on-drop) so a panicking run never leaks a capture process;
-/// the normal path calls [`Self::stop`] to flush cleanly.
+/// the child, aborts the watcher, and unlinks the staged pcap so a panicking run
+/// never leaks capture state; the normal path calls [`Self::stop`] to flush
+/// cleanly and hands the pcap path back to its caller.
 #[derive(Debug)]
 pub struct Capture {
     tap: String,
@@ -114,6 +119,9 @@ pub struct Capture {
     /// [`Self::stop`] reports the truncation rather than a mystery death.
     capped: Arc<AtomicBool>,
     watcher: JoinHandle<()>,
+    /// Cleared by [`Self::stop`], whose caller owns reading/removing the pcap.
+    /// An unexpected drop keeps this true and removes the staging file.
+    remove_pcap_on_drop: bool,
 }
 
 /// The outcome of stopping a capture — the completeness bit the summary needs.
@@ -134,16 +142,43 @@ impl Capture {
     /// start; see the module docs). A survivor is returned live, with the cap
     /// watcher running beside it.
     pub async fn start(tap: &str, room_dir: &Path) -> Result<Self, String> {
+        Self::start_for(CaptureTarget::Host, tap, room_dir).await
+    }
+
+    /// Start capturing on `tap` inside `namespace`.
+    ///
+    /// The namespace is passed as one direct argv token to
+    /// `ip netns exec <namespace> tcpdump ...`; no shell parses it. Capture
+    /// startup and teardown otherwise have the same fail-closed and bounded
+    /// behavior as [`Self::start`].
+    pub async fn start_in_namespace(
+        namespace: &str,
+        tap: &str,
+        room_dir: &Path,
+    ) -> Result<Self, String> {
+        Self::start_for(CaptureTarget::Namespace(namespace), tap, room_dir).await
+    }
+
+    async fn start_for(
+        target: CaptureTarget<'_>,
+        tap: &str,
+        room_dir: &Path,
+    ) -> Result<Self, String> {
         let pcap_path = staging_pcap_path(room_dir);
-        let mut child = spawn_tcpdump(tap, &pcap_path)?;
+        let mut child = spawn_tcpdump(target, tap, &pcap_path)?;
         // A tap that doesn't exist, or a tcpdump lacking capture privilege,
         // exits within milliseconds. Watch briefly so start-failure is caught
         // here (fail-closed) rather than surfacing as an empty pcap later.
         tokio::time::sleep(START_SETTLE).await;
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| format!("probe tcpdump liveness: {e}"))?
-        {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = std::fs::remove_file(&pcap_path);
+                return Err(format!("probe tcpdump liveness: {error}"));
+            }
+        };
+        if let Some(status) = status {
+            let _ = std::fs::remove_file(&pcap_path);
             return Err(format!(
                 "tcpdump exited immediately ({status}) capturing {tap}; capture did not start"
             ));
@@ -157,6 +192,7 @@ impl Capture {
             child,
             capped,
             watcher,
+            remove_pcap_on_drop: true,
         })
     }
 
@@ -183,6 +219,9 @@ impl Capture {
     /// fallback bounds a stuck child so teardown never hangs.
     pub async fn stop(mut self) -> CaptureOutcome {
         self.watcher.abort();
+        // A normal stop deliberately transfers the staged pcap to the caller,
+        // which reads and removes it after this future returns.
+        self.remove_pcap_on_drop = false;
         // The watcher ticks on an interval, so a burst that exceeds the cap and
         // exits before the next tick would never trip the flag. Re-check the
         // final size synchronously here so the cap is enforced at stop time too,
@@ -224,6 +263,31 @@ impl Capture {
         debug!(tap = %self.tap, complete, capped, "witness capture stopped");
         CaptureOutcome { complete }
     }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.watcher.abort();
+        let _ = self.child.start_kill();
+        if self.remove_pcap_on_drop {
+            let _ = std::fs::remove_file(&self.pcap_path);
+        }
+    }
+}
+
+/// Where the capture process must observe its tap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureTarget<'a> {
+    Host,
+    Namespace(&'a str),
+}
+
+/// A direct executable-and-argv plan. Keeping command construction separate
+/// from spawning makes the no-shell boundary testable.
+#[derive(Debug, PartialEq, Eq)]
+struct CaptureCommand {
+    program: &'static str,
+    args: Vec<OsString>,
 }
 
 /// Spawn the watcher that enforces the total capture cap: poll the pcap size
@@ -293,22 +357,56 @@ fn staging_dir() -> PathBuf {
 /// bound lives in [`spawn_cap_watcher`], not in tcpdump flags: `-C` alone
 /// rotates without limit and `-C` + `-W` overwrites the earliest evidence, so
 /// the single-file capture with a host-side stop is both bounded and honest.
-fn spawn_tcpdump(tap: &str, pcap_path: &Path) -> Result<Child, String> {
-    Command::new(TCPDUMP)
-        .arg("-i")
-        .arg(tap)
-        .arg("-w")
-        .arg(pcap_path)
-        .arg("-U")
-        .arg("-s")
-        .arg("0")
-        .arg("-n")
+fn spawn_tcpdump(target: CaptureTarget<'_>, tap: &str, pcap_path: &Path) -> Result<Child, String> {
+    let plan = capture_command(target, tap, pcap_path);
+    Command::new(plan.program)
+        .args(plan.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("spawn {TCPDUMP} on {tap}: {e}"))
+        .map_err(|e| spawn_error(target, tap, &e))
+}
+
+fn capture_command(target: CaptureTarget<'_>, tap: &str, pcap_path: &Path) -> CaptureCommand {
+    let tcpdump_args = [
+        OsString::from("-i"),
+        OsString::from(tap),
+        OsString::from("-w"),
+        pcap_path.as_os_str().to_owned(),
+        OsString::from("-U"),
+        OsString::from("-s"),
+        OsString::from("0"),
+        OsString::from("-n"),
+    ];
+    match target {
+        CaptureTarget::Host => CaptureCommand {
+            program: TCPDUMP,
+            args: tcpdump_args.into(),
+        },
+        CaptureTarget::Namespace(namespace) => CaptureCommand {
+            program: IP,
+            args: [
+                OsString::from("netns"),
+                OsString::from("exec"),
+                OsString::from(namespace),
+                OsString::from(TCPDUMP),
+            ]
+            .into_iter()
+            .chain(tcpdump_args)
+            .collect(),
+        },
+    }
+}
+
+fn spawn_error(target: CaptureTarget<'_>, tap: &str, error: &std::io::Error) -> String {
+    match target {
+        CaptureTarget::Host => format!("spawn {TCPDUMP} on {tap}: {error}"),
+        CaptureTarget::Namespace(namespace) => {
+            format!("spawn {TCPDUMP} on {tap} in network namespace {namespace}: {error}")
+        }
+    }
 }
 
 /// Send `SIGTERM` to `pid` so tcpdump flushes its buffer and exits cleanly.
@@ -334,14 +432,73 @@ mod tests {
         reason = "test module"
     )]
 
+    use std::ffi::OsString;
     use std::path::Path;
     use std::sync::Mutex;
 
-    use super::{ensure_tcpdump_available, staging_pcap_path, which_tcpdump};
+    use super::{
+        capture_command, ensure_tcpdump_available, staging_pcap_path, which_tcpdump,
+        CaptureCommand, CaptureTarget,
+    };
 
     /// Serializes the PATH-mutating tests: `set_var` is process-global and Rust
     /// runs tests in parallel, so every test that touches PATH must hold this.
     static PATH_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn host_capture_command_runs_tcpdump_directly() {
+        let plan = capture_command(
+            CaptureTarget::Host,
+            "tap-fc0",
+            Path::new("/tmp/witness.pcap"),
+        );
+        assert_eq!(
+            plan,
+            CaptureCommand {
+                program: "tcpdump",
+                args: vec![
+                    OsString::from("-i"),
+                    OsString::from("tap-fc0"),
+                    OsString::from("-w"),
+                    OsString::from("/tmp/witness.pcap"),
+                    OsString::from("-U"),
+                    OsString::from("-s"),
+                    OsString::from("0"),
+                    OsString::from("-n"),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn namespaced_capture_command_keeps_namespace_as_one_argv_token() {
+        let hostile_namespace = "rooms-clone; touch /tmp/not-run";
+        let plan = capture_command(
+            CaptureTarget::Namespace(hostile_namespace),
+            "tap-fc0",
+            Path::new("/tmp/witness.pcap"),
+        );
+        assert_eq!(
+            plan,
+            CaptureCommand {
+                program: "ip",
+                args: vec![
+                    OsString::from("netns"),
+                    OsString::from("exec"),
+                    OsString::from(hostile_namespace),
+                    OsString::from("tcpdump"),
+                    OsString::from("-i"),
+                    OsString::from("tap-fc0"),
+                    OsString::from("-w"),
+                    OsString::from("/tmp/witness.pcap"),
+                    OsString::from("-U"),
+                    OsString::from("-s"),
+                    OsString::from("0"),
+                    OsString::from("-n"),
+                ],
+            }
+        );
+    }
 
     #[test]
     fn staging_pcap_path_is_apparmor_safe_and_keyed_on_room_id() {

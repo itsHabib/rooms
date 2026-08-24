@@ -59,8 +59,8 @@ count() {
 
 cd "$repo_root" || fail "repo root not found: $repo_root"
 
-# 1. Build the rooms binary + the e2e test binary AS THE USER (no-run: compile
-#    only). The e2e tests themselves need root, so we run the built binary below.
+# 1. Build the rooms binary + e2e test binaries AS THE USER (no-run: compile
+#    only). The e2e tests themselves need root, so we run the built binaries below.
 echo "[e2e] building (as $build_user)..."
 # sudo sanitizes PATH, so put the user's toolchain (rustup/cargo lives under
 # ~/.cargo/bin) ahead of the system dirs the linker needs.
@@ -71,9 +71,12 @@ if ! sudo -u "$build_user" env HOME="$user_home" \
     fail "build failed (see $log_dir/build.log)"
 fi
 rooms_bin="$repo_root/target/debug/rooms"
-test_bin="$(grep -oE 'target/debug/deps/pool_e2e-[a-zA-Z0-9]+' "$log_dir/build.log" | head -1)"
-[[ -n "$test_bin" && -x "$repo_root/$test_bin" ]] ||
+pool_test_bin="$(grep -oE 'target/debug/deps/pool_e2e-[a-zA-Z0-9]+' "$log_dir/build.log" | head -1)"
+restore_test_bin="$(grep -oE 'target/debug/deps/restore_clonenet_e2e-[a-zA-Z0-9]+' "$log_dir/build.log" | head -1)"
+[[ -n "$pool_test_bin" && -x "$repo_root/$pool_test_bin" ]] ||
     fail "could not locate the pool_e2e test binary in $log_dir/build.log"
+[[ -n "$restore_test_bin" && -x "$repo_root/$restore_test_bin" ]] ||
+    fail "could not locate the restore_clonenet_e2e test binary in $log_dir/build.log"
 
 # 2. Preflight (root — iptables / kvm reads). `rooms doctor` exits non-zero on
 #    any FAIL; abort with the remediation before booting.
@@ -97,13 +100,21 @@ fi
 # typed, drift-guarded form is registry::parse_ls_report, reused by the rig.
 ls_before="$(printf '%s' "$ls_before_json" | count '"id":')"
 
-# 3. Run the e2e binary as root (serial — the tests share host-global taps/slots)
-#    with the user's HOME so it finds the images + guest key. Each test still
+# 3. Run the e2e binaries as root, one at a time (they share host-global
+#    taps/slots), with the user's HOME so they find the images + guest key. Each test still
 #    self-isolates its own scratch state base, so a crash never poisons the next.
-echo "[e2e] running e2e ($test_bin)..."
+test_bins=("$pool_test_bin" "$restore_test_bin")
 e2e_rc=0
-HOME="$user_home" "$repo_root/$test_bin" --test-threads=1 --nocapture \
-    >"$log_dir/e2e.log" 2>&1 || e2e_rc=$?
+: >"$log_dir/e2e.log"
+for test_bin in "${test_bins[@]}"; do
+    echo "[e2e] running e2e ($test_bin)..."
+    test_rc=0
+    HOME="$user_home" "$repo_root/$test_bin" --test-threads=1 --nocapture \
+        >>"$log_dir/e2e.log" 2>&1 || test_rc=$?
+    if [[ "$test_rc" -ne 0 ]]; then
+        e2e_rc="$test_rc"
+    fi
+done
 tail -n 15 "$log_dir/e2e.log"
 
 # 4. Assert zero host-global leak: no *new* tap-fc*, firecracker proc, or room

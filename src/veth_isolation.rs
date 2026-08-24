@@ -30,6 +30,9 @@ pub const VETH_INGRESS_JUMP: &str = "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD";
 pub const VETH_EGRESS_JUMP: &str = "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD";
 const FLAT_SUPERNET: &str = "172.16.0.0/24";
 const VETH_TAIL_DROP: &str = concat!("-A ROOMS_VETH_FWD -s ", veth_supernet!(), " -j DROP");
+const CLONE_EGRESS_CHAIN_PREFIX: &str = "ROOMS_CEG_";
+const CLONE_VETH_PREFIX: &str = "veth-h";
+const MAX_CLONE_VETH_INDEX: u8 = 63;
 const PRIVATE_DROPS: [&str; 3] = [
     concat!(
         "-A ROOMS_VETH_FWD -s ",
@@ -74,15 +77,52 @@ pub fn flat_chain_falls_through_for_veth(chain_dump: &str) -> bool {
         .filter(|line| line.starts_with("-A ROOMS_FWD "))
     {
         seen = true;
-        if line.split_whitespace().any(|token| token == "!") {
-            return false;
-        }
-        if !has_token_pair(line, "-s", FLAT_SUPERNET) && !has_token_pair(line, "-d", FLAT_SUPERNET)
-        {
+        if !flat_rule_is_disjoint_from_veth(line) {
             return false;
         }
     }
     seen
+}
+
+/// Prove the complete root-namespace path clone traffic must traverse.
+///
+/// The three predicates are intentionally composed at the live custody
+/// boundary rather than checked independently by host setup alone: an exact
+/// `ROOMS_VETH_FWD` chain is inert if a preceding FORWARD or flat-chain rule
+/// can terminate clone traffic before it reaches that chain.
+#[must_use]
+pub fn clone_forwarding_substrate(forward_dump: &str, flat_dump: &str, veth_dump: &str) -> bool {
+    forward_jumps_ordered(forward_dump)
+        && flat_chain_falls_through_for_veth(flat_dump)
+        && rooms_veth_fwd_isolates(veth_dump)
+}
+
+/// A flat rule is safe ahead of the clone-veth jump only when it is provably
+/// disjoint from clone traffic. Flat-source rules cannot match a clone's
+/// 172.17/24 outer identity. Dynamic flat egress jumps are keyed to one exact
+/// `tap-fcN`. The flat return rule is destination-scoped and keyed to one exact
+/// upstream interface. Negation and wildcard interfaces are rejected because
+/// their complement can include a clone veth.
+fn flat_rule_is_disjoint_from_veth(line: &str) -> bool {
+    if line.split_whitespace().any(|token| token == "!") {
+        return false;
+    }
+    if has_token_pair(line, "-s", FLAT_SUPERNET) {
+        return true;
+    }
+    let input = input_interface(line);
+    if input.is_some_and(is_exact_flat_tap) {
+        return true;
+    }
+    has_token_pair(line, "-d", FLAT_SUPERNET)
+        && input
+            .is_some_and(|interface| !interface.contains('+') && !interface.starts_with("veth-h"))
+}
+
+fn is_exact_flat_tap(interface: &str) -> bool {
+    interface.strip_prefix("tap-fc").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn has_token_pair(line: &str, key: &str, value: &str) -> bool {
@@ -106,7 +146,12 @@ pub fn rooms_veth_fwd_isolates(chain_dump: &str) -> bool {
         .map(str::trim)
         .filter(|line| line.starts_with("-A ROOMS_VETH_FWD "))
         .peekable();
-    while rules.peek().is_some_and(|line| per_veth_source_drop(line)) {
+    let mut bindings = Vec::new();
+    while let Some(index) = rules.peek().and_then(|line| per_veth_source_index(line)) {
+        if bindings.contains(&index) {
+            return false;
+        }
+        bindings.push(index);
         rules.next();
     }
     let fixed_prefix = rules.next() == Some(VETH_ANTISPOOF_DROP)
@@ -114,6 +159,14 @@ pub fn rooms_veth_fwd_isolates(chain_dump: &str) -> bool {
         && rules.next() == Some(PRIVATE_DROPS[0])
         && rules.next() == Some(PRIVATE_DROPS[1])
         && rules.next() == Some(PRIVATE_DROPS[2]);
+    let mut clone_jumps = Vec::new();
+    while let Some(index) = rules.peek().and_then(|line| clone_egress_jump_index(line)) {
+        if clone_jumps.contains(&index) || !bindings.contains(&index) {
+            return false;
+        }
+        clone_jumps.push(index);
+        rules.next();
+    }
     let egress = rules.next().and_then(egress_interface);
     let returned = rules.next().and_then(return_interface);
     fixed_prefix
@@ -122,7 +175,7 @@ pub fn rooms_veth_fwd_isolates(chain_dump: &str) -> bool {
         && rules.next().is_none()
 }
 
-fn per_veth_source_drop(line: &str) -> bool {
+fn per_veth_source_index(line: &str) -> Option<u8> {
     let mut tokens = line.split_whitespace();
     let parsed = match (
         tokens.next(),
@@ -152,17 +205,60 @@ fn per_veth_source_drop(line: &str) -> bool {
         ) => Some((interface, source)),
         _ => None,
     };
-    let Some((interface, source)) = parsed else {
+    let (interface, source) = parsed?;
+    let index = clone_veth_index(interface)?;
+    (source == format!("172.17.0.{}/32", 4 * index + 2)).then_some(index)
+}
+
+/// Whether the shared chain contains one canonical binding for this clone veth.
+///
+/// Callers pair this with [`rooms_veth_fwd_isolates`], whose grammar rejects
+/// duplicate and malformed bindings globally.
+#[must_use]
+pub fn clone_source_binding_present(chain_dump: &str, veth: &str) -> bool {
+    let Some(index) = clone_veth_index(veth) else {
         return false;
     };
-    let Some(index) = interface
-        .strip_prefix("veth-h")
-        .and_then(|value| value.parse::<u8>().ok())
-        .filter(|index| (1..=63).contains(index))
-    else {
-        return false;
+    chain_dump
+        .lines()
+        .map(str::trim)
+        .filter_map(per_veth_source_index)
+        .filter(|candidate| *candidate == index)
+        .count()
+        == 1
+}
+
+pub(crate) fn clone_veth_index(veth: &str) -> Option<u8> {
+    let suffix = veth.strip_prefix(CLONE_VETH_PREFIX)?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let index = suffix.parse::<u8>().ok()?;
+    if !(1..=MAX_CLONE_VETH_INDEX).contains(&index) || suffix != index.to_string() {
+        return None;
+    }
+    Some(index)
+}
+
+pub(crate) fn clone_egress_chain(index: u8) -> String {
+    format!("{CLONE_EGRESS_CHAIN_PREFIX}{index}")
+}
+
+pub(crate) fn clone_egress_jump_index(line: &str) -> Option<u8> {
+    let mut tokens = line.split_whitespace();
+    let (Some("-A"), Some("ROOMS_VETH_FWD"), Some("-i"), Some(veth), Some("-j"), Some(chain), None) = (
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+        tokens.next(),
+    ) else {
+        return None;
     };
-    source == format!("172.17.0.{}/32", 4 * index + 2)
+    let index = clone_veth_index(veth)?;
+    (chain == clone_egress_chain(index)).then_some(index)
 }
 
 #[must_use]
@@ -281,9 +377,18 @@ fn return_interface(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        flat_chain_falls_through_for_veth, forward_jumps_ordered, rooms_veth_fwd_isolates,
-        veth_input_drop_present, VETH_ANTISPOOF_DROP, VETH_ISOLATION_DROP,
+        clone_egress_chain, clone_egress_jump_index, clone_forwarding_substrate,
+        clone_source_binding_present, clone_veth_index, flat_chain_falls_through_for_veth,
+        forward_jumps_ordered, rooms_veth_fwd_isolates, veth_input_drop_present,
+        VETH_ANTISPOOF_DROP, VETH_INGRESS_JUMP, VETH_ISOLATION_DROP,
     };
+
+    const GOOD_FORWARD: &str = concat!(
+        "-P FORWARD ACCEPT\n",
+        "-A FORWARD -j ROOMS_FWD\n",
+        "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD\n",
+        "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD",
+    );
 
     const FLAT_CHAIN: &str = concat!(
         "-N ROOMS_FWD\n",
@@ -306,9 +411,26 @@ mod tests {
         "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP",
     );
 
+    const GOOD_CHAIN_WITH_CLONE_EGRESS: &str = concat!(
+        "-N ROOMS_VETH_FWD\n",
+        "-A ROOMS_VETH_FWD ! -s 172.17.0.34/32 -i veth-h8 -j DROP\n",
+        "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP\n",
+        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24 -i veth-h+ -j DROP\n",
+        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n",
+        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP\n",
+        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 192.168.0.0/16 -j DROP\n",
+        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.16.0.0/12 -j DROP\n",
+        "-A ROOMS_VETH_FWD -i veth-h8 -j ROOMS_CEG_8\n",
+        "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_3\n",
+        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -o eth0 -j ACCEPT\n",
+        "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
+        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP",
+    );
+
     #[test]
     fn complete_chain_and_ordered_jumps_pass() {
         assert!(rooms_veth_fwd_isolates(GOOD_CHAIN));
+        assert!(rooms_veth_fwd_isolates(GOOD_CHAIN_WITH_CLONE_EGRESS));
         let with_bindings = GOOD_CHAIN.replacen(
             "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24",
             concat!(
@@ -319,13 +441,94 @@ mod tests {
             1,
         );
         assert!(rooms_veth_fwd_isolates(&with_bindings));
+        assert!(clone_source_binding_present(&with_bindings, "veth-h3"));
+        assert!(clone_source_binding_present(&with_bindings, "veth-h8"));
+        assert!(!clone_source_binding_present(&with_bindings, "veth-h7"));
         assert!(flat_chain_falls_through_for_veth(FLAT_CHAIN));
-        assert!(forward_jumps_ordered(concat!(
-            "-P FORWARD ACCEPT\n",
-            "-A FORWARD -j ROOMS_FWD\n",
-            "-A FORWARD -i veth-h+ -j ROOMS_VETH_FWD\n",
-            "-A FORWARD -o veth-h+ -j ROOMS_VETH_FWD",
-        )));
+        assert!(forward_jumps_ordered(GOOD_FORWARD));
+        assert!(clone_forwarding_substrate(
+            GOOD_FORWARD,
+            FLAT_CHAIN,
+            GOOD_CHAIN
+        ));
+    }
+
+    #[test]
+    fn clone_veth_and_chain_identity_are_canonical_and_bounded() {
+        assert_eq!(clone_veth_index("veth-h1"), Some(1));
+        assert_eq!(clone_veth_index("veth-h63"), Some(63));
+        assert_eq!(clone_egress_chain(3), "ROOMS_CEG_3");
+        for invalid in [
+            "veth-h", "veth-h0", "veth-h03", "veth-h64", "veth-h+", "veth-g3", "veth-h3 ",
+        ] {
+            assert_eq!(clone_veth_index(invalid), None, "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn clone_jump_parser_requires_an_exact_interface_chain_pair() {
+        assert_eq!(
+            clone_egress_jump_index("-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_3"),
+            Some(3)
+        );
+        for invalid in [
+            "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_4",
+            "-A ROOMS_VETH_FWD -i veth-h03 -j ROOMS_CEG_3",
+            "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_03",
+            "-A ROOMS_VETH_FWD -i veth-h+ -j ROOMS_CEG_3",
+            "-A ROOMS_VETH_FWD -j ROOMS_CEG_3",
+            "-A ROOMS_VETH_FWD -s 172.17.0.14/32 -i veth-h3 -j ROOMS_CEG_3",
+            "-A ROOMS_VETH_FWD -i veth-h3 -g ROOMS_CEG_3",
+        ] {
+            assert_eq!(clone_egress_jump_index(invalid), None, "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn malformed_broad_mismatched_or_duplicate_clone_jumps_are_caught() {
+        let exact = "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_3";
+        for replacement in [
+            "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_4".to_owned(),
+            "-A ROOMS_VETH_FWD -i veth-h03 -j ROOMS_CEG_3".to_owned(),
+            "-A ROOMS_VETH_FWD -i veth-h+ -j ROOMS_CEG_3".to_owned(),
+            "-A ROOMS_VETH_FWD -j ROOMS_CEG_3".to_owned(),
+            format!("{exact}\n{exact}"),
+        ] {
+            let broken = GOOD_CHAIN_WITH_CLONE_EGRESS.replace(exact, &replacement);
+            assert!(!rooms_veth_fwd_isolates(&broken), "accepted {replacement}");
+        }
+    }
+
+    #[test]
+    fn clone_jump_requires_its_exact_source_binding() {
+        let broken = GOOD_CHAIN_WITH_CLONE_EGRESS.replace(
+            "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP\n",
+            "",
+        );
+        assert!(!rooms_veth_fwd_isolates(&broken));
+    }
+
+    #[test]
+    fn duplicate_clone_source_binding_is_caught() {
+        let binding = "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP";
+        let broken =
+            GOOD_CHAIN_WITH_CLONE_EGRESS.replace(binding, &format!("{binding}\n{binding}"));
+        assert!(!rooms_veth_fwd_isolates(&broken));
+    }
+
+    #[test]
+    fn clone_jumps_must_stay_after_private_drops_and_before_upstream_accept() {
+        let jump = "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_3\n";
+        let before_private = GOOD_CHAIN_WITH_CLONE_EGRESS
+            .replace(jump, "")
+            .replace(VETH_ISOLATION_DROP, &format!("{jump}{VETH_ISOLATION_DROP}"));
+        assert!(!rooms_veth_fwd_isolates(&before_private));
+
+        let after_accept = GOOD_CHAIN_WITH_CLONE_EGRESS.replace(jump, "").replace(
+            "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0",
+            &format!("{jump}-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0"),
+        );
+        assert!(!rooms_veth_fwd_isolates(&after_accept));
     }
 
     #[test]
@@ -333,6 +536,7 @@ mod tests {
         for rule in [
             "-A ROOMS_VETH_FWD ! -s 172.17.0.18/32 -i veth-h3 -j DROP",
             "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h+ -j DROP",
+            "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h03 -j DROP",
             "-A ROOMS_VETH_FWD -s 172.17.0.14/32 -i veth-h3 -j DROP",
         ] {
             let broken = GOOD_CHAIN.replacen(
@@ -357,6 +561,37 @@ mod tests {
             )));
         }
         assert!(!flat_chain_falls_through_for_veth("-N ROOMS_FWD"));
+    }
+
+    #[test]
+    fn exact_flat_dynamic_jump_and_return_path_are_disjoint_from_veth() {
+        let with_dynamic_jump = FLAT_CHAIN.replacen(
+            "-A ROOMS_FWD -s 172.16.0.0/24 -o eth0 -j ACCEPT",
+            concat!(
+                "-A ROOMS_FWD -i tap-fc3 -j ROOMS_EG_3\n",
+                "-A ROOMS_FWD -s 172.16.0.0/24 -o eth0 -j ACCEPT"
+            ),
+            1,
+        );
+        assert!(flat_chain_falls_through_for_veth(&with_dynamic_jump));
+        assert!(!flat_chain_falls_through_for_veth(&FLAT_CHAIN.replace(
+            "-A ROOMS_FWD -d 172.16.0.0/24 -i eth0 -j ACCEPT",
+            "-A ROOMS_FWD -d 172.16.0.0/24 -j ACCEPT"
+        )));
+    }
+
+    #[test]
+    fn complete_substrate_rejects_a_break_at_each_shared_layer() {
+        let broad_flat = format!("-N ROOMS_FWD\n-A ROOMS_FWD -j ACCEPT\n{FLAT_CHAIN}");
+        let missing_ingress = GOOD_FORWARD.replace(VETH_INGRESS_JUMP, "");
+        let missing_isolation = GOOD_CHAIN.replace(&format!("{VETH_ISOLATION_DROP}\n"), "");
+        for (forward, flat, veth) in [
+            (GOOD_FORWARD, broad_flat.as_str(), GOOD_CHAIN),
+            (missing_ingress.as_str(), FLAT_CHAIN, GOOD_CHAIN),
+            (GOOD_FORWARD, FLAT_CHAIN, missing_isolation.as_str()),
+        ] {
+            assert!(!clone_forwarding_substrate(forward, flat, veth));
+        }
     }
 
     #[test]

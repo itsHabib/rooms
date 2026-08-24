@@ -9,6 +9,7 @@ pub mod egress_audit;
 pub mod error;
 pub mod firecracker;
 mod indexed_claim;
+mod inode_seal;
 pub mod isolation;
 pub mod lifecycle;
 pub mod preflight;
