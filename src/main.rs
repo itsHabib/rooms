@@ -1124,6 +1124,10 @@ fn network_config_for(slot: &room::Slot) -> firecracker::NetworkConfig {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the run lifecycle is intentionally linear; artifact finalization stays before teardown"
+)]
 async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
     // Fail closed on --witness without tcpdump, before anything else: a host that
@@ -1252,7 +1256,10 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     };
     let secrets_delivery = vm.take_secrets_delivery();
     let outcome = post_boot(&env, &action, &mut vm, secrets_delivery, None).await;
-    collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
+    warn_legacy_artifact_failure(
+        collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await,
+        "run",
+    );
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
     outcome
@@ -2525,7 +2532,10 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     // Secrets arrived through the acked resume nudge, not the vsock one-shot,
     // so the workload gate has no delivery to await here.
     let outcome = post_boot(&env, &action, &mut vm, None, None).await;
-    collect_run_artifacts(&env, &action, &slot, args.out_dir.as_deref(), &mut vm).await;
+    warn_legacy_artifact_failure(
+        collect_run_artifacts(&env, &action, &slot, args.out_dir.as_deref(), &mut vm).await,
+        "restore",
+    );
 
     if let Err(e) = vm.shutdown().await {
         warn!(error = %e, "restore shutdown reported an error");
@@ -3272,6 +3282,16 @@ struct CloneCommandOutcome {
     exit_code: u8,
 }
 
+struct CloneCommandInnerFailure {
+    record: Option<CloneRecord>,
+    error: RoomsError,
+}
+
+struct CloneCommandMemberFailure {
+    record: Option<CloneRecord>,
+    failure: CloneFailure,
+}
+
 async fn run_clone_commands(
     ready: Vec<CloneCustody>,
     key: PathBuf,
@@ -3308,6 +3328,7 @@ async fn run_clone_commands(
         task_identities.insert(handle.id(), task_identity);
     }
     let mut outcomes = Vec::new();
+    let mut completed_failures = Vec::new();
     let mut failures = Vec::new();
     while let Some(joined) = tasks.join_next_with_id().await {
         match joined {
@@ -3315,9 +3336,12 @@ async fn run_clone_commands(
                 task_identities.remove(&id);
                 outcomes.push(outcome);
             }
-            Ok((id, Err(failure))) => {
+            Ok((id, Err(member_failure))) => {
                 task_identities.remove(&id);
-                failures.push(failure);
+                if let Some(record) = member_failure.record {
+                    completed_failures.push(record);
+                }
+                failures.push(member_failure.failure);
             }
             Err(error) => {
                 let identity = task_identities
@@ -3343,7 +3367,12 @@ async fn run_clone_commands(
         .iter()
         .find(|outcome| outcome.exit_code != 0)
         .map_or(0, |outcome| outcome.exit_code);
-    let records = outcomes.into_iter().map(|outcome| outcome.record).collect();
+    let mut records = outcomes
+        .into_iter()
+        .map(|outcome| outcome.record)
+        .chain(completed_failures)
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| record.clone_net_index);
     if !failures.is_empty() {
         return Err(CloneCommandBatchFailure::new(records, failures, Vec::new()));
     }
@@ -3356,22 +3385,29 @@ async fn execute_clone_command(
     max_wall: Option<Duration>,
     egress_plan: egress::Plan,
     cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
-) -> Result<CloneCommandOutcome, CloneFailure> {
+) -> Result<CloneCommandOutcome, CloneCommandMemberFailure> {
     let out_dir = custody.out_dir.clone();
-    let workload = custody.workload.clone().ok_or_else(|| {
-        CloneFailure::with_output(
-            0,
-            "unknown",
-            out_dir.clone(),
-            RoomsError::Internal("command clone has no assigned workload".to_owned()),
-        )
-    })?;
+    let workload = custody
+        .workload
+        .clone()
+        .ok_or_else(|| CloneCommandMemberFailure {
+            record: None,
+            failure: CloneFailure::with_output(
+                0,
+                "unknown",
+                out_dir.clone(),
+                RoomsError::Internal("command clone has no assigned workload".to_owned()),
+            ),
+        })?;
     let case_id = workload.case_id.clone();
     let command_sha256 = workload.command_sha256.clone();
-    let restored = custody.restored().map_err(|error| {
-        CloneFailure::with_output(0, "unknown", out_dir.clone(), error)
-            .for_case(case_id.clone(), command_sha256.clone())
-    })?;
+    let restored = custody
+        .restored()
+        .map_err(|error| CloneCommandMemberFailure {
+            record: None,
+            failure: CloneFailure::with_output(0, "unknown", out_dir.clone(), error)
+                .for_case(case_id.clone(), command_sha256.clone()),
+        })?;
     let room_id = restored.room_id.clone();
     let clone_net_index = restored.clone_net.as_ref().map_or(0, |net| net.index);
     execute_clone_command_inner(
@@ -3383,9 +3419,10 @@ async fn execute_clone_command(
         cancellation,
     )
     .await
-    .map_err(|error| {
-        CloneFailure::with_output(clone_net_index, &room_id, out_dir, error)
-            .for_case(case_id, command_sha256)
+    .map_err(|failure| CloneCommandMemberFailure {
+        record: failure.record,
+        failure: CloneFailure::with_output(clone_net_index, &room_id, out_dir, failure.error)
+            .for_case(case_id, command_sha256),
     })
 }
 
@@ -3396,14 +3433,23 @@ async fn execute_clone_command_inner(
     max_wall: Option<Duration>,
     egress_plan: egress::Plan,
     cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
-) -> Result<CloneCommandOutcome, RoomsError> {
+) -> Result<CloneCommandOutcome, CloneCommandInnerFailure> {
     let cancellation_observer = cancellation.clone();
     let config = custody.config.clone();
     let out_dir = custody.out_dir.clone();
+    let strict_evidence = custody
+        .workload
+        .as_ref()
+        .is_some_and(|workload| workload.case_id.is_some());
     let lifecycle = Lifecycle::disabled();
     let action = Action::Exec(runner::Runner::Command(command));
-    let outcome = {
-        let restored = custody.restored_mut()?;
+    let (outcome, collection) = {
+        let restored = custody
+            .restored_mut()
+            .map_err(|error| CloneCommandInnerFailure {
+                record: None,
+                error,
+            })?;
         let network = network_config_for(&restored.slot);
         let env = PostBootEnv {
             network: &network,
@@ -3415,7 +3461,7 @@ async fn execute_clone_command_inner(
             egress: &egress_plan,
         };
         let outcome = post_boot(&env, &action, &mut restored.vm, None, Some(cancellation)).await;
-        collect_run_artifacts(
+        let collection = collect_run_artifacts(
             &env,
             &action,
             &restored.slot,
@@ -3423,26 +3469,73 @@ async fn execute_clone_command_inner(
             &mut restored.vm,
         )
         .await;
-        outcome
+        (outcome, collection)
     };
-    let record = match &outcome {
-        Ok(code) => {
-            let status = if observed_clone_termination(&cancellation_observer).is_some() {
-                "cancelled"
-            } else {
-                "exited"
-            };
-            Some(custody.record(status, Some(*code))?)
-        }
-        Err(_) => None,
-    };
+    let record_result = outcome.as_ref().map_or(None, |code| {
+        let status = if observed_clone_termination(&cancellation_observer).is_some() {
+            "cancelled"
+        } else {
+            "exited"
+        };
+        Some(custody.record(status, Some(*code)))
+    });
     let teardown = custody.teardown().await;
-    teardown?;
-    let exit_code = outcome?;
-    let record = record.ok_or_else(|| {
-        RoomsError::Internal("clone command completed without a result record".to_owned())
+    let mut errors = Vec::new();
+    let record = match record_result {
+        Some(Ok(record)) => Some(record),
+        Some(Err(error)) => {
+            errors.push(error);
+            None
+        }
+        None => None,
+    };
+    if let Err(error) = outcome {
+        errors.push(error);
+    }
+    if strict_evidence {
+        if let Err(error) = collection {
+            errors.push(error);
+        }
+    } else if let Err(error) = collection {
+        warn!(%error, "clone artifact finalization incomplete");
+    }
+    if record.is_none() && errors.is_empty() {
+        errors.push(RoomsError::Internal(
+            "clone command completed without a result record".to_owned(),
+        ));
+    }
+    if let Err(error) = teardown {
+        errors.push(error);
+    }
+    if !errors.is_empty() {
+        let error = combine_clone_command_errors(errors);
+        return Err(CloneCommandInnerFailure { record, error });
+    }
+    let exit_code = record
+        .as_ref()
+        .and_then(|record| record.exit_code)
+        .ok_or_else(|| CloneCommandInnerFailure {
+            record: record.clone(),
+            error: RoomsError::Internal("clone command result lost its exit code".to_owned()),
+        })?;
+    let record = record.ok_or_else(|| CloneCommandInnerFailure {
+        record: None,
+        error: RoomsError::Internal("clone command completed without a result record".to_owned()),
     })?;
     Ok(CloneCommandOutcome { record, exit_code })
+}
+
+fn combine_clone_command_errors(mut errors: Vec<RoomsError>) -> RoomsError {
+    if errors.len() == 1 {
+        return errors.remove(0);
+    }
+    RoomsError::Internal(
+        errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 async fn teardown_restored_clone(
@@ -3719,18 +3812,38 @@ async fn collect_run_artifacts(
     slot: &room::Slot,
     out_dir: Option<&Path>,
     vm: &mut firecracker::BootedVm,
-) {
-    if let Some(out_dir) = out_dir {
-        collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await;
-    }
+) -> Result<(), RoomsError> {
+    let collection = match out_dir {
+        Some(out_dir) => {
+            collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await
+        }
+        None => Ok(()),
+    };
     let witnessed = match vm.take_witness() {
         Some(capture) => Some(summarize_witness(capture, slot, env).await),
         None => None,
     };
-    let (Some(w), Some(out_dir)) = (&witnessed, out_dir) else {
-        return;
+    let witness = match (&witnessed, out_dir) {
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
+        _ => Ok(()),
     };
-    persist_witness(w, out_dir).await;
+    let errors = [collection.err(), witness.err()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(RoomsError::Internal(format!(
+        "artifact finalization failed: {}",
+        errors.join("; ")
+    )))
+}
+
+fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
+    if let Err(error) = result {
+        warn!(%error, operation, "artifact finalization incomplete");
+    }
 }
 
 /// A finalized egress witness: the summary plus the raw pcap bytes, held
@@ -3805,24 +3918,30 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// Persist the witness artifacts into `--out`: `witness.json` and `witness.pcap`,
 /// both written atomically (temp + rename), so the evidence survives the room.
 /// Creates the dir first — a run that collected nothing (an idle room) still
-/// gets its witness. Best-effort — a write failure is logged, never fatal (the
-/// run's own outcome and lifecycle summary stand).
-async fn persist_witness(w: &Witnessed, out_dir: &Path) {
-    if let Err(e) = tokio::fs::create_dir_all(out_dir).await {
-        warn!(out = %out_dir.display(), error = %e, "failed to create --out for the witness");
-        return;
-    }
-    match serde_json::to_vec_pretty(&w.summary) {
-        Ok(bytes) => {
-            if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes).await {
-                warn!(error = %e, "failed to write witness.json");
-            }
-        }
-        Err(e) => warn!(error = %e, "failed to serialize witness.json"),
-    }
-    if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw).await {
-        warn!(error = %e, "failed to write witness.pcap into --out");
-    }
+/// gets its witness. Failures are returned after logging so matrix callers can
+/// treat missing evidence as terminal while legacy run/restore behavior stays
+/// best-effort at their call sites.
+async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
+    tokio::fs::create_dir_all(out_dir).await.map_err(|error| {
+        warn!(out = %out_dir.display(), %error, "failed to create --out for the witness");
+        format!("create witness output {}: {error}", out_dir.display())
+    })?;
+    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| {
+        warn!(%error, "failed to serialize witness.json");
+        format!("serialize witness.json: {error}")
+    })?;
+    write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes)
+        .await
+        .map_err(|error| {
+            warn!(%error, "failed to write witness.json");
+            format!("write witness.json: {error}")
+        })?;
+    write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw)
+        .await
+        .map_err(|error| {
+            warn!(%error, "failed to write witness.pcap into --out");
+            format!("write witness.pcap: {error}")
+        })
 }
 
 /// Atomic artifact write into `--out`: temp file in the same dir, then rename,
@@ -3847,22 +3966,32 @@ async fn collect_and_record(
     action: &Action,
     out_dir: &Path,
     lifecycle: &Lifecycle,
-) {
+) -> Result<(), String> {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
     if !matches!(action, Action::Exec(_)) {
-        return;
+        return Ok(());
     }
     lifecycle.emit(&Event::CollectionStarted);
     let collect = collect_to_host(target, key, out_dir);
     match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
-        Ok(Ok(())) => lifecycle.emit(&Event::CollectionDone),
-        Ok(Err(error)) => lifecycle.emit(&Event::CollectionFailed { error }),
+        Ok(Ok(())) => {
+            lifecycle.emit(&Event::CollectionDone);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            lifecycle.emit(&Event::CollectionFailed {
+                error: error.clone(),
+            });
+            Err(error)
+        }
         Err(_) => {
             warn!("artifact collection timed out (guest unresponsive); proceeding to teardown");
+            let error = "timed out (guest unresponsive)".to_owned();
             lifecycle.emit(&Event::CollectionFailed {
-                error: "timed out (guest unresponsive)".to_owned(),
+                error: error.clone(),
             });
+            Err(error)
         }
     }
 }
@@ -5646,6 +5775,31 @@ mod tests {
         assert_eq!(json["cleanup_failures"][0], "cleanup-a");
         assert_eq!(json["cleanup_failures"][1], "cleanup-z");
         assert_eq!(json["exit_code"], 2);
+    }
+
+    #[test]
+    fn matrix_infrastructure_failure_retains_the_completed_case_observation() {
+        let record = matrix_record("clean", "exited", Some(0));
+        let failure = CloneFailure::with_output(
+            record.clone_net_index,
+            &record.room_id,
+            record.out_dir.clone(),
+            RoomsError::Internal("artifact finalization failed: tar stream ended".to_owned()),
+        )
+        .for_case(record.case_id.clone(), record.command_sha256.clone());
+        let batch = CloneCommandBatchFailure::new(vec![record], vec![failure], Vec::new());
+        let raw = clone_command_failure_json(&batch, Some("sha256:manifest"))
+            .expect("serialize matrix failure");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse matrix failure");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["clones"][0]["case_id"], "clean");
+        assert_eq!(json["clones"][0]["status"], "exited");
+        assert_eq!(json["clones"][0]["exit_code"], 0);
+        assert_eq!(json["clones"][0]["snapshot_id"], "snapshot");
+        assert_eq!(json["failures"][0]["case_id"], "clean");
+        assert!(json["failures"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("artifact finalization failed")));
     }
 
     #[test]

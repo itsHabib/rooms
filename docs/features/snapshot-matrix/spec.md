@@ -78,6 +78,12 @@ before teardown and the rejected members remain structured failure records. A
 manifest admission error cannot carry a trusted manifest digest and therefore
 uses the ordinary pre-admission error record.
 
+For matrix cases, primary `/workspace/out` collection and requested witness
+persistence are part of the terminal result, not best-effort decoration. If
+collection or teardown fails after the workload exits, the completed case
+record is retained under `clones` and the infrastructure fault is reported
+separately under `failures`; the matrix envelope is `failed`.
+
 Rooms does **not** decide whether a product observation is acceptable. A case
 command returns the consumer's mechanical verdict, or the consumer evaluates
 the emitted result. A negative control should therefore return zero only when
@@ -104,7 +110,8 @@ the intended failure is observed—for example, `! ./confidence-browser.sh`.
   clone output remains room-ID partitioned.
 - Result tests bind manifest, case, command, room, and output identities.
 - Failure tests pin the uniform terminal envelope, partial-restore evidence,
-  cancellation case retention, and NUL-command rejection.
+  cancellation case retention, completed-observation retention across
+  collection/teardown failures, and NUL-command rejection.
 - Existing `clone` JSON and CLI behavior remain backward compatible.
 - `make check` passes. Privileged acceptance uses a neutral snapshot and
   [`examples/matrix/positive-mutant.json`](../../../examples/matrix/positive-mutant.json)

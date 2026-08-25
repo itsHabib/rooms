@@ -19,7 +19,7 @@ sudo -E rooms matrix "$SNAPSHOT_DIR" \
 - Matrix SHA-256:
   `910aea4934a7888dd7484b340946f0774d90b884ebf08c00a612b0fb83333084`
 - Candidate release-binary SHA-256:
-  `79f191c68d8af09ed405ca66ad12e9b8ef84e25bfd16881e816020d029614ce9`
+  `ad9e844c0413f145897c3d168fedb66ab88bf22278d5336c34d598f4b99a7232`
 
 ## Result
 
@@ -32,7 +32,7 @@ Both cases emitted their own `result.json`, `changeset.json`, `witness.json`,
 `witness.pcap`, and `observation.txt`. Both witness receipts were complete,
 recorded policy `none`, and reported empty permitted, destination, blocked, and
 DNS-query sets. The PCAPs had different hashes, demonstrating separate captures
-rather than one copied receipt (`4b9e1109…` for `clean`, `38367417…` for
+rather than one copied receipt (`8f5bc3b8…` for `clean`, `e89cd22e…` for
 `mutant-detected`).
 
 The terminal `rooms ls --json` roster was empty. The clone namespace and link
