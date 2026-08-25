@@ -22,16 +22,16 @@ use std::path::Path;
 
 use crate::error::SlotError;
 pub use crate::indexed_claim::Claimer;
-use crate::indexed_claim::{self, ClaimOutcome, FreeOutcome, Pool, ReconcileAction};
+use crate::indexed_claim::{self, ClaimOutcome, FreeOutcome, Pool, ReconcileAction, ReleaseError};
 use crate::room::Liveness;
 pub use crate::room::Slot;
 
 /// Directory under the state base holding one lock file per claimed slot.
 pub const SLOTS_DIR: &str = "slots";
 
-/// The free-lock file beside the slots dir, serializing every verify+unlink
-/// critical section ([`free`] and [`reconcile`]'s removal). Claims never take
-/// it — `O_EXCL` creation cannot overwrite anyone.
+/// The free-lock file beside the slots dir, serializing claim publication and
+/// every verify+cleanup critical section. `O_EXCL` still arbitrates competing
+/// claimers; the short lock prevents a claim racing checked host cleanup.
 const FREE_LOCK: &str = "slots.lock";
 
 /// Highest claimable pool slot index: the /24 carve yields 64 /30s, minus the
@@ -137,11 +137,62 @@ pub enum Freed {
 /// teardown against a reused index must not free a *live* sibling's slot
 /// (the same never-act-on-a-reused-identity rule as `terminate_by_identity`).
 pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Freed, SlotError> {
+    free_with_cleanup(state, slot_index, expected_room_id, || Ok(()))
+}
+
+/// Free an ordinary slot only after checked owner-scoped cleanup succeeds.
+///
+/// The exact claim is revalidated and `cleanup` runs while the slot free-lock
+/// remains held. Claims take the same lock, so a stale or duplicate teardown
+/// can never clean a TAP after this index has been reassigned. Cleanup is not
+/// called for an absent or differently-owned claim.
+pub fn free_with_cleanup<F>(
+    state: &Path,
+    slot_index: u8,
+    expected_room_id: &str,
+    cleanup: F,
+) -> Result<Freed, SlotError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     ensure_pool_index(slot_index)?;
-    match indexed_claim::free(state, SLOT_POOL, slot_index, expected_room_id)? {
-        FreeOutcome::Removed => Ok(Freed::Removed),
-        FreeOutcome::AlreadyFree => Ok(Freed::AlreadyFree),
-        FreeOutcome::AlreadyReassigned => Ok(Freed::AlreadyReassigned),
+    let outcome = indexed_claim::free_with(state, SLOT_POOL, slot_index, expected_room_id, cleanup)
+        .map_err(|error| match error {
+            ReleaseError::Io(error) => SlotError::Io(error),
+            ReleaseError::Cleanup(detail) => SlotError::Cleanup(detail),
+        })?;
+    Ok(match outcome {
+        FreeOutcome::Removed => Freed::Removed,
+        FreeOutcome::AlreadyFree => Freed::AlreadyFree,
+        FreeOutcome::AlreadyReassigned => Freed::AlreadyReassigned,
+    })
+}
+
+/// Run checked cleanup for an observed pool TAP only if its slot is still
+/// unclaimed under the allocator lock.
+///
+/// `rooms doctor` samples host links and slot files separately, so that sample
+/// alone cannot authorize deletion. This final revalidation shares the lock
+/// taken by every claim publication: a room that claimed the index after the
+/// sample wins, cleanup is skipped, and its TAP is left untouched.
+pub(crate) fn cleanup_if_unclaimed<F>(
+    state: &Path,
+    slot_index: u8,
+    cleanup: F,
+) -> Result<bool, SlotError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    ensure_pool_index(slot_index)?;
+    let path = state.join(SLOTS_DIR).join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            cleanup().map_err(SlotError::Cleanup)?;
+            Ok(true)
+        }
+        Err(error) => Err(SlotError::Io(error)),
     }
 }
 
@@ -612,14 +663,21 @@ pub struct Reclaimed {
 /// Per file: an empty/short/unparseable token is claim-in-progress → skip
 /// (never reclaim; a later pass re-checks). A parsed token probes the recorded
 /// claimer identity: alive or unknown → skip (never reclaim a live or
-/// unprovable claim); confirmed dead → returned, and the slot file is removed
-/// when no room dir exists for the recorded id. Scan errors downgrade to a
-/// warning — reconcile is a best-effort sweep, not a gate.
-pub fn reconcile(state: &Path) -> Vec<Reclaimed> {
-    indexed_claim::reconcile(state, SLOT_POOL, |_, room_id| {
+/// unprovable claim); confirmed dead → run `cleanup` and remove the slot file
+/// only when both cleanup succeeds and no room dir exists for the recorded id.
+/// The shared reconciler invokes `cleanup` while the exact claim is revalidated
+/// under the slot free-lock, so another owner cannot take this index between
+/// network teardown and unlink. Scan/cleanup errors retain the claim and
+/// downgrade to a warning — reconcile is a best-effort sweep, not a gate.
+pub fn reconcile<F>(state: &Path, mut cleanup: F) -> Vec<Reclaimed>
+where
+    F: FnMut(u8) -> Result<(), String>,
+{
+    indexed_claim::reconcile(state, SLOT_POOL, |index, room_id| {
         if state.join(room_id).is_dir() {
             return Ok(ReconcileAction::Keep);
         }
+        cleanup(index)?;
         Ok(ReconcileAction::Remove)
     })
     .into_iter()
@@ -791,9 +849,10 @@ mod tests {
     )]
 
     use super::{
-        claim, claimed_by, classify_claimer_stat, free, hold_lease_for_teardown, lease,
-        lease_clone, leased_by, parse_token, reconcile, release_lease, reserve, Claimer, Freed,
-        Liveness, Released, Reserved, SlotError, SlotToken, MAX_CLONE_LEASES, MAX_SLOT, SLOTS_DIR,
+        claim, claimed_by, classify_claimer_stat, cleanup_if_unclaimed, free, free_with_cleanup,
+        hold_lease_for_teardown, lease, lease_clone, leased_by, parse_token, reconcile,
+        release_lease, reserve, Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken,
+        MAX_CLONE_LEASES, MAX_SLOT, SLOTS_DIR,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -967,6 +1026,102 @@ mod tests {
     }
 
     #[test]
+    fn stale_cleanup_never_touches_a_reassigned_slot() {
+        use std::cell::Cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let old = room_id(1);
+        let new = room_id(2);
+        claim(dir.path(), &old, ME, 8, Some(1)).unwrap();
+        free_with_cleanup(dir.path(), 1, &old, || Ok(())).unwrap();
+        claim(dir.path(), &new, ME, 8, Some(1)).unwrap();
+
+        let touched_network = Cell::new(false);
+        let freed = free_with_cleanup(dir.path(), 1, &old, || {
+            touched_network.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(freed, Freed::AlreadyReassigned);
+        assert!(
+            !touched_network.get(),
+            "stale teardown must not clean the new owner's TAP"
+        );
+        assert!(claimed_by(dir.path(), 1, &new).unwrap());
+    }
+
+    #[test]
+    fn cleanup_failure_retains_the_exact_slot_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = room_id(1);
+        claim(dir.path(), &owner, ME, 8, Some(1)).unwrap();
+
+        let error = free_with_cleanup(dir.path(), 1, &owner, || {
+            Err("injected checked cleanup failure".to_owned())
+        })
+        .expect_err("failed cleanup must prevent claim unlink");
+
+        assert!(matches!(
+            error,
+            SlotError::Cleanup(detail) if detail == "injected checked cleanup failure"
+        ));
+        assert!(claimed_by(dir.path(), 1, &owner).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_cleanup_runs_while_holding_the_free_lock() {
+        use std::fs::OpenOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let owner = room_id(1);
+        claim(dir.path(), &owner, ME, 8, Some(1)).unwrap();
+        let lock_path = dir.path().join("slots.lock");
+
+        free_with_cleanup(dir.path(), 1, &owner, || {
+            let contender = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("open competing free-lock fd");
+            assert!(
+                contender.try_lock().is_err(),
+                "network cleanup must retain the slot free-lock"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn observed_orphan_cleanup_revalidates_the_slot_before_touching_network() {
+        use std::cell::Cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cleaned = Cell::new(false);
+        assert!(cleanup_if_unclaimed(dir.path(), 1, || {
+            cleaned.set(true);
+            Ok(())
+        })
+        .unwrap());
+        assert!(cleaned.get(), "an unclaimed sampled TAP may be cleaned");
+
+        let owner = room_id(1);
+        claim(dir.path(), &owner, ME, 8, Some(1)).unwrap();
+        cleaned.set(false);
+        assert!(!cleanup_if_unclaimed(dir.path(), 1, || {
+            cleaned.set(true);
+            Ok(())
+        })
+        .unwrap());
+        assert!(
+            !cleaned.get(),
+            "a claim that arrived after the sample must suppress TAP cleanup"
+        );
+    }
+
+    #[test]
     fn claimed_by_distinguishes_exact_claim_from_reservation_and_stranger() {
         let dir = tempfile::tempdir().unwrap();
         let base = room_id(1);
@@ -1097,7 +1252,7 @@ mod tests {
         std::fs::write(slot_path(dir.path(), 1), b"").unwrap();
         std::fs::write(slot_path(dir.path(), 2), room_id(2)).unwrap();
         std::fs::write(slot_path(dir.path(), 3), b"garbage here").unwrap();
-        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
         for index in 1..=3 {
             assert!(
                 !slot_path(dir.path(), index).exists(),
@@ -1117,7 +1272,7 @@ mod tests {
         for stray in strays {
             std::fs::write(dir.path().join(SLOTS_DIR).join(stray), &token).unwrap();
         }
-        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
         for stray in strays {
             assert!(
                 dir.path().join(SLOTS_DIR).join(stray).exists(),
@@ -1129,7 +1284,7 @@ mod tests {
     #[test]
     fn reconcile_on_missing_slots_dir_is_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
     }
 
     // --- D8: reservation / lease / return --------------------------------
@@ -1241,7 +1396,7 @@ mod tests {
             format!("@reservation {}\n", room_id(100)),
         )
         .unwrap();
-        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
         assert!(
             slot_path(dir.path(), 1).exists(),
             "a reservation has no live claimer but is never reclaimed"
@@ -1257,7 +1412,7 @@ mod tests {
             format!("@lease {} {}\n", room_id(100), room_id(2)),
         )
         .unwrap();
-        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
         assert!(slot_path(dir.path(), 1).exists());
     }
 
@@ -1531,7 +1686,7 @@ mod tests {
         assert!(hold_lease_for_teardown(dir.path(), 5, &snap, &room_id(3))
             .unwrap()
             .is_none());
-        assert_eq!(reconcile(dir.path()), Vec::new());
+        assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
         assert_eq!(
             std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
             forged,
@@ -1710,7 +1865,7 @@ mod tests {
         fn reconcile_reclaims_a_dead_claimer_with_no_room_dir() {
             let dir = tempfile::tempdir().unwrap();
             claim(dir.path(), &room_id(1), DEAD, 8, None).unwrap();
-            let reclaimed = reconcile(dir.path());
+            let reclaimed = reconcile(dir.path(), |_| Ok(()));
             assert_eq!(
                 reclaimed,
                 vec![Reclaimed {
@@ -1727,7 +1882,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             claim(dir.path(), &room_id(1), DEAD, 8, None).unwrap();
             std::fs::create_dir(dir.path().join(room_id(1))).unwrap();
-            let reclaimed = reconcile(dir.path());
+            let reclaimed = reconcile(dir.path(), |_| Ok(()));
             assert_eq!(
                 reclaimed,
                 vec![Reclaimed {
@@ -1746,7 +1901,7 @@ mod tests {
         fn reconcile_never_reclaims_a_live_claimer() {
             let dir = tempfile::tempdir().unwrap();
             claim(dir.path(), &room_id(1), live_claimer(), 8, None).unwrap();
-            assert_eq!(reconcile(dir.path()), Vec::new());
+            assert_eq!(reconcile(dir.path(), |_| Ok(())), Vec::new());
             assert!(slot_path(dir.path(), 1).exists());
         }
 
@@ -1759,7 +1914,7 @@ mod tests {
             let mut me = live_claimer();
             me.starttime = me.starttime.wrapping_add(1);
             claim(dir.path(), &room_id(1), me, 8, None).unwrap();
-            let reclaimed = reconcile(dir.path());
+            let reclaimed = reconcile(dir.path(), |_| Ok(()));
             assert_eq!(reclaimed.len(), 1);
             assert!(!slot_path(dir.path(), 1).exists());
         }
@@ -1768,7 +1923,7 @@ mod tests {
         fn free_absent_after_reconcile_is_idempotent() {
             let dir = tempfile::tempdir().unwrap();
             claim(dir.path(), &room_id(1), DEAD, 8, None).unwrap();
-            reconcile(dir.path());
+            reconcile(dir.path(), |_| Ok(()));
             // The crashed room's late teardown retry must be a clean no-op.
             let freed = super::super::free(dir.path(), 1, &room_id(1)).unwrap();
             assert_eq!(freed, super::super::Freed::AlreadyFree);

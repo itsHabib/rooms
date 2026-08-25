@@ -60,6 +60,10 @@ pub enum SlotError {
     /// guest IP forbids two concurrent restores of one snapshot.
     #[error("slot {index} reservation is already leased")]
     LeaseHeld { index: u8 },
+    /// Owner-scoped host cleanup failed while the exact slot free-lock was
+    /// held. The claim remains published so a later gc can retry safely.
+    #[error("checked slot cleanup failed: {0}")]
+    Cleanup(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

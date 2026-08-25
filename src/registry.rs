@@ -451,29 +451,34 @@ fn slot_release_for(
     )))
 }
 
-/// Reclaim leaked slots and sweep orphaned taps. Two passes, in order:
+/// Reclaim leaked slots whose claimers are confirmed dead, then clean pool
+/// TAPs that remain unclaimed after final allocator-locked revalidation.
 ///
-/// 1. `slot::reconcile` frees slot files whose claimer is dead, deleting each
-///    reclaimed slot's tap.
-/// 2. Any `tap-fc<k>` still present with no slot file is a true orphan — either
-///    a boot-path crash before the room registered, or a pass-1 tap-delete that
-///    failed after the slot file was already gone. Delete it so the next room
-///    claiming that index doesn't fail on `ip tuntap add`. This is the sweep
-///    `rooms doctor` promises for its orphaned-tap warning.
-///
-/// Best-effort throughout: an unresolvable base skips it, every tap delete
-/// tolerates already-gone.
+/// `slot::reconcile` revalidates each exact claim under its free-lock, then
+/// runs checked egress/TAP cleanup before unlinking the claim. A cleanup error
+/// retains the claim as the retry breadcrumb. The second pass starts from the
+/// diagnostic host-link sample, but `slot::cleanup_if_unclaimed` checks the
+/// index again under the same lock every claim takes before touching the host.
 fn reconcile_leaked_slots(config: &RoomsConfig) {
+    let orphaned_taps = doctor::orphaned_pool_taps(config);
+    reconcile_leaked_slots_with(config, &orphaned_taps, |index| {
+        firecracker::remove_egress_and_tap(&format!("tap-fc{index}"))
+            .map_err(|error| error.to_string())
+    });
+}
+
+fn reconcile_leaked_slots_with<F>(config: &RoomsConfig, orphaned_taps: &[u8], mut cleanup: F)
+where
+    F: FnMut(u8) -> Result<(), String>,
+{
     let Some(base) = config.resolved_state_base() else {
         return;
     };
-    for reclaimed in slot::reconcile(&base) {
-        if reclaimed.removed {
-            firecracker::delete_tap(&format!("tap-fc{}", reclaimed.index));
+    let _reclaimed = slot::reconcile(&base, &mut cleanup);
+    for &index in orphaned_taps {
+        if let Err(error) = slot::cleanup_if_unclaimed(&base, index, || cleanup(index)) {
+            warn!(index, %error, "could not clean revalidated unclaimed pool TAP");
         }
-    }
-    for index in doctor::orphaned_pool_taps(config) {
-        firecracker::delete_tap(&format!("tap-fc{index}"));
     }
 }
 
@@ -803,6 +808,8 @@ mod tests {
         reason = "test module"
     )]
 
+    #[cfg(target_os = "linux")]
+    use super::reconcile_leaked_slots_with;
     use super::{
         classify, gc, is_valid_room_id, kill, kill_live, list_rooms, parse_ls_report,
         should_reconcile_global_allocators, GcOptions, KillDisposition, ListReport, RoomEntry,
@@ -941,6 +948,87 @@ mod tests {
         }));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leaked_slot_cleanup_precedes_claim_unlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let id = unique_id();
+        let dead = crate::slot::Claimer {
+            pid: 4_194_305,
+            starttime: 1,
+        };
+        crate::slot::claim(dir.path(), &id, dead, 8, Some(1)).unwrap();
+        let claim = dir.path().join("slots/1");
+
+        reconcile_leaked_slots_with(&config, &[], |index| {
+            assert_eq!(index, 1);
+            assert!(claim.exists(), "cleanup must precede claim unlink");
+            Ok(())
+        });
+
+        assert!(
+            !claim.exists(),
+            "successful cleanup publishes the slot free"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn leaked_slot_cleanup_failure_retains_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let id = unique_id();
+        let dead = crate::slot::Claimer {
+            pid: 4_194_305,
+            starttime: 1,
+        };
+        crate::slot::claim(dir.path(), &id, dead, 8, Some(1)).unwrap();
+        let claim = dir.path().join("slots/1");
+
+        reconcile_leaked_slots_with(&config, &[], |_| Err("injected cleanup failure".to_owned()));
+
+        assert!(claim.exists(), "failed cleanup must retain the retry claim");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphaned_tap_sweep_revalidates_a_late_claim_before_cleanup() {
+        use std::cell::Cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let cleaned = Cell::new(false);
+        reconcile_leaked_slots_with(&config, &[1], |_| {
+            cleaned.set(true);
+            Ok(())
+        });
+        assert!(cleaned.get(), "an unclaimed sampled TAP is cleaned");
+
+        let id = unique_id();
+        crate::slot::claim(
+            dir.path(),
+            &id,
+            crate::slot::Claimer {
+                pid: std::process::id(),
+                starttime: room::starttime_of(std::process::id())
+                    .expect("current process starttime"),
+            },
+            8,
+            Some(1),
+        )
+        .unwrap();
+        cleaned.set(false);
+        reconcile_leaked_slots_with(&config, &[1], |_| {
+            cleaned.set(true);
+            Ok(())
+        });
+        assert!(
+            !cleaned.get(),
+            "a claim that arrived after the host-link sample suppresses cleanup"
+        );
+    }
+
     #[test]
     fn id_validator_rejects_traversal_and_junk() {
         assert!(is_valid_room_id(VALID_ID));
@@ -1023,11 +1111,12 @@ mod tests {
         }
     }
 
-    /// Reaping a slotted orphaned-dead room frees its slot file — the reap path
-    /// threads the room.json slot into `reap_orphan`'s compare-and-delete free.
+    /// Without host network authority, reaping a slotted orphan removes its
+    /// room resources but reports the retained claim. A later checked global
+    /// reconcile can finish cleanup and only then publish the slot free.
     #[cfg(target_os = "linux")]
     #[test]
-    fn gc_frees_slot_of_reaped_slotted_room() {
+    fn gc_retains_slot_until_checked_network_cleanup_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let config = config_with_base(dir.path());
         let id = make_room(&config, Some(4_194_305), false, true);
@@ -1054,11 +1143,14 @@ mod tests {
         assert!(slot_file.exists(), "slot file present before reap");
 
         let report = gc(&config, &GcOptions::default()).unwrap();
-        assert!(report.outcomes.iter().any(|o| o.id == id && o.reaped));
+        assert!(report.outcomes.iter().any(|o| o.id == id && !o.reaped));
         assert!(
-            !slot_file.exists(),
-            "reaping a slotted room must free its slot file"
+            slot_file.exists(),
+            "unproved network cleanup must retain the retry claim"
         );
+
+        reconcile_leaked_slots_with(&config, &[], |_| Ok(()));
+        assert!(!slot_file.exists(), "checked retry publishes the slot free");
     }
 
     #[cfg(target_os = "linux")]

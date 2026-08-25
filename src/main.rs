@@ -1076,9 +1076,6 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             lifecycle.emit(&Event::BootFailed {
                 error: e.to_string(),
             });
-            // boot's guard frees the slot once it owns it; this covers an early
-            // failure before that. Compare-and-delete makes the double-free safe.
-            let _ = slot::free(&state_base, claimed.index, &room_id);
             return Err(e.into());
         }
     };
@@ -1198,12 +1195,7 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     };
     let mut vm = match firecracker::boot(&boot_req, config).await {
         Ok(vm) => vm,
-        Err(e) => {
-            // boot's guard frees the slot once it owns it; this covers an early
-            // failure before that (compare-and-delete makes the double free safe).
-            let _ = slot::free(&state_base, claimed.index, &room_id);
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
 
     let Some(delivery) = vm.take_provisioning_delivery() else {
