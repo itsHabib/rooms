@@ -1149,7 +1149,7 @@ mod tests {
             "unproved network cleanup must retain the retry claim"
         );
 
-        reconcile_leaked_slots_with(&config, |_| Ok(()));
+        reconcile_leaked_slots_with(&config, &[], |_| Ok(()));
         assert!(!slot_file.exists(), "checked retry publishes the slot free");
     }
 
