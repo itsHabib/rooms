@@ -3283,13 +3283,13 @@ struct CloneCommandOutcome {
 }
 
 struct CloneCommandInnerFailure {
-    record: Option<CloneRecord>,
-    error: RoomsError,
+    record: Option<Box<CloneRecord>>,
+    error: Box<RoomsError>,
 }
 
 struct CloneCommandMemberFailure {
-    record: Option<CloneRecord>,
-    failure: CloneFailure,
+    record: Option<Box<CloneRecord>>,
+    failure: Box<CloneFailure>,
 }
 
 async fn run_clone_commands(
@@ -3339,9 +3339,9 @@ async fn run_clone_commands(
             Ok((id, Err(member_failure))) => {
                 task_identities.remove(&id);
                 if let Some(record) = member_failure.record {
-                    completed_failures.push(record);
+                    completed_failures.push(*record);
                 }
-                failures.push(member_failure.failure);
+                failures.push(*member_failure.failure);
             }
             Err(error) => {
                 let identity = task_identities
@@ -3392,12 +3392,12 @@ async fn execute_clone_command(
         .clone()
         .ok_or_else(|| CloneCommandMemberFailure {
             record: None,
-            failure: CloneFailure::with_output(
+            failure: Box::new(CloneFailure::with_output(
                 0,
                 "unknown",
                 out_dir.clone(),
                 RoomsError::Internal("command clone has no assigned workload".to_owned()),
-            ),
+            )),
         })?;
     let case_id = workload.case_id.clone();
     let command_sha256 = workload.command_sha256.clone();
@@ -3405,8 +3405,10 @@ async fn execute_clone_command(
         .restored()
         .map_err(|error| CloneCommandMemberFailure {
             record: None,
-            failure: CloneFailure::with_output(0, "unknown", out_dir.clone(), error)
-                .for_case(case_id.clone(), command_sha256.clone()),
+            failure: Box::new(
+                CloneFailure::with_output(0, "unknown", out_dir.clone(), error)
+                    .for_case(case_id.clone(), command_sha256.clone()),
+            ),
         })?;
     let room_id = restored.room_id.clone();
     let clone_net_index = restored.clone_net.as_ref().map_or(0, |net| net.index);
@@ -3421,8 +3423,10 @@ async fn execute_clone_command(
     .await
     .map_err(|failure| CloneCommandMemberFailure {
         record: failure.record,
-        failure: CloneFailure::with_output(clone_net_index, &room_id, out_dir, failure.error)
-            .for_case(case_id, command_sha256),
+        failure: Box::new(
+            CloneFailure::with_output(clone_net_index, &room_id, out_dir, *failure.error)
+                .for_case(case_id, command_sha256),
+        ),
     })
 }
 
@@ -3448,7 +3452,7 @@ async fn execute_clone_command_inner(
             .restored_mut()
             .map_err(|error| CloneCommandInnerFailure {
                 record: None,
-                error,
+                error: Box::new(error),
             })?;
         let network = network_config_for(&restored.slot);
         let env = PostBootEnv {
@@ -3509,18 +3513,25 @@ async fn execute_clone_command_inner(
     }
     if !errors.is_empty() {
         let error = combine_clone_command_errors(errors);
-        return Err(CloneCommandInnerFailure { record, error });
+        return Err(CloneCommandInnerFailure {
+            record: record.map(Box::new),
+            error: Box::new(error),
+        });
     }
     let exit_code = record
         .as_ref()
         .and_then(|record| record.exit_code)
         .ok_or_else(|| CloneCommandInnerFailure {
-            record: record.clone(),
-            error: RoomsError::Internal("clone command result lost its exit code".to_owned()),
+            record: record.clone().map(Box::new),
+            error: Box::new(RoomsError::Internal(
+                "clone command result lost its exit code".to_owned(),
+            )),
         })?;
     let record = record.ok_or_else(|| CloneCommandInnerFailure {
         record: None,
-        error: RoomsError::Internal("clone command completed without a result record".to_owned()),
+        error: Box::new(RoomsError::Internal(
+            "clone command completed without a result record".to_owned(),
+        )),
     })?;
     Ok(CloneCommandOutcome { record, exit_code })
 }

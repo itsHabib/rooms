@@ -19,20 +19,20 @@ sudo -E rooms matrix "$SNAPSHOT_DIR" \
 - Matrix SHA-256:
   `910aea4934a7888dd7484b340946f0774d90b884ebf08c00a612b0fb83333084`
 - Candidate release-binary SHA-256:
-  `ad9e844c0413f145897c3d168fedb66ab88bf22278d5336c34d598f4b99a7232`
+  `20e340b520839ef841dc071cb3918cb3cf880eb60b11b4189692a80bab8ac908`
 
 ## Result
 
 | Case | Command SHA-256 | Observation | Host exit | Clone net | Result |
 | --- | --- | --- | --- | --- | --- |
-| `clean` | `cda802e0decedd4d22e66e4ff721c8bec5e40d88f6719f81e4d926dbc81839b9` | `green` | 0 | `rooms-c1` | positive control passed |
-| `mutant-detected` | `4e5231d4a418e4c77dacbf4c3459fe974ef4dd0e89126b81b683778fb531d568` | `red` | 0 | `rooms-c2` | negative control detected its mutant |
+| `clean` | `cda802e0decedd4d22e66e4ff721c8bec5e40d88f6719f81e4d926dbc81839b9` | `green` | 0 | `rooms-c2` | positive control passed |
+| `mutant-detected` | `4e5231d4a418e4c77dacbf4c3459fe974ef4dd0e89126b81b683778fb531d568` | `red` | 0 | `rooms-c1` | negative control detected its mutant |
 
 Both cases emitted their own `result.json`, `changeset.json`, `witness.json`,
 `witness.pcap`, and `observation.txt`. Both witness receipts were complete,
 recorded policy `none`, and reported empty permitted, destination, blocked, and
 DNS-query sets. The PCAPs had different hashes, demonstrating separate captures
-rather than one copied receipt (`8f5bc3b8…` for `clean`, `e89cd22e…` for
+rather than one copied receipt (`2aacd65c…` for `clean`, `6f98a57c…` for
 `mutant-detected`).
 
 The terminal `rooms ls --json` roster was empty. The clone namespace and link
