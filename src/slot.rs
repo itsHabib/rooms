@@ -159,7 +159,7 @@ where
     let outcome = indexed_claim::free_with(state, SLOT_POOL, slot_index, expected_room_id, cleanup)
         .map_err(|error| match error {
             ReleaseError::Io(error) => SlotError::Io(error),
-            ReleaseError::Cleanup(detail) => SlotError::Io(std::io::Error::other(detail)),
+            ReleaseError::Cleanup(detail) => SlotError::Cleanup(detail),
         })?;
     Ok(match outcome {
         FreeOutcome::Removed => Freed::Removed,
@@ -1034,9 +1034,10 @@ mod tests {
         })
         .expect_err("failed cleanup must prevent claim unlink");
 
-        assert!(error
-            .to_string()
-            .contains("injected checked cleanup failure"));
+        assert!(matches!(
+            error,
+            SlotError::Cleanup(detail) if detail == "injected checked cleanup failure"
+        ));
         assert!(claimed_by(dir.path(), 1, &owner).unwrap());
     }
 

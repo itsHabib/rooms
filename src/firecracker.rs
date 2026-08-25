@@ -297,11 +297,25 @@ impl RoomGuard {
     /// exact claim's free-lock hold, so a duplicate teardown cannot delete a
     /// TAP that was freed and recreated for another room.
     fn release_network(&self) {
+        self.release_network_with(remove_egress_and_tap);
+    }
+
+    fn release_network_with<F>(&self, cleanup: F)
+    where
+        F: FnOnce(&str) -> Result<(), FirecrackerError>,
+    {
         let Some(plan) = plan_release(
             self.tap_name.as_deref(),
             self.tap_owned,
             self.slot_release.as_ref(),
         ) else {
+            if self.slot_release.is_some() {
+                warn!(
+                    tap = ?self.tap_name,
+                    tap_owned = self.tap_owned,
+                    "refusing network release: slot and TAP custody do not agree"
+                );
+            }
             return;
         };
         let ReleasePlan::SlotBound {
@@ -311,7 +325,7 @@ impl RoomGuard {
             room_id,
         } = plan;
         match crate::slot::free_with_cleanup(&state_base, index, &room_id, || {
-            remove_egress_and_tap(&tap).map_err(|error| error.to_string())
+            cleanup(&tap).map_err(|error| error.to_string())
         }) {
             Ok(freed) => debug!(index, ?freed, "released pool-slot network custody"),
             Err(error) => {
@@ -569,8 +583,11 @@ pub async fn boot(
         fc_gid,
     )
     .await?;
-    debug_assert_eq!(jail_layout.instance_dir, instance_dir);
-    debug_assert_eq!(jail_layout.host_socket, socket);
+    if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
+        return Err(FirecrackerError::Internal(
+            "guard and staged jail layout paths diverged".to_owned(),
+        ));
+    }
     let log_path = per_room_dir.join("firecracker.log");
 
     // Claim custody moved to the guard before jail staging. Create the TAP only
@@ -2972,6 +2989,43 @@ mod tests {
         assert!(
             !slot_file.exists(),
             "a failure before resource creation must release its exact claim"
+        );
+    }
+
+    #[test]
+    fn checked_guard_release_frees_the_exact_slot_after_cleanup_succeeds() {
+        use crate::slot::{self, Claimer};
+
+        let state = tempfile::tempdir().expect("tempdir");
+        let id = "01abcdefghijklmnopqrstuvwx";
+        let claimed = slot::claim(
+            state.path(),
+            id,
+            Claimer {
+                pid: 1,
+                starttime: 1,
+            },
+            8,
+            None,
+        )
+        .expect("claim slot");
+        let slot_file = state.path().join("slots").join(claimed.index.to_string());
+        let room_dir = state.path().join(id);
+        std::fs::create_dir_all(&room_dir).expect("room dir");
+
+        let config = RoomsConfig::default();
+        let mut guard = RoomGuard::new(room_dir.clone(), room_dir.join("api.sock"), &config);
+        super::PendingSlotClaim::new(state.path().to_path_buf(), &claimed, id).handoff(&mut guard);
+        guard.release_network_with(|tap| {
+            assert_eq!(tap, claimed.tap);
+            assert!(slot_file.exists(), "cleanup must precede claim unlink");
+            Ok(())
+        });
+        guard.dismiss();
+
+        assert!(
+            !slot_file.exists(),
+            "successful checked cleanup must publish the exact slot as free"
         );
     }
 
