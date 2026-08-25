@@ -1757,21 +1757,41 @@ impl Drop for AllocatedClone {
     }
 }
 
-type CloneTaskIdentity = (u8, String, Option<String>, Option<String>);
+struct CloneTaskIdentity {
+    clone_net_index: u8,
+    room_id: String,
+    case_id: Option<String>,
+    command_sha256: Option<String>,
+    out_dir: Option<PathBuf>,
+}
+
+impl CloneTaskIdentity {
+    fn unknown() -> Self {
+        Self {
+            clone_net_index: u8::MAX,
+            room_id: "unknown".to_owned(),
+            case_id: None,
+            command_sha256: None,
+            out_dir: None,
+        }
+    }
+}
 
 fn allocated_clone_task_identity(
     allocation: &AllocatedClone,
     workload: Option<&CloneWorkload>,
+    out_dir: Option<PathBuf>,
 ) -> CloneTaskIdentity {
-    (
-        allocation
+    CloneTaskIdentity {
+        clone_net_index: allocation
             .network
             .as_ref()
             .map_or(u8::MAX, |network| network.index),
-        allocation.room_id.clone(),
-        workload.and_then(|value| value.case_id.clone()),
-        workload.and_then(|value| value.command_sha256.clone()),
-    )
+        room_id: allocation.room_id.clone(),
+        case_id: workload.and_then(|value| value.case_id.clone()),
+        command_sha256: workload.and_then(|value| value.command_sha256.clone()),
+        out_dir,
+    }
 }
 
 /// One fully restored clone held by the batch orchestrator.
@@ -2073,10 +2093,27 @@ impl CloneRestoreBatchFailure {
     }
 
     fn summary(&self) -> String {
+        let failures = self
+            .failures
+            .iter()
+            .map(|failure| {
+                let case = failure
+                    .case_id
+                    .as_deref()
+                    .map_or_else(String::new, |id| format!("case {id} "));
+                format!(
+                    "{case}net {} room {}: {}",
+                    failure.clone_net_index, failure.room_id, failure.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.cleanup_failures.is_empty() {
+            return format!("clone restore failed: {failures}");
+        }
         format!(
-            "clone restore batch failed for {} member(s); {} cleanup failure(s)",
-            self.failures.len(),
-            self.cleanup_failures.len()
+            "clone restore failed: {failures}; partial clone cleanup incomplete: {}",
+            self.cleanup_failures.join("; ")
         )
     }
 }
@@ -2140,14 +2177,17 @@ impl CloneCancellation {
     fn with_details(
         signal: CloneTermination,
         mut clones: Vec<CloneRecord>,
-        failures: Vec<CloneFailureRecord>,
-        cleanup_failures: Vec<String>,
+        mut failures: Vec<CloneFailureRecord>,
+        mut cleanup_failures: Vec<String>,
     ) -> Self {
         for clone in &mut clones {
             if clone.exit_code == Some(signal.exit_code()) {
                 clone.status = "cancelled";
             }
         }
+        clones.sort_by_key(|record| record.clone_net_index);
+        failures.sort_by_key(|failure| failure.clone_net_index);
+        cleanup_failures.sort();
         Self {
             signal,
             clones,
@@ -2831,20 +2871,23 @@ async fn restore_clone_batch(
             .secrets
             .as_ref()
             .map(vsock::SecretsPayload::clone_bytes);
-        let task_identity = allocated_clone_task_identity(&allocation, workload.as_ref());
-        let case_id = task_identity.2.clone();
-        let command_sha256 = task_identity.3.clone();
+        let case_id = workload.as_ref().and_then(|value| value.case_id.clone());
+        let command_sha256 = workload
+            .as_ref()
+            .and_then(|value| value.command_sha256.clone());
         let out_dir = clone_output_dir(
             args.out_dir.as_deref(),
             &allocation.room_id,
             case_id.as_deref(),
         );
+        let task_identity =
+            allocated_clone_task_identity(&allocation, workload.as_ref(), out_dir.clone());
         let task_prepared = Arc::clone(&prepared);
         let handle = tasks.spawn(async move {
             let network = allocation
                 .network()
                 .map_err(|error| {
-                    CloneFailure::new(0, &allocation.room_id, error)
+                    CloneFailure::with_output(0, &allocation.room_id, out_dir.clone(), error)
                         .for_case(case_id.clone(), command_sha256.clone())
                 })?
                 .clone();
@@ -2871,9 +2914,10 @@ async fn restore_clone_batch(
             )
             .await
             .map_err(|error| {
-                CloneFailure::new(
+                CloneFailure::with_output(
                     clone_net_index,
                     &allocation.room_id,
+                    out_dir.clone(),
                     RoomsError::Internal(error.to_string()),
                 )
                 .for_case(case_id.clone(), command_sha256.clone())
@@ -2931,20 +2975,21 @@ async fn collect_clone_restores(
             Err(error) => {
                 let identity = task_identities
                     .remove(&error.id())
-                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned(), None, None));
+                    .unwrap_or_else(CloneTaskIdentity::unknown);
                 if cancelled.is_some() && error.is_cancelled() {
                     continue;
                 }
                 failures.push(
-                    CloneFailure::new(
-                        identity.0,
-                        &identity.1,
+                    CloneFailure::with_output(
+                        identity.clone_net_index,
+                        &identity.room_id,
+                        identity.out_dir,
                         RoomsError::Internal(format!(
                             "restore worker {}",
                             clone_join_error_kind(&error)
                         )),
                     )
-                    .for_case(identity.2, identity.3),
+                    .for_case(identity.case_id, identity.command_sha256),
                 );
             }
         }
@@ -3240,18 +3285,19 @@ async fn run_clone_commands(
         let (clone_net_index, room_id) = custody
             .identity()
             .unwrap_or_else(|_| (u8::MAX, "unknown".to_owned()));
-        let task_identity = (
+        let task_identity = CloneTaskIdentity {
             clone_net_index,
             room_id,
-            custody
+            case_id: custody
                 .workload
                 .as_ref()
                 .and_then(|workload| workload.case_id.clone()),
-            custody
+            command_sha256: custody
                 .workload
                 .as_ref()
                 .and_then(|workload| workload.command_sha256.clone()),
-        );
+            out_dir: custody.out_dir.clone(),
+        };
         let handle = tasks.spawn(execute_clone_command(
             custody,
             key.clone(),
@@ -3263,7 +3309,6 @@ async fn run_clone_commands(
     }
     let mut outcomes = Vec::new();
     let mut failures = Vec::new();
-    let mut join_failures = Vec::new();
     while let Some(joined) = tasks.join_next_with_id().await {
         match joined {
             Ok((id, Ok(outcome))) => {
@@ -3277,17 +3322,19 @@ async fn run_clone_commands(
             Err(error) => {
                 let identity = task_identities
                     .remove(&error.id())
-                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned(), None, None));
-                let case = identity
-                    .2
-                    .as_deref()
-                    .map_or_else(String::new, |id| format!("case {id} "));
-                join_failures.push(format!(
-                    "{case}net {} room {}: command worker {}",
-                    identity.0,
-                    identity.1,
-                    clone_join_error_kind(&error)
-                ));
+                    .unwrap_or_else(CloneTaskIdentity::unknown);
+                failures.push(
+                    CloneFailure::with_output(
+                        identity.clone_net_index,
+                        &identity.room_id,
+                        identity.out_dir,
+                        RoomsError::Internal(format!(
+                            "command worker {}",
+                            clone_join_error_kind(&error)
+                        )),
+                    )
+                    .for_case(identity.case_id, identity.command_sha256),
+                );
             }
         }
     }
@@ -3297,12 +3344,8 @@ async fn run_clone_commands(
         .find(|outcome| outcome.exit_code != 0)
         .map_or(0, |outcome| outcome.exit_code);
     let records = outcomes.into_iter().map(|outcome| outcome.record).collect();
-    if !failures.is_empty() || !join_failures.is_empty() {
-        return Err(CloneCommandBatchFailure::new(
-            records,
-            failures,
-            join_failures,
-        ));
+    if !failures.is_empty() {
+        return Err(CloneCommandBatchFailure::new(records, failures, Vec::new()));
     }
     Ok((code, records))
 }
@@ -5555,6 +5598,10 @@ mod tests {
         );
         assert_eq!(json["cleanup_failures"][0], "net 4 cleanup failed");
         assert!(json.get("task_failures").is_none());
+        assert_eq!(
+            failure.summary(),
+            "clone restore failed: case browser-mutant net 4 room room-four: restore rejected; partial clone cleanup incomplete: net 4 cleanup failed"
+        );
     }
 
     #[test]
@@ -5571,6 +5618,34 @@ mod tests {
         assert_eq!(json["clones"][0]["case_id"], "clean");
         assert_eq!(json["clones"][0]["command_sha256"], "sha256:command");
         assert_eq!(json["failures"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn matrix_cancellation_canonicalizes_failure_and_cleanup_evidence() {
+        let failure = |index: u8, case_id: &str| CloneFailureRecord {
+            case_id: Some(case_id.to_owned()),
+            command_sha256: Some(format!("sha256:{case_id}")),
+            clone_net_index: index,
+            room_id: format!("room-{index}"),
+            status: "failed",
+            error_kind: "internal",
+            message: "restore failed".to_owned(),
+            out_dir: Some(PathBuf::from(format!("/out/{case_id}"))),
+        };
+        let cancellation = CloneCancellation::with_details(
+            CloneTermination::Interrupt,
+            Vec::new(),
+            vec![failure(7, "late"), failure(2, "early")],
+            vec!["cleanup-z".to_owned(), "cleanup-a".to_owned()],
+        );
+        let raw = clone_cancellation_json(&cancellation, Some("sha256:manifest"))
+            .expect("serialize cancellation");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse cancellation");
+        assert_eq!(json["failures"][0]["case_id"], "early");
+        assert_eq!(json["failures"][1]["case_id"], "late");
+        assert_eq!(json["cleanup_failures"][0], "cleanup-a");
+        assert_eq!(json["cleanup_failures"][1], "cleanup-z");
+        assert_eq!(json["exit_code"], 2);
     }
 
     #[test]
