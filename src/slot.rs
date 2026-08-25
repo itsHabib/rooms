@@ -29,9 +29,9 @@ pub use crate::room::Slot;
 /// Directory under the state base holding one lock file per claimed slot.
 pub const SLOTS_DIR: &str = "slots";
 
-/// The free-lock file beside the slots dir, serializing every verify+unlink
-/// critical section ([`free`] and [`reconcile`]'s removal). Claims never take
-/// it — `O_EXCL` creation cannot overwrite anyone.
+/// The free-lock file beside the slots dir, serializing claim publication and
+/// every verify+cleanup critical section. `O_EXCL` still arbitrates competing
+/// claimers; the short lock prevents a claim racing checked host cleanup.
 const FREE_LOCK: &str = "slots.lock";
 
 /// Highest claimable pool slot index: the /24 carve yields 64 /30s, minus the
@@ -166,6 +166,34 @@ where
         FreeOutcome::AlreadyFree => Freed::AlreadyFree,
         FreeOutcome::AlreadyReassigned => Freed::AlreadyReassigned,
     })
+}
+
+/// Run checked cleanup for an observed pool TAP only if its slot is still
+/// unclaimed under the allocator lock.
+///
+/// `rooms doctor` samples host links and slot files separately, so that sample
+/// alone cannot authorize deletion. This final revalidation shares the lock
+/// taken by every claim publication: a room that claimed the index after the
+/// sample wins, cleanup is skipped, and its TAP is left untouched.
+pub(crate) fn cleanup_if_unclaimed<F>(
+    state: &Path,
+    slot_index: u8,
+    cleanup: F,
+) -> Result<bool, SlotError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    ensure_pool_index(slot_index)?;
+    let path = state.join(SLOTS_DIR).join(slot_index.to_string());
+    let _lock = lock_frees(state)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            cleanup().map_err(SlotError::Cleanup)?;
+            Ok(true)
+        }
+        Err(error) => Err(SlotError::Io(error)),
+    }
 }
 
 /// Whether an index still holds the exact ordinary claim for `room_id`.
@@ -821,10 +849,10 @@ mod tests {
     )]
 
     use super::{
-        claim, claimed_by, classify_claimer_stat, free, free_with_cleanup, hold_lease_for_teardown,
-        lease, lease_clone, leased_by, parse_token, reconcile, release_lease, reserve, Claimer,
-        Freed, Liveness, Released, Reserved, SlotError, SlotToken, MAX_CLONE_LEASES, MAX_SLOT,
-        SLOTS_DIR,
+        claim, claimed_by, classify_claimer_stat, cleanup_if_unclaimed, free, free_with_cleanup,
+        hold_lease_for_teardown, lease, lease_clone, leased_by, parse_token, reconcile,
+        release_lease, reserve, Claimer, Freed, Liveness, Released, Reserved, SlotError, SlotToken,
+        MAX_CLONE_LEASES, MAX_SLOT, SLOTS_DIR,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -1064,6 +1092,33 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn observed_orphan_cleanup_revalidates_the_slot_before_touching_network() {
+        use std::cell::Cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cleaned = Cell::new(false);
+        assert!(cleanup_if_unclaimed(dir.path(), 1, || {
+            cleaned.set(true);
+            Ok(())
+        })
+        .unwrap());
+        assert!(cleaned.get(), "an unclaimed sampled TAP may be cleaned");
+
+        let owner = room_id(1);
+        claim(dir.path(), &owner, ME, 8, Some(1)).unwrap();
+        cleaned.set(false);
+        assert!(!cleanup_if_unclaimed(dir.path(), 1, || {
+            cleaned.set(true);
+            Ok(())
+        })
+        .unwrap());
+        assert!(
+            !cleaned.get(),
+            "a claim that arrived after the sample must suppress TAP cleanup"
+        );
     }
 
     #[test]

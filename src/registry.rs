@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::clonenet;
 use crate::config::RoomsConfig;
+use crate::doctor;
 use crate::error::FirecrackerError;
 use crate::error::RegistryError;
 use crate::firecracker::{self, KillSignalOutcome};
@@ -450,28 +451,35 @@ fn slot_release_for(
     )))
 }
 
-/// Reclaim leaked slots whose claimers are confirmed dead.
+/// Reclaim leaked slots whose claimers are confirmed dead, then clean pool
+/// TAPs that remain unclaimed after final allocator-locked revalidation.
 ///
 /// `slot::reconcile` revalidates each exact claim under its free-lock, then
 /// runs checked egress/TAP cleanup before unlinking the claim. A cleanup error
-/// retains the claim as the retry breadcrumb. There is deliberately no second
-/// "unclaimed TAP" pass: a separately sampled link/claim view cannot authorize
-/// deletion because the index may be claimed between observation and action.
+/// retains the claim as the retry breadcrumb. The second pass starts from the
+/// diagnostic host-link sample, but `slot::cleanup_if_unclaimed` checks the
+/// index again under the same lock every claim takes before touching the host.
 fn reconcile_leaked_slots(config: &RoomsConfig) {
-    reconcile_leaked_slots_with(config, |index| {
+    let orphaned_taps = doctor::orphaned_pool_taps(config);
+    reconcile_leaked_slots_with(config, &orphaned_taps, |index| {
         firecracker::remove_egress_and_tap(&format!("tap-fc{index}"))
             .map_err(|error| error.to_string())
     });
 }
 
-fn reconcile_leaked_slots_with<F>(config: &RoomsConfig, cleanup: F)
+fn reconcile_leaked_slots_with<F>(config: &RoomsConfig, orphaned_taps: &[u8], mut cleanup: F)
 where
     F: FnMut(u8) -> Result<(), String>,
 {
     let Some(base) = config.resolved_state_base() else {
         return;
     };
-    let _reclaimed = slot::reconcile(&base, cleanup);
+    let _reclaimed = slot::reconcile(&base, &mut cleanup);
+    for &index in orphaned_taps {
+        if let Err(error) = slot::cleanup_if_unclaimed(&base, index, || cleanup(index)) {
+            warn!(index, %error, "could not clean revalidated unclaimed pool TAP");
+        }
+    }
 }
 
 /// Reclaim dead `CloneNet` claims from the normal global-GC path.
@@ -953,7 +961,7 @@ mod tests {
         crate::slot::claim(dir.path(), &id, dead, 8, Some(1)).unwrap();
         let claim = dir.path().join("slots/1");
 
-        reconcile_leaked_slots_with(&config, |index| {
+        reconcile_leaked_slots_with(&config, &[], |index| {
             assert_eq!(index, 1);
             assert!(claim.exists(), "cleanup must precede claim unlink");
             Ok(())
@@ -978,9 +986,47 @@ mod tests {
         crate::slot::claim(dir.path(), &id, dead, 8, Some(1)).unwrap();
         let claim = dir.path().join("slots/1");
 
-        reconcile_leaked_slots_with(&config, |_| Err("injected cleanup failure".to_owned()));
+        reconcile_leaked_slots_with(&config, &[], |_| Err("injected cleanup failure".to_owned()));
 
         assert!(claim.exists(), "failed cleanup must retain the retry claim");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphaned_tap_sweep_revalidates_a_late_claim_before_cleanup() {
+        use std::cell::Cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_base(dir.path());
+        let cleaned = Cell::new(false);
+        reconcile_leaked_slots_with(&config, &[1], |_| {
+            cleaned.set(true);
+            Ok(())
+        });
+        assert!(cleaned.get(), "an unclaimed sampled TAP is cleaned");
+
+        let id = unique_id();
+        crate::slot::claim(
+            dir.path(),
+            &id,
+            crate::slot::Claimer {
+                pid: std::process::id(),
+                starttime: room::starttime_of(std::process::id())
+                    .expect("current process starttime"),
+            },
+            8,
+            Some(1),
+        )
+        .unwrap();
+        cleaned.set(false);
+        reconcile_leaked_slots_with(&config, &[1], |_| {
+            cleaned.set(true);
+            Ok(())
+        });
+        assert!(
+            !cleaned.get(),
+            "a claim that arrived after the host-link sample suppresses cleanup"
+        );
     }
 
     #[test]
