@@ -65,8 +65,9 @@ collection, and exact teardown. Output is partitioned under
 
 - a terminal `status` and `clones` array on completed, failed, and cancelled
   outcomes once a valid manifest digest exists;
-- a semantic SHA-256 of the strict manifest;
-- declared case ID and command SHA-256;
+- a semantic SHA-256 of the strict manifest, encoded as
+  `sha256:<lowercase-hex>`;
+- declared case ID and command SHA-256 using the same encoding;
 - snapshot, room, frozen slot, namespace, veth, and guest identity;
 - terminal status, exit code, and case output directory.
 

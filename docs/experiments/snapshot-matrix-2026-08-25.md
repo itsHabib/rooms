@@ -17,7 +17,7 @@ sudo -E rooms matrix "$SNAPSHOT_DIR" \
 
 - Snapshot ID: `01m0mqyxys20q9fe621043kyf0`
 - Matrix SHA-256:
-  `910aea4934a7888dd7484b340946f0774d90b884ebf08c00a612b0fb83333084`
+  `sha256:910aea4934a7888dd7484b340946f0774d90b884ebf08c00a612b0fb83333084`
 - Candidate release-binary SHA-256:
   `20e340b520839ef841dc071cb3918cb3cf880eb60b11b4189692a80bab8ac908`
 
@@ -25,8 +25,8 @@ sudo -E rooms matrix "$SNAPSHOT_DIR" \
 
 | Case | Command SHA-256 | Observation | Host exit | Clone net | Result |
 | --- | --- | --- | --- | --- | --- |
-| `clean` | `cda802e0decedd4d22e66e4ff721c8bec5e40d88f6719f81e4d926dbc81839b9` | `green` | 0 | `rooms-c2` | positive control passed |
-| `mutant-detected` | `4e5231d4a418e4c77dacbf4c3459fe974ef4dd0e89126b81b683778fb531d568` | `red` | 0 | `rooms-c1` | negative control detected its mutant |
+| `clean` | `sha256:cda802e0decedd4d22e66e4ff721c8bec5e40d88f6719f81e4d926dbc81839b9` | `green` | 0 | `rooms-c2` | positive control passed |
+| `mutant-detected` | `sha256:4e5231d4a418e4c77dacbf4c3459fe974ef4dd0e89126b81b683778fb531d568` | `red` | 0 | `rooms-c1` | negative control detected its mutant |
 
 Both cases emitted their own `result.json`, `changeset.json`, `witness.json`,
 `witness.pcap`, and `observation.txt`. Both witness receipts were complete,
