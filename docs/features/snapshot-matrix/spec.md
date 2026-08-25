@@ -63,6 +63,8 @@ collection, and exact teardown. Output is partitioned under
 
 `--json` emits `rooms.matrix.result.v1`. The envelope carries:
 
+- a terminal `status` and `clones` array on completed, failed, and cancelled
+  outcomes once a valid manifest digest exists;
 - a semantic SHA-256 of the strict manifest;
 - declared case ID and command SHA-256;
 - snapshot, room, frozen slot, namespace, veth, and guest identity;
@@ -70,7 +72,11 @@ collection, and exact teardown. Output is partitioned under
 
 The semantic digest ignores JSON whitespace but preserves case order and exact
 command bytes. Successful, failed, and cancelled records retain case identity
-where the lifecycle reached that assignment.
+and command digest where the lifecycle reached that assignment. On a partial
+restore failure, successfully restored siblings are reported as `aborted`
+before teardown and the rejected members remain structured failure records. A
+manifest admission error cannot carry a trusted manifest digest and therefore
+uses the ordinary pre-admission error record.
 
 Rooms does **not** decide whether a product observation is acceptable. A case
 command returns the consumer's mechanical verdict, or the consumer evaluates
@@ -97,6 +103,8 @@ the intended failure is observed—for example, `! ./confidence-browser.sh`.
 - Output-path tests prove matrix cases use the validated case ID, while ordinary
   clone output remains room-ID partitioned.
 - Result tests bind manifest, case, command, room, and output identities.
+- Failure tests pin the uniform terminal envelope, partial-restore evidence,
+  cancellation case retention, and NUL-command rejection.
 - Existing `clone` JSON and CLI behavior remain backward compatible.
 - `make check` passes. Privileged acceptance uses a neutral snapshot and
   [`examples/matrix/positive-mutant.json`](../../../examples/matrix/positive-mutant.json)

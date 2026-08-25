@@ -273,6 +273,13 @@ mod tests {
             load(empty.path()),
             Err(MatrixError::EmptyCommand { .. })
         ));
+        let nul = manifest(
+            r#"{"schema":"rooms.matrix.v1","cases":[{"id":"nul","command":"before\u0000after"}]}"#,
+        );
+        assert!(matches!(
+            load(nul.path()),
+            Err(MatrixError::CommandContainsNul { .. })
+        ));
     }
 
     #[test]
