@@ -1394,6 +1394,13 @@ pub fn reap_orphan(
     slot: Option<SlotRelease>,
     config: &RoomsConfig,
 ) -> Result<(), FirecrackerError> {
+    let claim = slot.as_ref().map(|release| {
+        (
+            release.state_base.clone(),
+            release.index,
+            release.room_id.clone(),
+        )
+    });
     let mut guard = RoomGuard::for_orphan(
         room_dir.to_path_buf(),
         socket.to_path_buf(),
@@ -1419,6 +1426,18 @@ pub fn reap_orphan(
             "room dir survived reap: {}",
             room_dir.display()
         )));
+    }
+    if let Some((state_base, index, room_id)) = claim {
+        let retained = crate::slot::claimed_by(&state_base, index, &room_id).map_err(|error| {
+            FirecrackerError::Internal(format!(
+                "inspect slot {index} after orphan reap for {room_id}: {error}"
+            ))
+        })?;
+        if retained {
+            return Err(FirecrackerError::Internal(format!(
+                "slot {index} survived orphan reap for {room_id}; checked network cleanup will retry"
+            )));
+        }
     }
     Ok(())
 }
