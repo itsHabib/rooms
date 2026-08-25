@@ -18,6 +18,7 @@ The warm path creates a credential-free base, snapshots it, and restores one roo
 - `base-create` → `snapshot` — produce one reusable neutral snapshot.
 - `restore` — consume that snapshot for one kept room or one command.
 - `clone -n 1..8` — restore a bounded fleet; command mode broadcasts the same command to every clone.
+- `matrix --cases <manifest>` — restore a bounded fleet with one distinct generic command and evidence partition per declared case.
 - `collect`, `ls`, `kill`, and `gc` — validate artifacts and manage live-room custody.
 
 There is no public generic `create` / `exec` / `destroy` split today, and no `rooms exec <retained-id>` primitive. Kept rooms are an inspection and custody boundary, not yet a distinct-task scheduler.
@@ -59,7 +60,7 @@ rooms (this repo) — the isolation substrate
 ```
 
 - **ship** does not yet expose a `backend: "rooms"` fleet path.
-- **work-driver** already fans out spec-doc tasks, but does not yet map distinct tasks onto one warm Rooms fleet. `rooms clone --command` is a broadcast primitive, not that adapter.
+- **work-driver** already fans out spec-doc tasks, but does not yet map its task and lifecycle records onto one warm Rooms fleet. `rooms matrix` supplies generic distinct-command execution; it is not the Ship adapter or task judge.
 - **dossier** holds the task graph, decision log, and cross-repo context.
 
 `rooms` does not import ship or dossier. Dependency flows one way: consumers call `rooms`, not the reverse.
@@ -85,9 +86,9 @@ Check README status and spec docs for the exact landed boundary. In particular, 
 | Milestone | Scope |
 | --- | --- |
 | **Cold substrate (landed)** | `run`: jailer boot, SSH command/runner execution, artifact collection, exact teardown, runner contract, rootfs builder, and host diagnostics. |
-| **Warm Rooms substrate (implemented; hard-check evidence retained)** | `base-create` → immutable `snapshot` → `restore` / `clone -n 1..8`; namespace/NAT isolation, restore hygiene, bounded leases, witness custody, and exact teardown. One retained run passed every named hard check but failed both performance gates; review and Gate still precede landing. |
+| **Warm Rooms substrate (landed; hard-check evidence retained)** | `base-create` → immutable `snapshot` → `restore` / `clone -n 1..8` plus generic distinct-case `matrix`; namespace/NAT isolation, restore hygiene, bounded leases, witness custody, and exact teardown. One retained Phase-2 run passed every named hard check but failed both performance gates. |
 | **Replay evidence (future)** | Run receipts and comparison semantics that make two restored executions meaningfully replayable, beyond the state-local compatibility attestation, witness, and custody substrate. |
-| **Consumer adoption (future)** | Ship backend plus a `/work-driver` fleet adapter that assigns distinct commands, outputs, and lifecycle streams to the warm clones. |
+| **Consumer adoption (future)** | Ship backend plus a `/work-driver` fleet adapter that projects task records onto the generic snapshot matrix and retains its own lifecycle streams and judgment. |
 | **Deps (future)** | Nix flake as the deps spec (`--flake`). |
 
 See [v0 spec](features/rooms-v0/spec.md) for the cold design, [snapshot/fork/replay spec](features/snapshot-fork-replay/spec.md) for Phase 2, and [productionization driver](features/01-productionization/driver.md) for the post-POC task manifest.
