@@ -121,38 +121,40 @@ impl SlotRelease {
     }
 }
 
-/// One ordered network-teardown step for a reaped slot room. Pure policy so the
-/// tap-then-slot ordering is unit-testable without root or a real `ip`.
+/// Network-release policy for a reaped room. A slot-bound cleanup is one
+/// indivisible action so the mechanism can retain the claim lock throughout.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ReleaseStep {
-    /// `ip tuntap del` the owned tap (tolerate already-gone).
-    DeleteTap(String),
-    /// `slot::free` the slot file (compare-and-delete on `room_id`).
-    FreeSlot { index: u8, room_id: String },
+enum ReleasePlan {
+    /// Revalidate the exact claim, clean its network, then unlink it under one
+    /// slot free-lock hold.
+    SlotBound {
+        state_base: PathBuf,
+        index: u8,
+        tap: String,
+        room_id: String,
+    },
 }
 
-/// The ordered network release for a reaped room: delete the owned tap **first**,
-/// then free the slot file, so a crash mid-reap leaves the slot file as the
-/// breadcrumb. A legacy no-slot room (no ownership, no slot) yields an empty
-/// plan.
+/// Plan checked network release. Incomplete or mismatched slot/TAP custody is a
+/// refusal (`None`), never a cleanup against an identity synthesized from only
+/// one side of the pair.
 fn plan_release(
     tap: Option<&str>,
     tap_owned: bool,
     slot: Option<&SlotRelease>,
-) -> Vec<ReleaseStep> {
-    let mut steps = Vec::new();
-    if tap_owned {
-        if let Some(tap) = tap {
-            steps.push(ReleaseStep::DeleteTap(tap.to_owned()));
-        }
-    }
+) -> Option<ReleasePlan> {
     if let Some(slot) = slot {
-        steps.push(ReleaseStep::FreeSlot {
+        if !tap_owned || tap.and_then(pool_tap_index) != Some(slot.index) {
+            return None;
+        }
+        return Some(ReleasePlan::SlotBound {
+            state_base: slot.state_base.clone(),
             index: slot.index,
+            tap: tap?.to_owned(),
             room_id: slot.room_id.clone(),
         });
     }
-    steps
+    None
 }
 
 /// RAII guard that cleans up room resources on drop or explicit shutdown.
@@ -168,6 +170,58 @@ pub struct RoomGuard {
     dismiss: bool,
     cleanup_grace: Duration,
     jail_instance_dir: Option<PathBuf>,
+}
+
+/// Own an ordinary slot claim until boot has a room guard to receive it.
+///
+/// This guard exists only across the failure-only prefix of [`boot`], before
+/// any jail, TAP, or egress resource is created. Dropping it may therefore
+/// release the exact claim directly. Once the room directory exists,
+/// [`Self::handoff`] transfers the release token to [`RoomGuard`]; from that
+/// point all cleanup is resource-aware and a partial teardown retains the
+/// claim for gc rather than freeing it optimistically.
+#[must_use = "an unhanded boot claim is released when this guard drops"]
+struct PendingSlotClaim {
+    release: Option<SlotRelease>,
+}
+
+impl PendingSlotClaim {
+    fn new(state_base: PathBuf, slot: &room::Slot, room_id: &str) -> Self {
+        Self {
+            release: Some(SlotRelease::new(
+                state_base,
+                slot.index,
+                slot.tap.clone(),
+                room_id.to_owned(),
+            )),
+        }
+    }
+
+    fn handoff(mut self, guard: &mut RoomGuard) {
+        if let Some(release) = self.release.take() {
+            guard.set_slot(release);
+        }
+    }
+}
+
+impl Drop for PendingSlotClaim {
+    fn drop(&mut self) {
+        let Some(release) = self.release.as_ref() else {
+            return;
+        };
+        match crate::slot::free(&release.state_base, release.index, &release.room_id) {
+            Ok(freed) => debug!(
+                index = release.index,
+                ?freed,
+                "released pre-resource boot claim"
+            ),
+            Err(error) => warn!(
+                index = release.index,
+                %error,
+                "failed to release pre-resource boot claim; keeping it for reconcile"
+            ),
+        }
+    }
 }
 
 impl RoomGuard {
@@ -239,21 +293,29 @@ impl RoomGuard {
         self.slot_release = Some(release);
     }
 
-    /// Execute the ordered network release (tap delete, then slot free). Only
-    /// called once the room dir is confirmed removed — the reap-clean gate.
+    /// Execute checked network release. Slot-bound cleanup runs inside the
+    /// exact claim's free-lock hold, so a duplicate teardown cannot delete a
+    /// TAP that was freed and recreated for another room.
     fn release_network(&self) {
-        for step in plan_release(
+        let Some(plan) = plan_release(
             self.tap_name.as_deref(),
             self.tap_owned,
             self.slot_release.as_ref(),
-        ) {
-            match step {
-                ReleaseStep::DeleteTap(tap) => release_tap(Some(&tap)),
-                ReleaseStep::FreeSlot { index, room_id } => {
-                    if let Some(release) = &self.slot_release {
-                        free_slot_quiet(&release.state_base, index, &room_id);
-                    }
-                }
+        ) else {
+            return;
+        };
+        let ReleasePlan::SlotBound {
+            state_base,
+            index,
+            tap,
+            room_id,
+        } = plan;
+        match crate::slot::free_with_cleanup(&state_base, index, &room_id, || {
+            remove_egress_and_tap(&tap).map_err(|error| error.to_string())
+        }) {
+            Ok(freed) => debug!(index, ?freed, "released pool-slot network custody"),
+            Err(error) => {
+                warn!(index, tap, %error, "network cleanup incomplete; keeping slot claimed for gc retry");
             }
         }
     }
@@ -473,16 +535,31 @@ pub async fn boot(
     req: &BootRequest<'_>,
     config: &RoomsConfig,
 ) -> Result<BootedVm, FirecrackerError> {
+    let state_base = config
+        .resolved_state_base()
+        .ok_or(FirecrackerError::HomeUnset)?;
+    let mut pending_slot = req
+        .slot
+        .map(|slot| PendingSlotClaim::new(state_base.clone(), slot, req.room_id));
+
     let (firecracker_binary, jailer_binary, fc_uid, fc_gid) =
         resolve_boot_dependencies(config).await?;
 
     let room_id_str = req.room_id.to_owned();
-    let per_room_dir = config
-        .room_dir(&room_id_str)
-        .ok_or(FirecrackerError::HomeUnset)?;
+    let per_room_dir = state_base.join(&room_id_str);
     prepare_room_dir(&per_room_dir).await?;
 
     let chroot_base = jailer_chroot_base(config)?;
+    let instance_dir = jail_instance_dir(&chroot_base, &room_id_str);
+    let socket = jail_root_dir(&chroot_base, &room_id_str).join(JAIL_API_SOCK);
+    let mut guard = RoomGuard::new(per_room_dir.clone(), socket.clone(), config);
+    guard.set_jail_instance_dir(instance_dir.clone());
+    if let Some(claim) = pending_slot.take() {
+        claim.handoff(&mut guard);
+    } else if let Some(net) = req.network {
+        guard.set_tap(net.tap_name.clone());
+    }
+
     let jail_layout = prepare_jail_layout(
         &chroot_base,
         &room_id_str,
@@ -492,29 +569,15 @@ pub async fn boot(
         fc_gid,
     )
     .await?;
-
-    let socket = jail_layout.host_socket.clone();
+    debug_assert_eq!(jail_layout.instance_dir, instance_dir);
+    debug_assert_eq!(jail_layout.host_socket, socket);
     let log_path = per_room_dir.join("firecracker.log");
-    let mut guard = RoomGuard::new(per_room_dir.clone(), socket.clone(), config);
-    guard.set_jail_instance_dir(jail_layout.instance_dir.clone());
 
-    // Bind the guard to the slot (tap ownership + slot-file release) BEFORE
-    // creating the tap, so a tap-create failure unwinds through the guard —
-    // delete the tap if created, then free the slot. A legacy no-slot boot only
-    // records the shared tap (no ownership).
+    // Claim custody moved to the guard before jail staging. Create the TAP only
+    // after that handoff, so every later failure unwinds through resource-aware
+    // cleanup and can retain the claim when teardown is incomplete.
     if let Some(slot) = req.slot {
-        let state_base = config
-            .resolved_state_base()
-            .ok_or(FirecrackerError::HomeUnset)?;
-        guard.set_slot(SlotRelease::new(
-            state_base,
-            slot.index,
-            slot.tap.clone(),
-            room_id_str.clone(),
-        ));
         create_slot_tap(slot, None)?;
-    } else if let Some(net) = req.network {
-        guard.set_tap(net.tap_name.clone());
     }
 
     // Start the egress capture the moment the tap exists and before the VMM —
@@ -877,17 +940,6 @@ pub fn verify_process_network_namespace(
     _namespace: &str,
 ) -> Result<(), FirecrackerError> {
     Err(FirecrackerError::KvmUnavailable)
-}
-
-/// Free a pool slot file (compare-and-delete), logging the outcome. Best-effort:
-/// a failure leaves the slot file as the breadcrumb for gc/reconcile to retry.
-fn free_slot_quiet(state_base: &Path, index: u8, room_id: &str) {
-    match crate::slot::free(state_base, index, room_id) {
-        Ok(freed) => debug!(index, ?freed, "freed pool slot"),
-        Err(e) => {
-            warn!(index, error = %e, "failed to free pool slot; gc/reconcile will retry");
-        }
-    }
 }
 
 /// Jailer must run as root: it chroots, bind-mounts the kernel/rootfs into the
@@ -2245,6 +2297,15 @@ pub fn remove_egress_and_tap(tap: &str) -> Result<(), FirecrackerError> {
     delete_tap_checked(tap)
 }
 
+fn pool_tap_index(tap: &str) -> Option<u8> {
+    let suffix = tap.strip_prefix("tap-fc")?;
+    let index: u8 = suffix.parse().ok()?;
+    if index == 0 || index > crate::slot::MAX_SLOT || suffix != index.to_string() {
+        return None;
+    }
+    Some(index)
+}
+
 #[cfg(unix)]
 fn delete_tap_checked(tap: &str) -> Result<(), FirecrackerError> {
     let probe = std::process::Command::new("ip")
@@ -2536,8 +2597,8 @@ mod tests {
     }
 
     #[test]
-    fn plan_release_orders_tap_delete_before_slot_free() {
-        use super::{plan_release, ReleaseStep, SlotRelease};
+    fn plan_release_keeps_slot_cleanup_and_free_in_one_action() {
+        use super::{plan_release, ReleasePlan, SlotRelease};
         use std::path::PathBuf;
 
         let release = SlotRelease::new(
@@ -2546,27 +2607,22 @@ mod tests {
             "tap-fc1".to_owned(),
             "01abcdefghijklmnopqrstuvwx".to_owned(),
         );
-        let steps = plan_release(Some("tap-fc1"), true, Some(&release));
+        let plan = plan_release(Some("tap-fc1"), true, Some(&release));
         assert_eq!(
-            steps,
-            vec![
-                ReleaseStep::DeleteTap("tap-fc1".to_owned()),
-                ReleaseStep::FreeSlot {
-                    index: 1,
-                    room_id: "01abcdefghijklmnopqrstuvwx".to_owned(),
-                },
-            ],
-            "tap delete must precede slot free (breadcrumb ordering)"
+            plan,
+            Some(ReleasePlan::SlotBound {
+                state_base: PathBuf::from("/state"),
+                index: 1,
+                tap: "tap-fc1".to_owned(),
+                room_id: "01abcdefghijklmnopqrstuvwx".to_owned(),
+            }),
+            "network cleanup and claim unlink must remain one locked action"
         );
 
-        // A legacy no-slot room (no ownership, no slot) yields an empty plan —
-        // the shared tap is never touched.
-        assert!(plan_release(Some("tap-fc0"), false, None).is_empty());
-        // Ownership without a recorded slot still deletes the tap only.
-        assert_eq!(
-            plan_release(Some("tap-fc9"), true, None),
-            vec![ReleaseStep::DeleteTap("tap-fc9".to_owned())]
-        );
+        assert_eq!(plan_release(Some("tap-fc0"), false, None), None);
+        assert_eq!(plan_release(Some("tap-fc9"), true, None), None);
+        assert_eq!(plan_release(Some("tap-fc2"), true, Some(&release)), None);
+        assert_eq!(plan_release(Some("tap-fc01"), true, Some(&release)), None);
     }
 
     #[test]
@@ -2869,6 +2925,37 @@ mod tests {
         assert!(path.exists(), "dismissed guard should leave the directory");
     }
 
+    #[test]
+    fn pending_boot_claim_releases_an_early_failure() {
+        use crate::slot::{self, Claimer};
+
+        let state = tempfile::tempdir().expect("tempdir");
+        let id = "01abcdefghijklmnopqrstuvwx";
+        let claimed = slot::claim(
+            state.path(),
+            id,
+            Claimer {
+                pid: 1,
+                starttime: 1,
+            },
+            8,
+            None,
+        )
+        .expect("claim slot");
+        let slot_file = state.path().join("slots").join(claimed.index.to_string());
+
+        drop(super::PendingSlotClaim::new(
+            state.path().to_path_buf(),
+            &claimed,
+            id,
+        ));
+
+        assert!(
+            !slot_file.exists(),
+            "a failure before resource creation must release its exact claim"
+        );
+    }
+
     /// Regression for the adversarial finding: when the jail tree can't fully
     /// tear down (a stuck bind-mount blocking `remove_dir_all`), `cleanup` must
     /// PRESERVE the room dir — gc's only handle — so the stranded mount stays
@@ -2953,47 +3040,6 @@ mod tests {
         }
     }
 
-    /// A clean reap (room dir removed) frees the claimed slot file — the guard's
-    /// tap-then-slot release wired end to end. The tap here is a fake name, so
-    /// the `ip link del` is a harmless no-op; the observable effect is the slot
-    /// file disappearing.
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_frees_slot_after_clean_reap() {
-        use crate::slot::{self, Claimer};
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let state = tmp.path();
-        let id = "01abcdefghijklmnopqrstuvwx";
-        let me = Claimer {
-            pid: 1,
-            starttime: 1,
-        };
-        let claimed = slot::claim(state, id, me, 8, None).expect("claim slot");
-        let slot_file = state.join("slots").join(claimed.index.to_string());
-        assert!(slot_file.exists(), "slot file present after claim");
-
-        let room_dir = state.join(id);
-        std::fs::create_dir_all(&room_dir).expect("room dir");
-
-        let config = RoomsConfig::default();
-        let mut guard = RoomGuard::new(room_dir.clone(), room_dir.join("api.sock"), &config);
-        guard.set_slot(super::SlotRelease::new(
-            state.to_path_buf(),
-            claimed.index,
-            claimed.tap,
-            id.to_owned(),
-        ));
-        guard.cleanup();
-        guard.dismiss();
-
-        assert!(!room_dir.exists(), "room dir reaped");
-        assert!(
-            !slot_file.exists(),
-            "a clean reap must free the slot file after removing the room dir"
-        );
-    }
-
     /// When the jail teardown fails (stranded mount), the slot stays claimed —
     /// the slot file is the breadcrumb for a later `rooms gc` retry, never freed
     /// prematurely. Injected via a read-only jail-parent so the final rmdir fails.
@@ -3033,12 +3079,7 @@ mod tests {
             instance.clone(),
             &config,
         );
-        guard.set_slot(super::SlotRelease::new(
-            state.to_path_buf(),
-            claimed.index,
-            claimed.tap,
-            id.to_owned(),
-        ));
+        super::PendingSlotClaim::new(state.to_path_buf(), &claimed, id).handoff(&mut guard);
         guard.cleanup();
         guard.dismiss();
 

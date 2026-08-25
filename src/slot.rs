@@ -22,7 +22,7 @@ use std::path::Path;
 
 use crate::error::SlotError;
 pub use crate::indexed_claim::Claimer;
-use crate::indexed_claim::{self, ClaimOutcome, FreeOutcome, Pool, ReconcileAction};
+use crate::indexed_claim::{self, ClaimOutcome, FreeOutcome, Pool, ReconcileAction, ReleaseError};
 use crate::room::Liveness;
 pub use crate::room::Slot;
 
@@ -137,12 +137,35 @@ pub enum Freed {
 /// teardown against a reused index must not free a *live* sibling's slot
 /// (the same never-act-on-a-reused-identity rule as `terminate_by_identity`).
 pub fn free(state: &Path, slot_index: u8, expected_room_id: &str) -> Result<Freed, SlotError> {
+    free_with_cleanup(state, slot_index, expected_room_id, || Ok(()))
+}
+
+/// Free an ordinary slot only after checked owner-scoped cleanup succeeds.
+///
+/// The exact claim is revalidated and `cleanup` runs while the slot free-lock
+/// remains held. Claims take the same lock, so a stale or duplicate teardown
+/// can never clean a TAP after this index has been reassigned. Cleanup is not
+/// called for an absent or differently-owned claim.
+pub fn free_with_cleanup<F>(
+    state: &Path,
+    slot_index: u8,
+    expected_room_id: &str,
+    cleanup: F,
+) -> Result<Freed, SlotError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
     ensure_pool_index(slot_index)?;
-    match indexed_claim::free(state, SLOT_POOL, slot_index, expected_room_id)? {
-        FreeOutcome::Removed => Ok(Freed::Removed),
-        FreeOutcome::AlreadyFree => Ok(Freed::AlreadyFree),
-        FreeOutcome::AlreadyReassigned => Ok(Freed::AlreadyReassigned),
-    }
+    let outcome = indexed_claim::free_with(state, SLOT_POOL, slot_index, expected_room_id, cleanup)
+        .map_err(|error| match error {
+            ReleaseError::Io(error) => SlotError::Io(error),
+            ReleaseError::Cleanup(detail) => SlotError::Io(std::io::Error::other(detail)),
+        })?;
+    Ok(match outcome {
+        FreeOutcome::Removed => Freed::Removed,
+        FreeOutcome::AlreadyFree => Freed::AlreadyFree,
+        FreeOutcome::AlreadyReassigned => Freed::AlreadyReassigned,
+    })
 }
 
 /// Whether an index still holds the exact ordinary claim for `room_id`.
@@ -791,9 +814,10 @@ mod tests {
     )]
 
     use super::{
-        claim, claimed_by, classify_claimer_stat, free, hold_lease_for_teardown, lease,
-        lease_clone, leased_by, parse_token, reconcile, release_lease, reserve, Claimer, Freed,
-        Liveness, Released, Reserved, SlotError, SlotToken, MAX_CLONE_LEASES, MAX_SLOT, SLOTS_DIR,
+        claim, claimed_by, classify_claimer_stat, free, free_with_cleanup, hold_lease_for_teardown,
+        lease, lease_clone, leased_by, parse_token, reconcile, release_lease, reserve, Claimer,
+        Freed, Liveness, Released, Reserved, SlotError, SlotToken, MAX_CLONE_LEASES, MAX_SLOT,
+        SLOTS_DIR,
     };
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -964,6 +988,74 @@ mod tests {
             free(dir.path(), 1, &room_id(1)).unwrap(),
             Freed::AlreadyFree
         );
+    }
+
+    #[test]
+    fn stale_cleanup_never_touches_a_reassigned_slot() {
+        use std::cell::Cell;
+
+        let dir = tempfile::tempdir().unwrap();
+        let old = room_id(1);
+        let new = room_id(2);
+        claim(dir.path(), &old, ME, 8, Some(1)).unwrap();
+        free_with_cleanup(dir.path(), 1, &old, || Ok(())).unwrap();
+        claim(dir.path(), &new, ME, 8, Some(1)).unwrap();
+
+        let touched_network = Cell::new(false);
+        let freed = free_with_cleanup(dir.path(), 1, &old, || {
+            touched_network.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(freed, Freed::AlreadyReassigned);
+        assert!(
+            !touched_network.get(),
+            "stale teardown must not clean the new owner's TAP"
+        );
+        assert!(claimed_by(dir.path(), 1, &new).unwrap());
+    }
+
+    #[test]
+    fn cleanup_failure_retains_the_exact_slot_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = room_id(1);
+        claim(dir.path(), &owner, ME, 8, Some(1)).unwrap();
+
+        let error = free_with_cleanup(dir.path(), 1, &owner, || {
+            Err("injected checked cleanup failure".to_owned())
+        })
+        .expect_err("failed cleanup must prevent claim unlink");
+
+        assert!(error
+            .to_string()
+            .contains("injected checked cleanup failure"));
+        assert!(claimed_by(dir.path(), 1, &owner).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_cleanup_runs_while_holding_the_free_lock() {
+        use std::fs::OpenOptions;
+
+        let dir = tempfile::tempdir().unwrap();
+        let owner = room_id(1);
+        claim(dir.path(), &owner, ME, 8, Some(1)).unwrap();
+        let lock_path = dir.path().join("slots.lock");
+
+        free_with_cleanup(dir.path(), 1, &owner, || {
+            let contender = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("open competing free-lock fd");
+            assert!(
+                contender.try_lock().is_err(),
+                "network cleanup must retain the slot free-lock"
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
