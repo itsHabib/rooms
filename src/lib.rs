@@ -12,6 +12,7 @@ mod indexed_claim;
 mod inode_seal;
 pub mod isolation;
 pub mod lifecycle;
+pub mod matrix;
 pub mod preflight;
 pub mod registry;
 pub mod restore;

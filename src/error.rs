@@ -8,6 +8,7 @@
 //! ├── Transport(TransportError)
 //! ├── Runner(RunnerError)
 //! ├── Registry(RegistryError)
+//! ├── Matrix(MatrixError)
 //! └── Slot(SlotError)
 //! ```
 
@@ -30,6 +31,8 @@ pub enum RoomsError {
     Runner(#[from] RunnerError),
     #[error(transparent)]
     Registry(#[from] RegistryError),
+    #[error(transparent)]
+    Matrix(#[from] crate::matrix::MatrixError),
     #[error(transparent)]
     Slot(#[from] SlotError),
     #[error("internal: {0}")]

@@ -91,3 +91,45 @@ fn witness_requires_out() {
         .failure()
         .stderr(predicate::str::contains("--out"));
 }
+
+#[test]
+fn invalid_matrix_fails_with_json_before_host_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let cases = temp.path().join("cases.json");
+    let out = temp.path().join("out");
+    std::fs::write(
+        &cases,
+        r#"{"schema":"rooms.matrix.v1","cases":[{"id":"../escape","command":"true"}]}"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("rooms")
+        .unwrap()
+        .args([
+            "matrix",
+            "/tmp/nonexistent-snapshot",
+            "--image",
+            "/tmp/nonexistent-image",
+            "--cases",
+            cases.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::function(|stdout: &str| {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+                return false;
+            };
+            value.get("error_kind").and_then(serde_json::Value::as_str) == Some("matrix")
+                && value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|message| message.contains("case id"))
+        }));
+    assert!(
+        !out.exists(),
+        "invalid policy must fail before output effects"
+    );
+}

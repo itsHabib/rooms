@@ -16,16 +16,17 @@ Disposable Firecracker microVMs with specified deps. The cold path takes a rootf
 - `rooms doctor [--json]` — host-environment checks (KVM, Firecracker + jailer version, dedicated user, TAP, kernel/rootfs, nested virt, checksum drift, `ANTHROPIC_API_KEY`).
 - Firecracker runs under the **jailer** as a dedicated unprivileged `firecracker` user (chroot + bind-mounts); the Alpine agent rootfs boots to sshd in ~2 s.
 
-**Phase 2's Rooms substrate is implemented on this branch. One retained exact-head rooms-host run reached terminal audit with every named hard check green, but both performance gates failed; review and Gate remain before it lands.** It adds:
+**Phase 2's Rooms substrate is landed. Its retained rooms-host proof reached terminal audit with every named hard check green, while the latency, density, and real-consumer gates remain open.** It adds:
 
 - `base-create` → `snapshot` → `restore` for a credential-free warm base and one hygiene-gated restored room.
 - `clone <snapshot> -n 1..8` for bounded concurrent fan-out. Every clone gets its own host network namespace, veth/NAT identity, post-resume identity, fresh SSH host key, and exact teardown; command mode can add per-clone egress enforcement and witness custody.
+- `matrix <snapshot> --cases <manifest>` for bounded distinct-case fan-out from one immutable snapshot. Each case keeps its declared identity, command digest, isolated output tree, and clone evidence without moving the consumer's product oracle into Rooms.
 - A Linux immutable-inode lifecycle for snapshot backing state: the rootfs builder seals its output, snapshot publication seals `snapshot.vmstate`, `snapshot.mem`, `snapshot.json`, and their directory, and restore verifies the exact bind-mounted/copied jail artifacts before launch and resume. A separate sealed, state-local receipt binds an exact local publication to its rootfs digest; copied, foreign, legacy, or mismatched snapshots fall back to a full image hash.
 - Crash-recoverable snapshot/restore intents, a persistent snapshot slot reservation with bounded clone leases, and deterministic JSON batch records.
 
 The [retained 2026-08-22 rooms-host run](docs/experiments/phase2-killer-2026-08-22.md) at code head `52a361c` reached terminal audit with zero hard failures. It demonstrated the unchanged flat restore, one shared immutable snapshot, eight isolated workload-ready clones, bidirectional two-hop networking, cross-clone blocking, fresh clock/RNG/host/application identity, eight distinct witnessed workloads, exact reservation return, and clean teardown. The harness still exited 1: authenticated fleet readiness took 48.608 s rather than less than one second, fleet PSS was 156,474 KiB rather than less than twice the 57,348 KiB single-clone baseline, and the broadcast workload is not eight independently assigned `/work-driver` tasks.
 
-Still separate work: a Nix flake as the deps spec (`--flake`), ship's `backend: "rooms"`, and the Ship `/work-driver` adapter that maps distinct tasks onto one warm fleet. `rooms clone --command` currently broadcasts the **same command** to every clone; eight independently assigned `/work-driver` tasks are not yet a claim this repository makes. See [`docs/features/snapshot-fork-replay/spec.md`](docs/features/snapshot-fork-replay/spec.md) for the Phase-2 contract and [`docs/vision.md`](docs/vision.md) for the wider roadmap.
+Still separate work: a Nix flake as the deps spec (`--flake`), ship's `backend: "rooms"`, and the Ship `/work-driver` adapter that maps its task records onto the generic matrix primitive. `rooms clone --command` remains a broadcast verb; `rooms matrix` assigns distinct commands but does not claim that Ship selected or tracked them. See [`docs/features/snapshot-fork-replay/spec.md`](docs/features/snapshot-fork-replay/spec.md) for the Phase-2 contract and [`docs/vision.md`](docs/vision.md) for the wider roadmap.
 
 > **Jailer requires root.** Because Firecracker runs under the jailer (it chroots, bind-mounts the kernel/rootfs, and drops privileges), VM lifecycle commands are normally invoked as `sudo -E rooms …`. `-E` preserves the operator `HOME` and any explicitly requested runtime credentials; neutral-base creation itself admits no secrets.
 
@@ -52,6 +53,7 @@ Where the focus ends today (full list + rationale in [`docs/vision.md`](docs/vis
 | `snapshot` / `snapshot-recover` | Consume a sealed neutral base into a recoverable Full snapshot, or list/resume an interrupted indexed snapshot transaction. |
 | `restore` | Restore one room from `<snapshot-dir>` plus its hash-pinned `--image`. Exactly one of `--keep` or `--command` is required; command mode can collect output, witness egress, deliver named secrets post-resume, and enforce an egress policy. |
 | `clone` | Restore `-n 1..8` isolated rooms concurrently. With no `--command`, keep the complete ready batch; with `--command`, broadcast that one command to every clone concurrently and tear the batch down. `--out` collects beneath `<dir>/<room-id>`. |
+| `matrix` | Load a strict one-to-eight-case manifest once, map each distinct command onto an isolated snapshot clone, collect beneath `<dir>/<case-id>`, and bind the result to the manifest/case/command digests. The caller remains the product judge. |
 | `collect` | Validate a collected artifact directory (`--from <dir>`) against the runner contract: required files present, `result.json` parses at `schema_version 1`, referenced paths exist. |
 | `diff` | Verify and show the overlay change set collected from a read-only-rootfs run. An indeterminate result is not treated as clean. |
 | `ls` / `gc` / `kill` | Inspect liveness, reap only orphaned-dead rooms, or terminate one live/kept room by id. Global `gc` also reconciles stale clone-network resources. |
@@ -104,9 +106,15 @@ sudo -E rooms clone ./rooms.snapshot \
   -n 8 \
   --command 'git -C /workspace/repo fsck --no-progress --strict' \
   --out ./clone-out --json
+
+# Two distinct positive/mutant controls from the exact same snapshot lineage.
+sudo -E rooms matrix ./rooms.snapshot \
+  --image ~/rooms/images/agent-alpine.ext4 \
+  --cases examples/matrix/positive-mutant.json \
+  --out ./matrix-out --json
 ```
 
-Omit `clone --command` to keep the complete batch alive; the returned JSON gives the room ids for `rooms kill <id>`. Command mode is deliberately a broadcast primitive today. A consumer that needs eight different task commands, outputs, and lifecycle streams must supply the still-follow-up Ship `/work-driver` fleet adapter.
+Omit `clone --command` to keep the complete batch alive; the returned JSON gives the room ids for `rooms kill <id>`. Clone command mode remains a broadcast primitive. Matrix mode supplies distinct generic commands and evidence partitions, while a consumer such as Ship or RoxIQ still owns task selection, expected outcomes, and every authority-bearing action.
 
 On Linux, the Alpine builder publishes its rootfs with `FS_IMMUTABLE_FL`; snapshot publication applies the same kernel flag to all three artifacts and the snapshot directory. Restore refuses mutable backing, parses and hashes through pinned descriptors, and verifies that the jail contains those prepared rootfs/memory inodes plus the prepared vmstate bytes. The state-local compatibility receipt is deliberately outside the portable snapshot directory, so copying `snapshot.json` cannot copy hash authority. There is intentionally no snapshot delete/unseal verb yet: published snapshots are operator-retained evidence, and rerunning the rootfs builder is the one supported exact-output replacement path.
 

@@ -1,0 +1,13 @@
+{
+  "schema": "rooms.matrix.v1",
+  "cases": [
+    {
+      "id": "clean",
+      "command": "printf 'green\\n' > /workspace/out/observation.txt && grep -qx green /workspace/out/observation.txt"
+    },
+    {
+      "id": "mutant-detected",
+      "command": "printf 'red\\n' > /workspace/out/observation.txt && ! grep -qx green /workspace/out/observation.txt"
+    }
+  ]
+}

@@ -15,7 +15,7 @@ use rooms::{
     config::RoomsConfig,
     doctor, egress,
     error::{CloneNetError, RoomsError, SlotError},
-    firecracker, registry, room, rootfs, runner, slot, snapshot_exec, vsock, witness,
+    firecracker, matrix, registry, room, rootfs, runner, slot, snapshot_exec, vsock, witness,
 };
 use tracing::{info, warn};
 
@@ -263,6 +263,43 @@ enum Command {
         #[arg(long = "max-pool", env = "ROOMS_MAX_POOL", value_parser = parse_max_pool)]
         max_pool: Option<u8>,
         /// Emit one machine-readable terminal batch record on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fork one snapshot into a bounded matrix of distinct case commands.
+    ///
+    /// Cases are loaded once from a strict `rooms.matrix.v1` manifest, mapped
+    /// deterministically onto isolated clones in declared order, and collected
+    /// beneath `<out>/<case-id>`. Rooms records execution evidence; the caller's
+    /// case commands remain the product-specific oracle.
+    Matrix {
+        /// Completed snapshot artifact directory (from `rooms snapshot`).
+        snapshot_dir: PathBuf,
+        /// The backing rootfs image; its hash must match the snapshot's pin.
+        #[arg(long)]
+        image: PathBuf,
+        /// Strict `rooms.matrix.v1` case manifest.
+        #[arg(long)]
+        cases: PathBuf,
+        /// Collect each case beneath `<dir>/<case-id>`.
+        #[arg(long = "out")]
+        out_dir: PathBuf,
+        /// Record each case's namespaced egress.
+        #[arg(long)]
+        witness: bool,
+        /// Deliver a named host env var through every case's resume nudge.
+        #[arg(long = "secret", value_parser = valid_secret_name)]
+        secret: Vec<String>,
+        /// Enforce one host-side egress policy independently per case.
+        #[arg(long = "egress", value_parser = egress::parse)]
+        egress: Option<egress::Policy>,
+        /// Hard wall-clock cap on every concurrent case command.
+        #[arg(long = "max-wall", value_parser = parse_max_wall)]
+        max_wall: Option<Duration>,
+        /// Lower the clone-network pool ceiling for this invocation.
+        #[arg(long = "max-pool", env = "ROOMS_MAX_POOL", value_parser = parse_max_pool)]
+        max_pool: Option<u8>,
+        /// Emit one machine-readable terminal matrix record on stdout.
         #[arg(long)]
         json: bool,
     },
@@ -561,7 +598,8 @@ fn harvest_cli_secrets(cli: &Cli) -> Result<Option<vsock::SecretsPayload>, Rooms
     match &cli.command {
         Command::Run { secret, .. }
         | Command::Restore { secret, .. }
-        | Command::Clone { secret, .. } => harvest_secrets(secret),
+        | Command::Clone { secret, .. }
+        | Command::Matrix { secret, .. } => harvest_secrets(secret),
         _ => Ok(None),
     }
 }
@@ -575,6 +613,7 @@ const fn wants_json_error_record(cli: &Cli) -> bool {
             | Command::BaseCreate { json: true, .. }
             | Command::Restore { json: true, .. }
             | Command::Clone { json: true, .. }
+            | Command::Matrix { json: true, .. }
     )
 }
 
@@ -618,6 +657,7 @@ const fn error_kind(err: &RoomsError) -> &'static str {
         RoomsError::Transport(_) => "transport",
         RoomsError::Runner(_) => "runner",
         RoomsError::Registry(_) => "registry",
+        RoomsError::Matrix(_) => "matrix",
         RoomsError::Internal(_) => "internal",
     }
 }
@@ -664,6 +704,49 @@ fn emit_run_error_json(err: &RoomsError) {
         }
         Err(e) => warn!(error = %e, "failed to serialize run --json terminal record"),
     }
+}
+
+#[derive(serde::Serialize)]
+struct MatrixRunErrorRecord<'a> {
+    schema: &'static str,
+    matrix_sha256: &'a str,
+    status: &'static str,
+    #[serde(flatten)]
+    error: RunErrorRecord,
+    clones: &'a [CloneRecord],
+}
+
+fn emit_clone_run_error_json(err: &RoomsError, matrix_sha256: Option<&str>) {
+    let Some(matrix_sha256) = matrix_sha256 else {
+        emit_run_error_json(err);
+        return;
+    };
+    match matrix_run_error_json(err, matrix_sha256) {
+        Ok(line) => {
+            #[allow(
+                clippy::print_stdout,
+                reason = "matrix --json terminal error record; stdout is the documented contract"
+            )]
+            {
+                println!("{line}");
+            }
+        }
+        Err(error) => warn!(%error, "failed to serialize matrix --json terminal record"),
+    }
+}
+
+fn matrix_run_error_json(
+    err: &RoomsError,
+    matrix_sha256: &str,
+) -> Result<String, serde_json::Error> {
+    let record = MatrixRunErrorRecord {
+        schema: MATRIX_RESULT_SCHEMA,
+        matrix_sha256,
+        status: "failed",
+        error: run_error_record(err),
+        clones: &[],
+    };
+    serde_json::to_string(&record)
 }
 
 #[allow(
@@ -791,6 +874,37 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                     image,
                     count,
                     command,
+                    workloads: None,
+                    matrix_sha256: None,
+                    out_dir,
+                    witness,
+                    secrets,
+                    egress: egress.unwrap_or(egress::Policy::Observe),
+                    max_wall,
+                    max_pool,
+                    json,
+                },
+                &config,
+            )
+            .await
+        }
+        Command::Matrix {
+            snapshot_dir,
+            image,
+            cases,
+            out_dir,
+            witness,
+            secret: _,
+            egress,
+            max_wall,
+            max_pool,
+            json,
+        } => {
+            matrix_rooms(
+                MatrixArgs {
+                    snapshot_dir,
+                    image,
+                    cases,
                     out_dir,
                     witness,
                     secrets,
@@ -813,6 +927,45 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Gc { dry_run, id } => gc_cmd(dry_run, id, &config),
         Command::Kill { id, json } => kill_cmd(&id, json, &config),
     }
+}
+
+async fn matrix_rooms(args: MatrixArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    let manifest = match matrix::load(&args.cases) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let error = RoomsError::Matrix(error);
+            if args.json {
+                emit_run_error_json(&error);
+            }
+            return Err(error);
+        }
+    };
+    let count = manifest.count();
+    let matrix_sha256 = manifest.sha256;
+    let workloads = manifest
+        .cases
+        .into_iter()
+        .map(CloneWorkload::matrix)
+        .collect();
+    clone_rooms(
+        CloneArgs {
+            snapshot_dir: args.snapshot_dir,
+            image: args.image,
+            count,
+            command: None,
+            workloads: Some(workloads),
+            matrix_sha256: Some(matrix_sha256),
+            out_dir: Some(args.out_dir),
+            witness: args.witness,
+            secrets: args.secrets,
+            egress: args.egress,
+            max_wall: args.max_wall,
+            max_pool: args.max_pool,
+            json: args.json,
+        },
+        config,
+    )
+    .await
 }
 
 async fn snapshot_cmd(
@@ -971,6 +1124,10 @@ fn network_config_for(slot: &room::Slot) -> firecracker::NetworkConfig {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the run lifecycle is intentionally linear; artifact finalization stays before teardown"
+)]
 async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     info!(image = ?args.image, keep = args.keep, runner = ?args.runner, "rooms run");
     // Fail closed on --witness without tcpdump, before anything else: a host that
@@ -1099,7 +1256,10 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     };
     let secrets_delivery = vm.take_secrets_delivery();
     let outcome = post_boot(&env, &action, &mut vm, secrets_delivery, None).await;
-    collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
+    warn_legacy_artifact_failure(
+        collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await,
+        "run",
+    );
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
     outcome
@@ -1302,7 +1462,71 @@ struct CloneArgs {
     image: PathBuf,
     count: u8,
     command: Option<String>,
+    workloads: Option<Vec<CloneWorkload>>,
+    matrix_sha256: Option<String>,
     out_dir: Option<PathBuf>,
+    witness: bool,
+    secrets: Option<vsock::SecretsPayload>,
+    egress: egress::Policy,
+    max_wall: Option<Duration>,
+    max_pool: Option<u8>,
+    json: bool,
+}
+
+impl CloneArgs {
+    const fn runs_commands(&self) -> bool {
+        self.command.is_some() || self.workloads.is_some()
+    }
+
+    fn assigned_workloads(&self) -> Vec<Option<CloneWorkload>> {
+        if let Some(workloads) = &self.workloads {
+            return workloads.iter().cloned().map(Some).collect();
+        }
+        let Some(command) = &self.command else {
+            return vec![None; usize::from(self.count)];
+        };
+        let workload = CloneWorkload::broadcast(command);
+        vec![Some(workload); usize::from(self.count)]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CloneWorkload {
+    case_id: Option<String>,
+    command: String,
+    command_sha256: Option<String>,
+}
+
+impl CloneWorkload {
+    fn broadcast(command: &str) -> Self {
+        Self {
+            case_id: None,
+            command: command.to_owned(),
+            command_sha256: None,
+        }
+    }
+
+    fn matrix(case: matrix::Case) -> Self {
+        Self {
+            case_id: Some(case.id),
+            command: case.command,
+            command_sha256: Some(case.command_sha256),
+        }
+    }
+
+    fn label(&self) -> String {
+        self.case_id
+            .as_ref()
+            .map_or_else(|| self.command.clone(), |id| format!("matrix:{id}"))
+    }
+}
+
+/// Flags for `rooms matrix`, before its strict case manifest is loaded.
+struct MatrixArgs {
+    snapshot_dir: PathBuf,
+    image: PathBuf,
+    cases: PathBuf,
+    out_dir: PathBuf,
     witness: bool,
     secrets: Option<vsock::SecretsPayload>,
     egress: egress::Policy,
@@ -1540,6 +1764,43 @@ impl Drop for AllocatedClone {
     }
 }
 
+struct CloneTaskIdentity {
+    clone_net_index: u8,
+    room_id: String,
+    case_id: Option<String>,
+    command_sha256: Option<String>,
+    out_dir: Option<PathBuf>,
+}
+
+impl CloneTaskIdentity {
+    fn unknown() -> Self {
+        Self {
+            clone_net_index: u8::MAX,
+            room_id: "unknown".to_owned(),
+            case_id: None,
+            command_sha256: None,
+            out_dir: None,
+        }
+    }
+}
+
+fn allocated_clone_task_identity(
+    allocation: &AllocatedClone,
+    workload: Option<&CloneWorkload>,
+    out_dir: Option<PathBuf>,
+) -> CloneTaskIdentity {
+    CloneTaskIdentity {
+        clone_net_index: allocation
+            .network
+            .as_ref()
+            .map_or(u8::MAX, |network| network.index),
+        room_id: allocation.room_id.clone(),
+        case_id: workload.and_then(|value| value.case_id.clone()),
+        command_sha256: workload.and_then(|value| value.command_sha256.clone()),
+        out_dir,
+    }
+}
+
 /// One fully restored clone held by the batch orchestrator.
 ///
 /// `Drop` is the unwind/cancellation backstop. Normal paths call
@@ -1548,6 +1809,7 @@ impl Drop for AllocatedClone {
 struct CloneCustody {
     restored: Option<rooms::restore_exec::Restored>,
     out_dir: Option<PathBuf>,
+    workload: Option<CloneWorkload>,
     config: RoomsConfig,
 }
 
@@ -1569,7 +1831,13 @@ impl CloneCustody {
         status: &'static str,
         exit_code: Option<u8>,
     ) -> Result<CloneRecord, RoomsError> {
-        CloneRecord::from_ready(self.restored()?, self.out_dir.clone(), status, exit_code)
+        CloneRecord::from_ready(
+            self.restored()?,
+            self.out_dir.clone(),
+            self.workload.as_ref(),
+            status,
+            exit_code,
+        )
     }
 
     fn identity(&self) -> Result<(u8, String), RoomsError> {
@@ -1682,6 +1950,10 @@ impl Drop for CloneCustody {
 /// batch. Records are sorted by clone-network index before emission.
 #[derive(Clone, Debug, serde::Serialize)]
 struct CloneRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    case_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_sha256: Option<String>,
     room_id: String,
     snapshot_id: String,
     slot: u8,
@@ -1700,6 +1972,7 @@ impl CloneRecord {
     fn from_ready(
         restored: &rooms::restore_exec::Restored,
         out_dir: Option<PathBuf>,
+        workload: Option<&CloneWorkload>,
         status: &'static str,
         exit_code: Option<u8>,
     ) -> Result<Self, RoomsError> {
@@ -1707,6 +1980,8 @@ impl CloneRecord {
             RoomsError::Internal("clone restore returned no clone network".to_owned())
         })?;
         Ok(Self {
+            case_id: workload.and_then(|value| value.case_id.clone()),
+            command_sha256: workload.and_then(|value| value.command_sha256.clone()),
             room_id: restored.room_id.clone(),
             snapshot_id: restored.snapshot_id.clone(),
             slot: restored.slot.index,
@@ -1725,6 +2000,8 @@ impl CloneRecord {
 struct CloneFailure {
     clone_net_index: u8,
     room_id: String,
+    case_id: Option<String>,
+    command_sha256: Option<String>,
     out_dir: Option<PathBuf>,
     error: Box<RoomsError>,
 }
@@ -1734,6 +2011,8 @@ impl CloneFailure {
         Self {
             clone_net_index,
             room_id: room_id.to_owned(),
+            case_id: None,
+            command_sha256: None,
             out_dir: None,
             error: Box::new(error),
         }
@@ -1748,14 +2027,26 @@ impl CloneFailure {
         Self {
             clone_net_index,
             room_id: room_id.to_owned(),
+            case_id: None,
+            command_sha256: None,
             out_dir,
             error: Box::new(error),
         }
+    }
+
+    fn for_case(mut self, case_id: Option<String>, command_sha256: Option<String>) -> Self {
+        self.case_id = case_id;
+        self.command_sha256 = command_sha256;
+        self
     }
 }
 
 #[derive(Debug, serde::Serialize)]
 struct CloneFailureRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    case_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_sha256: Option<String>,
     clone_net_index: u8,
     room_id: String,
     status: &'static str,
@@ -1768,6 +2059,8 @@ struct CloneFailureRecord {
 impl From<CloneFailure> for CloneFailureRecord {
     fn from(failure: CloneFailure) -> Self {
         Self {
+            case_id: failure.case_id,
+            command_sha256: failure.command_sha256,
             clone_net_index: failure.clone_net_index,
             room_id: failure.room_id,
             status: "failed",
@@ -1782,6 +2075,54 @@ struct CloneCommandBatchFailure {
     clones: Vec<CloneRecord>,
     failures: Vec<CloneFailureRecord>,
     task_failures: Vec<String>,
+}
+
+struct CloneRestoreBatchFailure {
+    clones: Vec<CloneRecord>,
+    failures: Vec<CloneFailureRecord>,
+    cleanup_failures: Vec<String>,
+}
+
+impl CloneRestoreBatchFailure {
+    fn new(
+        mut clones: Vec<CloneRecord>,
+        mut failures: Vec<CloneFailure>,
+        mut cleanup_failures: Vec<String>,
+    ) -> Self {
+        clones.sort_by_key(|record| record.clone_net_index);
+        failures.sort_by_key(|failure| failure.clone_net_index);
+        cleanup_failures.sort();
+        Self {
+            clones,
+            failures: failures.into_iter().map(CloneFailureRecord::from).collect(),
+            cleanup_failures,
+        }
+    }
+
+    fn summary(&self) -> String {
+        let failures = self
+            .failures
+            .iter()
+            .map(|failure| {
+                let case = failure
+                    .case_id
+                    .as_deref()
+                    .map_or_else(String::new, |id| format!("case {id} "));
+                format!(
+                    "{case}net {} room {}: {}",
+                    failure.clone_net_index, failure.room_id, failure.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.cleanup_failures.is_empty() {
+            return format!("clone restore failed: {failures}");
+        }
+        format!(
+            "clone restore failed: {failures}; partial clone cleanup incomplete: {}",
+            self.cleanup_failures.join("; ")
+        )
+    }
 }
 
 impl CloneCommandBatchFailure {
@@ -1810,20 +2151,15 @@ impl CloneCommandBatchFailure {
 
     fn into_cancellation(self, signal: CloneTermination) -> CloneCancellation {
         let mut cleanup_failures = self.task_failures;
-        cleanup_failures.extend(self.failures.into_iter().map(|failure| {
-            format!(
-                "net {} room {} did not reach a clean cancellation boundary: {}",
-                failure.clone_net_index, failure.room_id, failure.message
-            )
-        }));
         cleanup_failures.sort();
-        CloneCancellation::with_clones(signal, self.clones, cleanup_failures)
+        CloneCancellation::with_details(signal, self.clones, self.failures, cleanup_failures)
     }
 }
 
 struct CloneCancellation {
     signal: CloneTermination,
     clones: Vec<CloneRecord>,
+    failures: Vec<CloneFailureRecord>,
     cleanup_failures: Vec<String>,
 }
 
@@ -1832,29 +2168,43 @@ impl CloneCancellation {
         Self {
             signal,
             clones: Vec::new(),
+            failures: Vec::new(),
             cleanup_failures: Vec::new(),
         }
     }
 
     fn with_clones(
         signal: CloneTermination,
-        mut clones: Vec<CloneRecord>,
+        clones: Vec<CloneRecord>,
         cleanup_failures: Vec<String>,
+    ) -> Self {
+        Self::with_details(signal, clones, Vec::new(), cleanup_failures)
+    }
+
+    fn with_details(
+        signal: CloneTermination,
+        mut clones: Vec<CloneRecord>,
+        mut failures: Vec<CloneFailureRecord>,
+        mut cleanup_failures: Vec<String>,
     ) -> Self {
         for clone in &mut clones {
             if clone.exit_code == Some(signal.exit_code()) {
                 clone.status = "cancelled";
             }
         }
+        clones.sort_by_key(|record| record.clone_net_index);
+        failures.sort_by_key(|failure| failure.clone_net_index);
+        cleanup_failures.sort();
         Self {
             signal,
             clones,
+            failures,
             cleanup_failures,
         }
     }
 
     const fn exit_code(&self) -> u8 {
-        if self.cleanup_failures.is_empty() {
+        if self.cleanup_failures.is_empty() && self.failures.is_empty() {
             return self.signal.exit_code();
         }
         2
@@ -1863,6 +2213,7 @@ impl CloneCancellation {
 
 enum CloneRunError {
     Standard(RoomsError),
+    RestoreBatch(CloneRestoreBatchFailure),
     CommandBatch(CloneCommandBatchFailure),
     Cancelled(CloneCancellation),
 }
@@ -1875,6 +2226,10 @@ impl From<RoomsError> for CloneRunError {
 
 #[derive(serde::Serialize)]
 struct CloneCommandFailureEnvelope<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matrix_sha256: Option<&'a str>,
     status: &'static str,
     error_kind: &'static str,
     clones: &'a [CloneRecord],
@@ -1883,20 +2238,34 @@ struct CloneCommandFailureEnvelope<'a> {
 }
 
 #[derive(serde::Serialize)]
+struct CloneRestoreFailureEnvelope<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matrix_sha256: Option<&'a str>,
+    status: &'static str,
+    error_kind: &'static str,
+    clones: &'a [CloneRecord],
+    failures: &'a [CloneFailureRecord],
+    #[serde(skip_serializing_if = "string_slice_is_empty")]
+    cleanup_failures: &'a [String],
+}
+
+#[derive(serde::Serialize)]
 struct CloneCancellationEnvelope<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matrix_sha256: Option<&'a str>,
     status: &'static str,
     error_kind: &'static str,
     signal: &'static str,
     exit_code: u8,
     cleanup_complete: bool,
-    #[serde(skip_serializing_if = "clone_record_slice_is_empty")]
     clones: &'a [CloneRecord],
+    failures: &'a [CloneFailureRecord],
     #[serde(skip_serializing_if = "string_slice_is_empty")]
     cleanup_failures: &'a [String],
-}
-
-const fn clone_record_slice_is_empty(values: &[CloneRecord]) -> bool {
-    values.is_empty()
 }
 
 const fn string_slice_is_empty(values: &[String]) -> bool {
@@ -1905,13 +2274,31 @@ const fn string_slice_is_empty(values: &[String]) -> bool {
 
 #[derive(serde::Serialize)]
 struct CloneBatchEnvelope<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matrix_sha256: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
     clones: &'a [CloneRecord],
+}
+
+const MATRIX_RESULT_SCHEMA: &str = "rooms.matrix.result.v1";
+
+const fn matrix_result_schema(matrix_sha256: Option<&str>) -> Option<&'static str> {
+    if matrix_sha256.is_some() {
+        return Some(MATRIX_RESULT_SCHEMA);
+    }
+    None
 }
 
 fn clone_command_failure_json(
     failure: &CloneCommandBatchFailure,
+    matrix_sha256: Option<&str>,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string(&CloneCommandFailureEnvelope {
+        schema: matrix_result_schema(matrix_sha256),
+        matrix_sha256,
         status: "failed",
         error_kind: "clone_batch",
         clones: &failure.clones,
@@ -1920,8 +2307,42 @@ fn clone_command_failure_json(
     })
 }
 
-fn emit_clone_command_failure(failure: &CloneCommandBatchFailure) -> Result<(), RoomsError> {
-    let line = clone_command_failure_json(failure)
+fn clone_restore_failure_json(
+    failure: &CloneRestoreBatchFailure,
+    matrix_sha256: Option<&str>,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&CloneRestoreFailureEnvelope {
+        schema: matrix_result_schema(matrix_sha256),
+        matrix_sha256,
+        status: "failed",
+        error_kind: "clone_restore_batch",
+        clones: &failure.clones,
+        failures: &failure.failures,
+        cleanup_failures: &failure.cleanup_failures,
+    })
+}
+
+fn emit_clone_restore_failure(
+    failure: &CloneRestoreBatchFailure,
+    matrix_sha256: Option<&str>,
+) -> Result<(), RoomsError> {
+    let line = clone_restore_failure_json(failure, matrix_sha256)
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    #[allow(
+        clippy::print_stdout,
+        reason = "clone --json terminal restore failure record; stdout is the documented contract"
+    )]
+    {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn emit_clone_command_failure(
+    failure: &CloneCommandBatchFailure,
+    matrix_sha256: Option<&str>,
+) -> Result<(), RoomsError> {
+    let line = clone_command_failure_json(failure, matrix_sha256)
         .map_err(|error| RoomsError::Internal(error.to_string()))?;
     #[allow(
         clippy::print_stdout,
@@ -1933,17 +2354,12 @@ fn emit_clone_command_failure(failure: &CloneCommandBatchFailure) -> Result<(), 
     Ok(())
 }
 
-fn emit_clone_cancellation(cancellation: &CloneCancellation) -> Result<(), RoomsError> {
-    let line = serde_json::to_string(&CloneCancellationEnvelope {
-        status: "cancelled",
-        error_kind: "cancelled",
-        signal: cancellation.signal.name(),
-        exit_code: cancellation.exit_code(),
-        cleanup_complete: cancellation.cleanup_failures.is_empty(),
-        clones: &cancellation.clones,
-        cleanup_failures: &cancellation.cleanup_failures,
-    })
-    .map_err(|error| RoomsError::Internal(error.to_string()))?;
+fn emit_clone_cancellation(
+    cancellation: &CloneCancellation,
+    matrix_sha256: Option<&str>,
+) -> Result<(), RoomsError> {
+    let line = clone_cancellation_json(cancellation, matrix_sha256)
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
     #[allow(
         clippy::print_stdout,
         reason = "clone --json cancellation record; stdout is the documented contract"
@@ -1954,6 +2370,24 @@ fn emit_clone_cancellation(cancellation: &CloneCancellation) -> Result<(), Rooms
     Ok(())
 }
 
+fn clone_cancellation_json(
+    cancellation: &CloneCancellation,
+    matrix_sha256: Option<&str>,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&CloneCancellationEnvelope {
+        schema: matrix_result_schema(matrix_sha256),
+        matrix_sha256,
+        status: "cancelled",
+        error_kind: "cancelled",
+        signal: cancellation.signal.name(),
+        exit_code: cancellation.exit_code(),
+        cleanup_complete: cancellation.cleanup_failures.is_empty(),
+        clones: &cancellation.clones,
+        failures: &cancellation.failures,
+        cleanup_failures: &cancellation.cleanup_failures,
+    })
+}
+
 fn collapse_clone_failures(stage: &str, mut failures: Vec<CloneFailure>) -> Option<RoomsError> {
     if failures.is_empty() {
         return None;
@@ -1962,8 +2396,12 @@ fn collapse_clone_failures(stage: &str, mut failures: Vec<CloneFailure>) -> Opti
     let evidence = failures
         .into_iter()
         .map(|failure| {
+            let case = failure
+                .case_id
+                .as_deref()
+                .map_or_else(String::new, |id| format!("case {id} "));
             format!(
-                "net {} room {}: {}",
+                "{case}net {} room {}: {}",
                 failure.clone_net_index, failure.room_id, failure.error
             )
         })
@@ -2094,7 +2532,10 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
     // Secrets arrived through the acked resume nudge, not the vsock one-shot,
     // so the workload gate has no delivery to await here.
     let outcome = post_boot(&env, &action, &mut vm, None, None).await;
-    collect_run_artifacts(&env, &action, &slot, args.out_dir.as_deref(), &mut vm).await;
+    warn_legacy_artifact_failure(
+        collect_run_artifacts(&env, &action, &slot, args.out_dir.as_deref(), &mut vm).await,
+        "restore",
+    );
 
     if let Err(e) = vm.shutdown().await {
         warn!(error = %e, "restore shutdown reported an error");
@@ -2116,24 +2557,36 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
 /// batch concurrently, then either preserve all rooms or execute in parallel.
 async fn clone_rooms(args: CloneArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
     let json = args.json;
+    let matrix_sha256 = args.matrix_sha256.clone();
     match clone_rooms_inner(args, config).await {
         Ok(code) => Ok(code),
         Err(CloneRunError::Standard(error)) => {
             if json {
-                emit_run_error_json(&error);
+                emit_clone_run_error_json(&error, matrix_sha256.as_deref());
+            }
+            Err(error)
+        }
+        Err(CloneRunError::RestoreBatch(failure)) => {
+            let error = RoomsError::Internal(failure.summary());
+            if json {
+                if matrix_sha256.is_some() {
+                    emit_clone_restore_failure(&failure, matrix_sha256.as_deref())?;
+                } else {
+                    emit_run_error_json(&error);
+                }
             }
             Err(error)
         }
         Err(CloneRunError::CommandBatch(failure)) => {
             if json {
-                emit_clone_command_failure(&failure)?;
+                emit_clone_command_failure(&failure, matrix_sha256.as_deref())?;
             }
             Err(RoomsError::Internal(failure.summary()))
         }
         Err(CloneRunError::Cancelled(cancellation)) => {
             let code = cancellation.exit_code();
             if json {
-                emit_clone_cancellation(&cancellation)?;
+                emit_clone_cancellation(&cancellation, matrix_sha256.as_deref())?;
             }
             warn!(
                 signal = cancellation.signal.name(),
@@ -2150,7 +2603,7 @@ async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, 
         snapshot_dir = ?args.snapshot_dir,
         image = ?args.image,
         count = args.count,
-        keep = args.command.is_none(),
+        keep = !args.runs_commands(),
         "rooms clone"
     );
     validate_json_emitted_path(args.out_dir.as_deref(), args.json, "clone --out")?;
@@ -2182,23 +2635,25 @@ async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, 
     )
     .await;
     if let Some(signal) = restored.cancelled {
-        return Err(cancel_clone_custody(restored.ready, signal, restored.failure).await);
+        return Err(cancel_clone_custody(restored.ready, signal, restored.failures).await);
     }
-    if let Some(error) = restored.failure {
-        return Err(cleanup_partial_restore(restored.ready, error).await.into());
+    if !restored.failures.is_empty() {
+        return Err(CloneRunError::RestoreBatch(
+            cleanup_restore_batch_failure(restored.ready, restored.failures).await,
+        ));
     }
     let ready = restored.ready;
     // Command mode enters the established post-boot SSH readiness/workload
     // lifecycle below, so probing the whole batch here would add a second
     // handshake. Kept mode has no later workload path: it must prove every
     // ACKed clone accepts the configured pubkey before custody is handed off.
-    let Some(command) = args.command.clone() else {
+    if !args.runs_commands() {
         match wait_kept_clone_batch_ready(&ready, &key, cancellation.receiver()).await {
             Ok(()) => {}
             Err(CloneReadinessBarrierError::Failed(error)) => {
                 match cancellation.commit_terminal_handoff().await {
                     Ok(Some(signal)) => {
-                        return Err(cancel_clone_custody(ready, signal, None).await);
+                        return Err(cancel_clone_custody(ready, signal, Vec::new()).await);
                     }
                     Ok(None) => {
                         return Err(cleanup_partial_restore(ready, error).await.into());
@@ -2212,21 +2667,21 @@ async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, 
                 }
             }
             Err(CloneReadinessBarrierError::Cancelled(signal)) => {
-                return Err(cancel_clone_custody(ready, signal, None).await);
+                return Err(cancel_clone_custody(ready, signal, Vec::new()).await);
             }
         }
-        return finish_kept_clone_batch(ready, &mut cancellation, config, args.json).await;
-    };
+        return finish_kept_clone_batch(
+            ready,
+            &mut cancellation,
+            config,
+            args.json,
+            args.matrix_sha256.as_deref(),
+        )
+        .await;
+    }
     let command_cancellation = cancellation.receiver();
-    let command_result = run_clone_commands(
-        ready,
-        command,
-        key,
-        args.max_wall,
-        egress_plan,
-        command_cancellation,
-    )
-    .await;
+    let command_result =
+        run_clone_commands(ready, key, args.max_wall, egress_plan, command_cancellation).await;
     if let Some(signal) = cancellation.commit_terminal_handoff().await? {
         return Err(match command_result {
             Ok((_, clones)) => {
@@ -2236,7 +2691,7 @@ async fn clone_rooms_inner(args: CloneArgs, config: &RoomsConfig) -> Result<u8, 
         });
     }
     let (code, records) = command_result.map_err(CloneRunError::CommandBatch)?;
-    emit_clone_records(&records, args.json)?;
+    emit_clone_records(&records, args.json, args.matrix_sha256.as_deref())?;
     Ok(code)
 }
 
@@ -2245,9 +2700,10 @@ async fn finish_kept_clone_batch(
     cancellation: &mut CloneSignalSource,
     config: &RoomsConfig,
     json: bool,
+    matrix_sha256: Option<&str>,
 ) -> Result<u8, CloneRunError> {
     if let Some(signal) = observed_clone_termination(&cancellation.receiver()) {
-        return Err(cancel_clone_custody(ready, signal, None).await);
+        return Err(cancel_clone_custody(ready, signal, Vec::new()).await);
     }
     let mut records = preserve_clone_batch(ready)?;
     match cancellation.commit_terminal_handoff().await {
@@ -2271,7 +2727,7 @@ async fn finish_kept_clone_batch(
             .into());
         }
     }
-    emit_clone_records(&records, json)?;
+    emit_clone_records(&records, json, matrix_sha256)?;
     Ok(0)
 }
 
@@ -2378,7 +2834,7 @@ async fn allocate_clone_networks(
 
 struct CloneRestoreBatch {
     ready: Vec<CloneCustody>,
-    failure: Option<RoomsError>,
+    failures: Vec<CloneFailure>,
     cancelled: Option<CloneTermination>,
 }
 
@@ -2394,36 +2850,56 @@ async fn restore_clone_batch(
         drop(allocations);
         return CloneRestoreBatch {
             ready: Vec::new(),
-            failure: None,
+            failures: Vec::new(),
             cancelled: Some(signal),
         };
     }
     let mut tasks = tokio::task::JoinSet::new();
     let mut task_identities = HashMap::new();
-    for mut allocation in allocations {
+    let workloads = args.assigned_workloads();
+    if workloads.len() != allocations.len() {
+        drop(allocations);
+        return CloneRestoreBatch {
+            ready: Vec::new(),
+            failures: vec![CloneFailure::new(
+                u8::MAX,
+                "unknown",
+                RoomsError::Internal(
+                    "clone workload count did not match allocated clone count".to_owned(),
+                ),
+            )],
+            cancelled: None,
+        };
+    }
+    for (mut allocation, workload) in allocations.into_iter().zip(workloads) {
         let task_config = config.clone();
         let snapshot_dir = args.snapshot_dir.clone();
         let image = args.image.clone();
-        let command = args.command.clone();
         let witness = args.witness;
         let plan = egress_plan.clone();
         let secrets = args
             .secrets
             .as_ref()
             .map(vsock::SecretsPayload::clone_bytes);
-        let out_dir = clone_output_dir(args.out_dir.as_deref(), &allocation.room_id);
-        let task_prepared = Arc::clone(&prepared);
-        let task_identity = (
-            allocation
-                .network
-                .as_ref()
-                .map_or(u8::MAX, |network| network.index),
-            allocation.room_id.clone(),
+        let case_id = workload.as_ref().and_then(|value| value.case_id.clone());
+        let command_sha256 = workload
+            .as_ref()
+            .and_then(|value| value.command_sha256.clone());
+        let out_dir = clone_output_dir(
+            args.out_dir.as_deref(),
+            &allocation.room_id,
+            case_id.as_deref(),
         );
+        let task_identity =
+            allocated_clone_task_identity(&allocation, workload.as_ref(), out_dir.clone());
+        let task_prepared = Arc::clone(&prepared);
         let handle = tasks.spawn(async move {
             let network = allocation
                 .network()
-                .map_err(|error| CloneFailure::new(0, &allocation.room_id, error))?
+                .map_err(|error| {
+                    CloneFailure::with_output(0, &allocation.room_id, out_dir.clone(), error)
+                        .for_case(case_id.clone(), command_sha256.clone())
+                })?
                 .clone();
             let clone_net_index = network.index;
             let restored = rooms::restore_exec::restore_prepared(
@@ -2433,8 +2909,10 @@ async fn restore_clone_batch(
                     snapshot_dir: &snapshot_dir,
                     image: &image,
                     target_slot: None,
-                    label: command.clone().or_else(|| Some("clone".to_owned())),
-                    keep: command.is_none(),
+                    label: workload
+                        .as_ref()
+                        .map_or_else(|| Some("clone".to_owned()), |value| Some(value.label())),
+                    keep: workload.is_none(),
                     witness,
                     egress: &plan,
                     secrets,
@@ -2446,16 +2924,19 @@ async fn restore_clone_batch(
             )
             .await
             .map_err(|error| {
-                CloneFailure::new(
+                CloneFailure::with_output(
                     clone_net_index,
                     &allocation.room_id,
+                    out_dir.clone(),
                     RoomsError::Internal(error.to_string()),
                 )
+                .for_case(case_id.clone(), command_sha256.clone())
             })?;
             allocation.transfer();
             Ok::<CloneCustody, CloneFailure>(CloneCustody {
                 restored: Some(restored),
                 out_dir,
+                workload,
                 config: task_config,
             })
         });
@@ -2466,7 +2947,7 @@ async fn restore_clone_batch(
 
 async fn collect_clone_restores(
     mut tasks: tokio::task::JoinSet<Result<CloneCustody, CloneFailure>>,
-    mut task_identities: HashMap<tokio::task::Id, (u8, String)>,
+    mut task_identities: HashMap<tokio::task::Id, CloneTaskIdentity>,
     mut cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
 ) -> CloneRestoreBatch {
     let mut ready = Vec::new();
@@ -2504,26 +2985,29 @@ async fn collect_clone_restores(
             Err(error) => {
                 let identity = task_identities
                     .remove(&error.id())
-                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
+                    .unwrap_or_else(CloneTaskIdentity::unknown);
                 if cancelled.is_some() && error.is_cancelled() {
                     continue;
                 }
-                failures.push(CloneFailure::new(
-                    identity.0,
-                    &identity.1,
-                    RoomsError::Internal(format!(
-                        "restore worker {}",
-                        clone_join_error_kind(&error)
-                    )),
-                ));
+                failures.push(
+                    CloneFailure::with_output(
+                        identity.clone_net_index,
+                        &identity.room_id,
+                        identity.out_dir,
+                        RoomsError::Internal(format!(
+                            "restore worker {}",
+                            clone_join_error_kind(&error)
+                        )),
+                    )
+                    .for_case(identity.case_id, identity.command_sha256),
+                );
             }
         }
     }
     ready.sort_by_key(|custody| custody.identity().map_or(u8::MAX, |identity| identity.0));
-    let failure = collapse_clone_failures("restore", failures);
     CloneRestoreBatch {
         ready,
-        failure,
+        failures,
         cancelled,
     }
 }
@@ -2680,26 +3164,63 @@ async fn cleanup_partial_restore(ready: Vec<CloneCustody>, original: RoomsError)
     ))
 }
 
+fn clone_custody_records(
+    ready: &[CloneCustody],
+    status: &'static str,
+    exit_code: Option<u8>,
+) -> (Vec<CloneRecord>, Vec<String>) {
+    let mut records = Vec::with_capacity(ready.len());
+    let mut failures = Vec::new();
+    for custody in ready {
+        match custody.record(status, exit_code) {
+            Ok(record) => records.push(record),
+            Err(error) => {
+                let (clone_net_index, room_id) = custody
+                    .identity()
+                    .unwrap_or_else(|_| (u8::MAX, "unknown".to_owned()));
+                failures.push(format!(
+                    "net {clone_net_index} room {room_id}: cannot record terminal custody: {error}"
+                ));
+            }
+        }
+    }
+    records.sort_by_key(|record| record.clone_net_index);
+    failures.sort();
+    (records, failures)
+}
+
+async fn cleanup_restore_batch_failure(
+    ready: Vec<CloneCustody>,
+    failures: Vec<CloneFailure>,
+) -> CloneRestoreBatchFailure {
+    let (records, mut cleanup_failures) = clone_custody_records(&ready, "aborted", None);
+    cleanup_failures.extend(teardown_clone_custody(ready).await);
+    CloneRestoreBatchFailure::new(records, failures, cleanup_failures)
+}
+
 async fn cancel_clone_custody(
     ready: Vec<CloneCustody>,
     signal: CloneTermination,
-    prior_failure: Option<RoomsError>,
+    prior_failures: Vec<CloneFailure>,
 ) -> CloneRunError {
-    let mut cleanup_failures = teardown_clone_custody(ready).await;
-    if let Some(error) = prior_failure {
-        cleanup_failures.push(format!(
-            "restore worker failed while cancellation was draining: {error}"
-        ));
-    }
-    CloneRunError::Cancelled(CloneCancellation {
+    let (records, mut cleanup_failures) =
+        clone_custody_records(&ready, "cancelled", Some(signal.exit_code()));
+    cleanup_failures.extend(teardown_clone_custody(ready).await);
+    let failures = prior_failures
+        .into_iter()
+        .map(CloneFailureRecord::from)
+        .collect();
+    CloneRunError::Cancelled(CloneCancellation::with_details(
         signal,
-        clones: Vec::new(),
+        records,
+        failures,
         cleanup_failures,
-    })
+    ))
 }
 
-fn clone_output_dir(root: Option<&Path>, room_id: &str) -> Option<PathBuf> {
-    root.map(|dir| dir.join(room_id))
+fn clone_output_dir(root: Option<&Path>, room_id: &str, case_id: Option<&str>) -> Option<PathBuf> {
+    let root = root?;
+    Some(root.join(case_id.unwrap_or(room_id)))
 }
 
 fn preserve_clone_batch(ready: Vec<CloneCustody>) -> Result<Vec<CloneRecord>, RoomsError> {
@@ -2761,9 +3282,18 @@ struct CloneCommandOutcome {
     exit_code: u8,
 }
 
+struct CloneCommandInnerFailure {
+    record: Option<Box<CloneRecord>>,
+    error: Box<RoomsError>,
+}
+
+struct CloneCommandMemberFailure {
+    record: Option<Box<CloneRecord>>,
+    failure: Box<CloneFailure>,
+}
+
 async fn run_clone_commands(
     ready: Vec<CloneCustody>,
-    command: String,
     key: PathBuf,
     max_wall: Option<Duration>,
     egress_plan: egress::Plan,
@@ -2772,12 +3302,24 @@ async fn run_clone_commands(
     let mut tasks = tokio::task::JoinSet::new();
     let mut task_identities = HashMap::new();
     for custody in ready {
-        let task_identity = custody
+        let (clone_net_index, room_id) = custody
             .identity()
             .unwrap_or_else(|_| (u8::MAX, "unknown".to_owned()));
+        let task_identity = CloneTaskIdentity {
+            clone_net_index,
+            room_id,
+            case_id: custody
+                .workload
+                .as_ref()
+                .and_then(|workload| workload.case_id.clone()),
+            command_sha256: custody
+                .workload
+                .as_ref()
+                .and_then(|workload| workload.command_sha256.clone()),
+            out_dir: custody.out_dir.clone(),
+        };
         let handle = tasks.spawn(execute_clone_command(
             custody,
-            command.clone(),
             key.clone(),
             max_wall,
             egress_plan.clone(),
@@ -2786,28 +3328,37 @@ async fn run_clone_commands(
         task_identities.insert(handle.id(), task_identity);
     }
     let mut outcomes = Vec::new();
+    let mut completed_failures = Vec::new();
     let mut failures = Vec::new();
-    let mut join_failures = Vec::new();
     while let Some(joined) = tasks.join_next_with_id().await {
         match joined {
             Ok((id, Ok(outcome))) => {
                 task_identities.remove(&id);
                 outcomes.push(outcome);
             }
-            Ok((id, Err(failure))) => {
+            Ok((id, Err(member_failure))) => {
                 task_identities.remove(&id);
-                failures.push(failure);
+                if let Some(record) = member_failure.record {
+                    completed_failures.push(*record);
+                }
+                failures.push(*member_failure.failure);
             }
             Err(error) => {
                 let identity = task_identities
                     .remove(&error.id())
-                    .unwrap_or_else(|| (u8::MAX, "unknown".to_owned()));
-                join_failures.push(format!(
-                    "net {} room {}: command worker {}",
-                    identity.0,
-                    identity.1,
-                    clone_join_error_kind(&error)
-                ));
+                    .unwrap_or_else(CloneTaskIdentity::unknown);
+                failures.push(
+                    CloneFailure::with_output(
+                        identity.clone_net_index,
+                        &identity.room_id,
+                        identity.out_dir,
+                        RoomsError::Internal(format!(
+                            "command worker {}",
+                            clone_join_error_kind(&error)
+                        )),
+                    )
+                    .for_case(identity.case_id, identity.command_sha256),
+                );
             }
         }
     }
@@ -2816,34 +3367,67 @@ async fn run_clone_commands(
         .iter()
         .find(|outcome| outcome.exit_code != 0)
         .map_or(0, |outcome| outcome.exit_code);
-    let records = outcomes.into_iter().map(|outcome| outcome.record).collect();
-    if !failures.is_empty() || !join_failures.is_empty() {
-        return Err(CloneCommandBatchFailure::new(
-            records,
-            failures,
-            join_failures,
-        ));
+    let mut records = outcomes
+        .into_iter()
+        .map(|outcome| outcome.record)
+        .chain(completed_failures)
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| record.clone_net_index);
+    if !failures.is_empty() {
+        return Err(CloneCommandBatchFailure::new(records, failures, Vec::new()));
     }
     Ok((code, records))
 }
 
 async fn execute_clone_command(
     custody: CloneCustody,
-    command: String,
     key: PathBuf,
     max_wall: Option<Duration>,
     egress_plan: egress::Plan,
     cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
-) -> Result<CloneCommandOutcome, CloneFailure> {
+) -> Result<CloneCommandOutcome, CloneCommandMemberFailure> {
     let out_dir = custody.out_dir.clone();
+    let workload = custody
+        .workload
+        .clone()
+        .ok_or_else(|| CloneCommandMemberFailure {
+            record: None,
+            failure: Box::new(CloneFailure::with_output(
+                0,
+                "unknown",
+                out_dir.clone(),
+                RoomsError::Internal("command clone has no assigned workload".to_owned()),
+            )),
+        })?;
+    let case_id = workload.case_id.clone();
+    let command_sha256 = workload.command_sha256.clone();
     let restored = custody
         .restored()
-        .map_err(|error| CloneFailure::with_output(0, "unknown", out_dir.clone(), error))?;
+        .map_err(|error| CloneCommandMemberFailure {
+            record: None,
+            failure: Box::new(
+                CloneFailure::with_output(0, "unknown", out_dir.clone(), error)
+                    .for_case(case_id.clone(), command_sha256.clone()),
+            ),
+        })?;
     let room_id = restored.room_id.clone();
     let clone_net_index = restored.clone_net.as_ref().map_or(0, |net| net.index);
-    execute_clone_command_inner(custody, command, key, max_wall, egress_plan, cancellation)
-        .await
-        .map_err(|error| CloneFailure::with_output(clone_net_index, &room_id, out_dir, error))
+    execute_clone_command_inner(
+        custody,
+        workload.command,
+        key,
+        max_wall,
+        egress_plan,
+        cancellation,
+    )
+    .await
+    .map_err(|failure| CloneCommandMemberFailure {
+        record: failure.record,
+        failure: Box::new(
+            CloneFailure::with_output(clone_net_index, &room_id, out_dir, *failure.error)
+                .for_case(case_id, command_sha256),
+        ),
+    })
 }
 
 async fn execute_clone_command_inner(
@@ -2853,14 +3437,23 @@ async fn execute_clone_command_inner(
     max_wall: Option<Duration>,
     egress_plan: egress::Plan,
     cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
-) -> Result<CloneCommandOutcome, RoomsError> {
+) -> Result<CloneCommandOutcome, CloneCommandInnerFailure> {
     let cancellation_observer = cancellation.clone();
     let config = custody.config.clone();
     let out_dir = custody.out_dir.clone();
+    let strict_evidence = custody
+        .workload
+        .as_ref()
+        .is_some_and(|workload| workload.case_id.is_some());
     let lifecycle = Lifecycle::disabled();
     let action = Action::Exec(runner::Runner::Command(command));
-    let outcome = {
-        let restored = custody.restored_mut()?;
+    let (outcome, collection) = {
+        let restored = custody
+            .restored_mut()
+            .map_err(|error| CloneCommandInnerFailure {
+                record: None,
+                error: Box::new(error),
+            })?;
         let network = network_config_for(&restored.slot);
         let env = PostBootEnv {
             network: &network,
@@ -2872,7 +3465,7 @@ async fn execute_clone_command_inner(
             egress: &egress_plan,
         };
         let outcome = post_boot(&env, &action, &mut restored.vm, None, Some(cancellation)).await;
-        collect_run_artifacts(
+        let collection = collect_run_artifacts(
             &env,
             &action,
             &restored.slot,
@@ -2880,26 +3473,80 @@ async fn execute_clone_command_inner(
             &mut restored.vm,
         )
         .await;
-        outcome
+        (outcome, collection)
     };
-    let record = match &outcome {
-        Ok(code) => {
-            let status = if observed_clone_termination(&cancellation_observer).is_some() {
-                "cancelled"
-            } else {
-                "exited"
-            };
-            Some(custody.record(status, Some(*code))?)
-        }
-        Err(_) => None,
-    };
+    let record_result = outcome.as_ref().map_or(None, |code| {
+        let status = if observed_clone_termination(&cancellation_observer).is_some() {
+            "cancelled"
+        } else {
+            "exited"
+        };
+        Some(custody.record(status, Some(*code)))
+    });
     let teardown = custody.teardown().await;
-    teardown?;
-    let exit_code = outcome?;
-    let record = record.ok_or_else(|| {
-        RoomsError::Internal("clone command completed without a result record".to_owned())
+    let mut errors = Vec::new();
+    let record = match record_result {
+        Some(Ok(record)) => Some(record),
+        Some(Err(error)) => {
+            errors.push(error);
+            None
+        }
+        None => None,
+    };
+    if let Err(error) = outcome {
+        errors.push(error);
+    }
+    if strict_evidence {
+        if let Err(error) = collection {
+            errors.push(error);
+        }
+    } else if let Err(error) = collection {
+        warn!(%error, "clone artifact finalization incomplete");
+    }
+    if record.is_none() && errors.is_empty() {
+        errors.push(RoomsError::Internal(
+            "clone command completed without a result record".to_owned(),
+        ));
+    }
+    if let Err(error) = teardown {
+        errors.push(error);
+    }
+    if !errors.is_empty() {
+        let error = combine_clone_command_errors(errors);
+        return Err(CloneCommandInnerFailure {
+            record: record.map(Box::new),
+            error: Box::new(error),
+        });
+    }
+    let exit_code = record
+        .as_ref()
+        .and_then(|record| record.exit_code)
+        .ok_or_else(|| CloneCommandInnerFailure {
+            record: record.clone().map(Box::new),
+            error: Box::new(RoomsError::Internal(
+                "clone command result lost its exit code".to_owned(),
+            )),
+        })?;
+    let record = record.ok_or_else(|| CloneCommandInnerFailure {
+        record: None,
+        error: Box::new(RoomsError::Internal(
+            "clone command completed without a result record".to_owned(),
+        )),
     })?;
     Ok(CloneCommandOutcome { record, exit_code })
+}
+
+fn combine_clone_command_errors(mut errors: Vec<RoomsError>) -> RoomsError {
+    if errors.len() == 1 {
+        return errors.remove(0);
+    }
+    RoomsError::Internal(
+        errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
 }
 
 async fn teardown_restored_clone(
@@ -2928,14 +3575,26 @@ async fn teardown_restored_clone(
     finalizer.finish()
 }
 
-fn clone_records_json(records: &[CloneRecord]) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&CloneBatchEnvelope { clones: records })
+fn clone_records_json(
+    records: &[CloneRecord],
+    matrix_sha256: Option<&str>,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&CloneBatchEnvelope {
+        schema: matrix_result_schema(matrix_sha256),
+        matrix_sha256,
+        status: matrix_sha256.map(|_| "completed"),
+        clones: records,
+    })
 }
 
-fn emit_clone_records(records: &[CloneRecord], json: bool) -> Result<(), RoomsError> {
+fn emit_clone_records(
+    records: &[CloneRecord],
+    json: bool,
+    matrix_sha256: Option<&str>,
+) -> Result<(), RoomsError> {
     if json {
-        let line =
-            clone_records_json(records).map_err(|error| RoomsError::Internal(error.to_string()))?;
+        let line = clone_records_json(records, matrix_sha256)
+            .map_err(|error| RoomsError::Internal(error.to_string()))?;
         #[allow(
             clippy::print_stdout,
             reason = "clone --json batch record; stdout is the documented contract"
@@ -2945,7 +3604,35 @@ fn emit_clone_records(records: &[CloneRecord], json: bool) -> Result<(), RoomsEr
         }
         return Ok(());
     }
+    if let Some(matrix_sha256) = matrix_sha256 {
+        #[allow(
+            clippy::print_stdout,
+            reason = "matrix human summary; stdout is the documented contract"
+        )]
+        {
+            println!("matrix evidence: {matrix_sha256}");
+        }
+    }
     for record in records {
+        if let Some(case_id) = &record.case_id {
+            #[allow(
+                clippy::print_stdout,
+                reason = "matrix human summary; stdout is the documented contract"
+            )]
+            {
+                println!(
+                    "matrix case {case_id}: room {} in {} {}{}; evidence {}",
+                    record.room_id,
+                    record.namespace,
+                    record.status,
+                    record
+                        .exit_code
+                        .map_or_else(String::new, |code| format!(" {code}")),
+                    record.command_sha256.as_deref().unwrap_or("unavailable")
+                );
+            }
+            continue;
+        }
         #[allow(
             clippy::print_stdout,
             reason = "clone human summary; stdout is the documented contract"
@@ -3136,18 +3823,38 @@ async fn collect_run_artifacts(
     slot: &room::Slot,
     out_dir: Option<&Path>,
     vm: &mut firecracker::BootedVm,
-) {
-    if let Some(out_dir) = out_dir {
-        collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await;
-    }
+) -> Result<(), RoomsError> {
+    let collection = match out_dir {
+        Some(out_dir) => {
+            collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await
+        }
+        None => Ok(()),
+    };
     let witnessed = match vm.take_witness() {
         Some(capture) => Some(summarize_witness(capture, slot, env).await),
         None => None,
     };
-    let (Some(w), Some(out_dir)) = (&witnessed, out_dir) else {
-        return;
+    let witness = match (&witnessed, out_dir) {
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
+        _ => Ok(()),
     };
-    persist_witness(w, out_dir).await;
+    let errors = [collection.err(), witness.err()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(RoomsError::Internal(format!(
+        "artifact finalization failed: {}",
+        errors.join("; ")
+    )))
+}
+
+fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
+    if let Err(error) = result {
+        warn!(%error, operation, "artifact finalization incomplete");
+    }
 }
 
 /// A finalized egress witness: the summary plus the raw pcap bytes, held
@@ -3222,24 +3929,30 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// Persist the witness artifacts into `--out`: `witness.json` and `witness.pcap`,
 /// both written atomically (temp + rename), so the evidence survives the room.
 /// Creates the dir first — a run that collected nothing (an idle room) still
-/// gets its witness. Best-effort — a write failure is logged, never fatal (the
-/// run's own outcome and lifecycle summary stand).
-async fn persist_witness(w: &Witnessed, out_dir: &Path) {
-    if let Err(e) = tokio::fs::create_dir_all(out_dir).await {
-        warn!(out = %out_dir.display(), error = %e, "failed to create --out for the witness");
-        return;
-    }
-    match serde_json::to_vec_pretty(&w.summary) {
-        Ok(bytes) => {
-            if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes).await {
-                warn!(error = %e, "failed to write witness.json");
-            }
-        }
-        Err(e) => warn!(error = %e, "failed to serialize witness.json"),
-    }
-    if let Err(e) = write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw).await {
-        warn!(error = %e, "failed to write witness.pcap into --out");
-    }
+/// gets its witness. Failures are returned after logging so matrix callers can
+/// treat missing evidence as terminal while legacy run/restore behavior stays
+/// best-effort at their call sites.
+async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
+    tokio::fs::create_dir_all(out_dir).await.map_err(|error| {
+        warn!(out = %out_dir.display(), %error, "failed to create --out for the witness");
+        format!("create witness output {}: {error}", out_dir.display())
+    })?;
+    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| {
+        warn!(%error, "failed to serialize witness.json");
+        format!("serialize witness.json: {error}")
+    })?;
+    write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes)
+        .await
+        .map_err(|error| {
+            warn!(%error, "failed to write witness.json");
+            format!("write witness.json: {error}")
+        })?;
+    write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw)
+        .await
+        .map_err(|error| {
+            warn!(%error, "failed to write witness.pcap into --out");
+            format!("write witness.pcap: {error}")
+        })
 }
 
 /// Atomic artifact write into `--out`: temp file in the same dir, then rename,
@@ -3264,22 +3977,32 @@ async fn collect_and_record(
     action: &Action,
     out_dir: &Path,
     lifecycle: &Lifecycle,
-) {
+) -> Result<(), String> {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
     if !matches!(action, Action::Exec(_)) {
-        return;
+        return Ok(());
     }
     lifecycle.emit(&Event::CollectionStarted);
     let collect = collect_to_host(target, key, out_dir);
     match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
-        Ok(Ok(())) => lifecycle.emit(&Event::CollectionDone),
-        Ok(Err(error)) => lifecycle.emit(&Event::CollectionFailed { error }),
+        Ok(Ok(())) => {
+            lifecycle.emit(&Event::CollectionDone);
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            lifecycle.emit(&Event::CollectionFailed {
+                error: error.clone(),
+            });
+            Err(error)
+        }
         Err(_) => {
             warn!("artifact collection timed out (guest unresponsive); proceeding to teardown");
+            let error = "timed out (guest unresponsive)".to_owned();
             lifecycle.emit(&Event::CollectionFailed {
-                error: "timed out (guest unresponsive)".to_owned(),
+                error: error.clone(),
             });
+            Err(error)
         }
     }
 }
@@ -4106,15 +4829,17 @@ mod tests {
     use std::os::unix::ffi::OsStringExt as _;
 
     use super::{
-        changeset_exit_code, clone_command_failure_json, clone_output_dir, clone_records_json,
-        collapse_clone_failures, diff_changeset, exit_code_for_error, harvest_secrets,
-        humanize_secs, parse_clone_count, parse_max_pool, parse_max_wall, race_workload,
+        changeset_exit_code, clone_cancellation_json, clone_command_failure_json, clone_output_dir,
+        clone_records_json, clone_restore_failure_json, collapse_clone_failures, diff_changeset,
+        exit_code_for_error, harvest_secrets, humanize_secs, matrix_run_error_json,
+        parse_clone_count, parse_max_pool, parse_max_wall, race_workload,
         race_workload_with_clone_cancellation, resolve_action, run_clone_readiness_barrier,
         run_error_record, truncate_label, valid_secret_name, validate_clone_capacity,
         validate_json_emitted_path, Cli, CloneCancellation, CloneCommandBatchFailure, CloneFailure,
-        CloneNetError, CloneReadinessBarrierError, CloneReadinessFuture, CloneReadinessProbe,
-        CloneRecord, CloneSignalSource, CloneTermination, Command, ExecRace, RoomsError, RunArgs,
-        RunnerKind, SlotError, BARE_BOOT_LINGER,
+        CloneFailureRecord, CloneNetError, CloneReadinessBarrierError, CloneReadinessFuture,
+        CloneReadinessProbe, CloneRecord, CloneRestoreBatchFailure, CloneSignalSource,
+        CloneTermination, Command, ExecRace, RoomsError, RunArgs, RunnerKind, SlotError,
+        BARE_BOOT_LINGER,
     };
     use crate::artifacts::Changeset;
     use clap::{CommandFactory, Parser};
@@ -4509,6 +5234,47 @@ mod tests {
     }
 
     #[test]
+    fn matrix_parses_distinct_case_surface_without_a_clone_count() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "matrix",
+            "/snap",
+            "--image",
+            "/image",
+            "--cases",
+            "/cases.json",
+            "--out",
+            "/out",
+            "--witness",
+            "--max-wall",
+            "30s",
+            "--json",
+        ])
+        .expect("matrix parses");
+        match cli.command {
+            Command::Matrix {
+                snapshot_dir,
+                image,
+                cases,
+                out_dir,
+                witness,
+                max_wall,
+                json,
+                ..
+            } => {
+                assert_eq!(snapshot_dir, PathBuf::from("/snap"));
+                assert_eq!(image, PathBuf::from("/image"));
+                assert_eq!(cases, PathBuf::from("/cases.json"));
+                assert_eq!(out_dir, PathBuf::from("/out"));
+                assert!(witness);
+                assert_eq!(max_wall, Some(Duration::from_secs(30)));
+                assert!(json);
+            }
+            other => panic!("expected Matrix, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn clone_collection_options_require_command_mode() {
         for flag in ["--out", "--max-wall"] {
             let value = if flag == "--out" { "/out" } else { "30s" };
@@ -4546,10 +5312,14 @@ mod tests {
     fn clone_outputs_are_partitioned_by_room_identity() {
         let root = Path::new("/out");
         assert_eq!(
-            clone_output_dir(Some(root), "room-a"),
+            clone_output_dir(Some(root), "room-a", None),
             Some(PathBuf::from("/out/room-a"))
         );
-        assert_eq!(clone_output_dir(None, "room-a"), None);
+        assert_eq!(
+            clone_output_dir(Some(root), "room-a", Some("browser-mutant")),
+            Some(PathBuf::from("/out/browser-mutant"))
+        );
+        assert_eq!(clone_output_dir(None, "room-a", Some("clean")), None);
     }
 
     #[cfg(unix)]
@@ -4575,6 +5345,8 @@ mod tests {
     fn clone_batch_json_propagates_non_utf8_instead_of_panicking() {
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'o', 0xff]));
         let record = CloneRecord {
+            case_id: None,
+            command_sha256: None,
             room_id: "room-one".to_owned(),
             snapshot_id: "snapshot".to_owned(),
             slot: 4,
@@ -4587,7 +5359,7 @@ mod tests {
             out_dir: Some(invalid),
         };
         assert!(
-            clone_records_json(&[record]).is_err(),
+            clone_records_json(&[record], None).is_err(),
             "typed serialization must return the invalid-path error"
         );
     }
@@ -4797,9 +5569,26 @@ mod tests {
         let incomplete = CloneCancellation {
             signal: CloneTermination::Terminate,
             clones: Vec::new(),
+            failures: Vec::new(),
             cleanup_failures: vec!["residue".to_owned()],
         };
         assert_eq!(incomplete.exit_code(), 2);
+        let failed = CloneCancellation {
+            signal: CloneTermination::Interrupt,
+            clones: Vec::new(),
+            failures: vec![CloneFailureRecord {
+                case_id: Some("case-a".to_owned()),
+                command_sha256: Some("sha256:command".to_owned()),
+                clone_net_index: 1,
+                room_id: "room-one".to_owned(),
+                status: "failed",
+                error_kind: "internal",
+                message: "restore failed".to_owned(),
+                out_dir: None,
+            }],
+            cleanup_failures: Vec::new(),
+        };
+        assert_eq!(failed.exit_code(), 2);
     }
 
     #[cfg(unix)]
@@ -4828,6 +5617,8 @@ mod tests {
     #[test]
     fn clone_command_failure_json_retains_successes_outputs_and_all_failures() {
         let success = CloneRecord {
+            case_id: None,
+            command_sha256: None,
             room_id: "room-three".to_owned(),
             snapshot_id: "snapshot".to_owned(),
             slot: 4,
@@ -4857,7 +5648,7 @@ mod tests {
             ],
             vec!["task-z".to_owned(), "task-a".to_owned()],
         );
-        let raw = clone_command_failure_json(&batch).expect("serialize batch failure");
+        let raw = clone_command_failure_json(&batch, None).expect("serialize batch failure");
         let json: serde_json::Value = serde_json::from_str(&raw).expect("parse batch failure");
         assert_eq!(json["status"], "failed");
         assert_eq!(json["error_kind"], "clone_batch");
@@ -4869,6 +5660,157 @@ mod tests {
         assert_eq!(json["failures"][1]["out_dir"], "/out/room-seven");
         assert_eq!(json["task_failures"][0], "task-a");
         assert_eq!(json["task_failures"][1], "task-z");
+    }
+
+    fn matrix_record(case_id: &str, status: &'static str, exit_code: Option<u8>) -> CloneRecord {
+        CloneRecord {
+            case_id: Some(case_id.to_owned()),
+            command_sha256: Some("sha256:command".to_owned()),
+            room_id: "room-three".to_owned(),
+            snapshot_id: "snapshot".to_owned(),
+            slot: 4,
+            guest_ip: "172.16.0.18".to_owned(),
+            clone_net_index: 3,
+            namespace: "rooms-c3".to_owned(),
+            host_veth: "veth-h3".to_owned(),
+            status,
+            exit_code,
+            out_dir: Some(PathBuf::from(format!("/out/{case_id}"))),
+        }
+    }
+
+    #[test]
+    fn matrix_json_binds_case_identity_command_and_manifest() {
+        let record = matrix_record("browser-mutant", "exited", Some(0));
+        let raw = clone_records_json(&[record], Some("sha256:manifest"))
+            .expect("serialize matrix result");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse matrix result");
+        assert_eq!(json["schema"], "rooms.matrix.result.v1");
+        assert_eq!(json["matrix_sha256"], "sha256:manifest");
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["clones"][0]["case_id"], "browser-mutant");
+        assert_eq!(json["clones"][0]["command_sha256"], "sha256:command");
+        assert_eq!(json["clones"][0]["out_dir"], "/out/browser-mutant");
+    }
+
+    #[test]
+    fn matrix_standard_error_keeps_the_terminal_envelope_shape() {
+        let raw = matrix_run_error_json(
+            &RoomsError::Internal("substrate unavailable".to_owned()),
+            "sha256:manifest",
+        )
+        .expect("serialize matrix error");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse matrix error");
+        assert_eq!(json["schema"], "rooms.matrix.result.v1");
+        assert_eq!(json["matrix_sha256"], "sha256:manifest");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["error_kind"], "internal");
+        assert_eq!(json["clones"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn matrix_restore_failure_retains_ready_and_failed_case_evidence() {
+        let failure = CloneRestoreBatchFailure {
+            clones: vec![matrix_record("clean", "aborted", None)],
+            failures: vec![CloneFailureRecord {
+                case_id: Some("browser-mutant".to_owned()),
+                command_sha256: Some("sha256:mutant-command".to_owned()),
+                clone_net_index: 4,
+                room_id: "room-four".to_owned(),
+                status: "failed",
+                error_kind: "internal",
+                message: "restore rejected".to_owned(),
+                out_dir: Some(PathBuf::from("/out/browser-mutant")),
+            }],
+            cleanup_failures: vec!["net 4 cleanup failed".to_owned()],
+        };
+        let raw = clone_restore_failure_json(&failure, Some("sha256:manifest"))
+            .expect("serialize restore failure");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse restore failure");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["error_kind"], "clone_restore_batch");
+        assert_eq!(json["clones"][0]["case_id"], "clean");
+        assert_eq!(json["clones"][0]["status"], "aborted");
+        assert_eq!(json["failures"][0]["case_id"], "browser-mutant");
+        assert_eq!(
+            json["failures"][0]["command_sha256"],
+            "sha256:mutant-command"
+        );
+        assert_eq!(json["cleanup_failures"][0], "net 4 cleanup failed");
+        assert!(json.get("task_failures").is_none());
+        assert_eq!(
+            failure.summary(),
+            "clone restore failed: case browser-mutant net 4 room room-four: restore rejected; partial clone cleanup incomplete: net 4 cleanup failed"
+        );
+    }
+
+    #[test]
+    fn matrix_cancellation_retains_assigned_case_records() {
+        let cancellation = CloneCancellation::with_clones(
+            CloneTermination::Interrupt,
+            vec![matrix_record("clean", "cancelled", Some(130))],
+            Vec::new(),
+        );
+        let raw = clone_cancellation_json(&cancellation, Some("sha256:manifest"))
+            .expect("serialize cancellation");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse cancellation");
+        assert_eq!(json["status"], "cancelled");
+        assert_eq!(json["clones"][0]["case_id"], "clean");
+        assert_eq!(json["clones"][0]["command_sha256"], "sha256:command");
+        assert_eq!(json["failures"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn matrix_cancellation_canonicalizes_failure_and_cleanup_evidence() {
+        let failure = |index: u8, case_id: &str| CloneFailureRecord {
+            case_id: Some(case_id.to_owned()),
+            command_sha256: Some(format!("sha256:{case_id}")),
+            clone_net_index: index,
+            room_id: format!("room-{index}"),
+            status: "failed",
+            error_kind: "internal",
+            message: "restore failed".to_owned(),
+            out_dir: Some(PathBuf::from(format!("/out/{case_id}"))),
+        };
+        let cancellation = CloneCancellation::with_details(
+            CloneTermination::Interrupt,
+            Vec::new(),
+            vec![failure(7, "late"), failure(2, "early")],
+            vec!["cleanup-z".to_owned(), "cleanup-a".to_owned()],
+        );
+        let raw = clone_cancellation_json(&cancellation, Some("sha256:manifest"))
+            .expect("serialize cancellation");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse cancellation");
+        assert_eq!(json["failures"][0]["case_id"], "early");
+        assert_eq!(json["failures"][1]["case_id"], "late");
+        assert_eq!(json["cleanup_failures"][0], "cleanup-a");
+        assert_eq!(json["cleanup_failures"][1], "cleanup-z");
+        assert_eq!(json["exit_code"], 2);
+    }
+
+    #[test]
+    fn matrix_infrastructure_failure_retains_the_completed_case_observation() {
+        let record = matrix_record("clean", "exited", Some(0));
+        let failure = CloneFailure::with_output(
+            record.clone_net_index,
+            &record.room_id,
+            record.out_dir.clone(),
+            RoomsError::Internal("artifact finalization failed: tar stream ended".to_owned()),
+        )
+        .for_case(record.case_id.clone(), record.command_sha256.clone());
+        let batch = CloneCommandBatchFailure::new(vec![record], vec![failure], Vec::new());
+        let raw = clone_command_failure_json(&batch, Some("sha256:manifest"))
+            .expect("serialize matrix failure");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse matrix failure");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["clones"][0]["case_id"], "clean");
+        assert_eq!(json["clones"][0]["status"], "exited");
+        assert_eq!(json["clones"][0]["exit_code"], 0);
+        assert_eq!(json["clones"][0]["snapshot_id"], "snapshot");
+        assert_eq!(json["failures"][0]["case_id"], "clean");
+        assert!(json["failures"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("artifact finalization failed")));
     }
 
     #[test]
