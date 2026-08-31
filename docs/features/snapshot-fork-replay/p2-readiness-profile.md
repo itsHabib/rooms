@@ -30,7 +30,7 @@ Runs read (on the rooms-host, under `~/.r2/`):
 
 **Δ is the median across the eight clones**, so these columns describe the
 median clone's timeline — they are not additive with the fleet boundaries in the
-next table. See "Reading the two tables together" below.
+next table. See "Reading the tables together" below.
 
 | Stage | FMWT Δ | zA3P Δ | What it does |
 | --- | --- | --- | --- |
@@ -42,22 +42,50 @@ next table. See "Reading the two tables together" below.
 | `sshd` | 1.70 s | 1.90 s | launch sshd |
 | **sum — median clone done** | **23.56 s** | **23.81 s** | |
 
-Fleet-level accounting, which is what the gate actually bounds:
+### Fleet accounting, on a single clock
 
-| Boundary | FMWT | zA3P |
+The per-stage `elapsed_ms` above is measured from each room's **vsock accept**
+(`src/vsock.rs:567`), while the gate's own interval starts before the CLI is even
+invoked (`scripts/phase2-killer.sh:3582`). Subtracting one from the other would
+mix two time origins. The log carries wall-clock timestamps on every line and
+spans the whole measured window, so the fleet accounting below is instead built
+on **one clock**, `t=0` at CLI start, with every boundary taken as the *last* of
+the eight clones to cross it.
+
+| Boundary (all 8 across by) | FMWT | zA3P |
 | --- | --- | --- |
-| median clone finishes hygiene | 23.56 s | 23.81 s |
-| **slowest** clone finishes hygiene (last ACK) | 26.42 s | 27.59 s |
-| **SSH readiness barrier tail** | **16.58 s** | **21.02 s** |
-| **total (`fleet-ready.ns`)** | **43.00 s** | **48.61 s** |
+| microVMs resumed from snapshot | 0.47 s | 0.53 s |
+| vsock agents connected | 2.62 s | 3.88 s |
+| guest-hygiene ACKs | 27.39 s | 30.65 s |
+| SSH authenticated | 42.92 s | 48.53 s |
+| CLI returned (`fleet-ready.ns`) | 43.00 s | 48.61 s |
 
-### Reading the two tables together
+| Segment | FMWT | zA3P | share |
+| --- | --- | --- | --- |
+| restore + boot to vsock | 2.62 s | 3.88 s | 6–8 % |
+| **guest post-resume hygiene** | **24.77 s** | **26.76 s** | **55–58 %** |
+| **post-sshd SSH handshake** | **15.53 s** | **17.88 s** | **36–37 %** |
+| CLI return overhead | 0.08 s | 0.07 s | 0.2 % |
 
-The stage Δs sum to the **median** clone's completion (23.56 s / 23.81 s), while
-the barrier tail is measured from the **slowest** clone's ACK (26.42 s /
-27.59 s). The 2.86 s / 3.78 s difference between those two rows is entirely
-median-vs-max — it is not an unaccounted stage. The tail is measured from the
-max because the CLI cannot return until the *last* clone authenticates.
+### Snapshot restore is not the problem
+
+**All eight microVMs resume from the snapshot within half a second** — 0.47 s
+(FMWT) and 0.53 s (zA3P), with the eight `firecracker` spawns landing inside a
+10 ms window. Restore and boot to a connected vsock agent is 6–8 % of the budget.
+
+This is worth stating plainly because it is the density thesis working: the fork
+itself is fast, and nothing in the 43 s is waiting on snapshot machinery. The
+entire miss is post-resume — hygiene plus handshake are **~93 %** of the wall
+clock.
+
+### Reading the tables together
+
+The per-stage Δs are medians and sum to the **median** clone's completion
+(23.56 s / 23.81 s); the fleet table is built from **maxima**, because the CLI
+cannot return until the *last* clone authenticates. Those two are different
+statistics and are not additive with each other — the 2.86 s / 3.78 s difference
+between the median clone's finish and the slowest clone's ACK is exactly that,
+not an unaccounted stage.
 
 That gap is itself a finding. The eight clones do not finish together:
 
@@ -69,8 +97,9 @@ That gap is itself a finding. The eight clones do not finish together:
 A 5–7 s spread across eight clones doing identical work, launched together, is
 what contention looks like — and it is consistent with the shape argument below.
 
-Two costs dominate and together account for ~70 % of the wall clock:
-`hostkeys` (~13–14 s) and the SSH barrier tail (~17–21 s).
+Two costs dominate and together account for ~93 % of the wall clock: guest
+post-resume hygiene (55–58 %, with `hostkeys` the largest stage inside it) and
+the post-sshd SSH handshake (36–37 %).
 
 ## What this rules out
 
@@ -85,8 +114,8 @@ and handshake design are three orders of magnitude away from being the problem.
 for the eight SSH probes. Nothing is serialized at the orchestration layer.
 
 **It is not the poll grid.** `wait_for_ssh_observed` probes immediately and only
-then sleeps `guest_reach_poll_interval` (2 s). A 2 s grid cannot produce a 17 s
-tail.
+then sleeps `guest_reach_poll_interval` (2 s). A 2 s grid cannot produce a
+15–18 s handshake segment.
 
 **It is probably not entropy.** `reseed()` uses `RNDRESEEDCRNG` on an
 already-initialized CRNG (the base booted normally before the snapshot), so
@@ -106,9 +135,11 @@ unlinks, `ssh-keygen` forks and writes two files, then four `chmod`s and four
 most expensive. An ed25519 keygen is ~1 ms of arithmetic; 14 s means the cost is
 not the crypto.
 
-The same explanation covers the barrier tail: sshd forks a child per connection
-and reads its host keys off disk, so an accept path that is slow for the same
-reason would show up exactly where it does.
+The same explanation covers the 15–18 s handshake segment: sshd forks a child
+per connection and reads its host keys off disk, so an accept path slow for the
+same reason would show up exactly where it does. That the two largest costs are
+the two most fork- and write-heavy segments, while restore — which is neither —
+finishes in half a second, is the whole of the argument.
 
 **Working hypothesis: guest-side `fork`/`exec` and small-file writes are the
 bottleneck under eight-way concurrency** — a storage/exec path cost, not a
@@ -135,8 +166,9 @@ the cost is in the restored guest's device model instead.
 ## Consequences for the gate
 
 The `< 1 s` target is a **fleet-wide authenticated-readiness** bound, and today
-~70 % of the budget is spent in guest-side work that has nothing to do with fork
-speed. Two implications worth an explicit decision:
+~93 % of the budget is spent in guest-side work that has nothing to do with fork
+speed — the fork itself completes in under half a second. Two implications worth
+an explicit decision:
 
 - **`hostkeys` is on the critical path by construction.** Fresh per-clone host
   keys are a *correctness* requirement of the gate (distinct sshd identity per
