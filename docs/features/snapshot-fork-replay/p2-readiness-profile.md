@@ -28,19 +28,46 @@ Runs read (on the rooms-host, under `~/.r2/`):
 
 ## The decomposition
 
-Median across the eight clones, per stage. Δ is the stage's own cost.
+**Δ is the median across the eight clones**, so these columns describe the
+median clone's timeline — they are not additive with the fleet boundaries in the
+next table. See "Reading the two tables together" below.
 
 | Stage | FMWT Δ | zA3P Δ | What it does |
 | --- | --- | --- | --- |
-| `reseeded` | 0.7 s | 0.2 s | `RNDRESEEDCRNG` ioctl |
-| `identity` | 2.8 s | 2.7 s | write identity + secrets + git config |
-| **`hostkeys`** | **14.3 s** | **12.8 s** | `ssh-keygen -t ed25519` + chmods + config parse |
-| `privilege` | 4.0 s | 6.1 s | restore sudo (file writes) |
+| `reseeded` | 0.69 s | 0.20 s | `RNDRESEEDCRNG` ioctl |
+| `identity` | 2.82 s | 2.72 s | write identity + secrets + git config |
+| **`hostkeys`** | **14.27 s** | **12.79 s** | `ssh-keygen -t ed25519` + chmods + config parse |
+| `privilege` | 4.03 s | 6.12 s | restore sudo (file writes) |
 | `clock` | 0.06 s | 0.07 s | 5 vsock round-trips + `clock_settime` |
-| `sshd` | 1.7 s | 1.9 s | launch sshd |
-| — last guest ACK | 26.4 s | 27.6 s | |
-| **SSH readiness barrier tail** | **16.6 s** | **21.0 s** | host↔guest authenticated handshake |
-| **total** | **43.0 s** | **48.6 s** | |
+| `sshd` | 1.70 s | 1.90 s | launch sshd |
+| **sum — median clone done** | **23.56 s** | **23.81 s** | |
+
+Fleet-level accounting, which is what the gate actually bounds:
+
+| Boundary | FMWT | zA3P |
+| --- | --- | --- |
+| median clone finishes hygiene | 23.56 s | 23.81 s |
+| **slowest** clone finishes hygiene (last ACK) | 26.42 s | 27.59 s |
+| **SSH readiness barrier tail** | **16.58 s** | **21.02 s** |
+| **total (`fleet-ready.ns`)** | **43.00 s** | **48.61 s** |
+
+### Reading the two tables together
+
+The stage Δs sum to the **median** clone's completion (23.56 s / 23.81 s), while
+the barrier tail is measured from the **slowest** clone's ACK (26.42 s /
+27.59 s). The 2.86 s / 3.78 s difference between those two rows is entirely
+median-vs-max — it is not an unaccounted stage. The tail is measured from the
+max because the CLI cannot return until the *last* clone authenticates.
+
+That gap is itself a finding. The eight clones do not finish together:
+
+| Run | per-clone hygiene completion (s) | spread |
+| --- | --- | --- |
+| FMWT | 19.4, 19.9, 20.1, 22.8, 24.3, 25.8, 26.1, 26.4 | 7.01 s |
+| zA3P | 22.6, 22.6, 22.7, 23.2, 24.4, 24.5, 27.6, 27.6 | 4.99 s |
+
+A 5–7 s spread across eight clones doing identical work, launched together, is
+what contention looks like — and it is consistent with the shape argument below.
 
 Two costs dominate and together account for ~70 % of the wall clock:
 `hostkeys` (~13–14 s) and the SSH barrier tail (~17–21 s).
