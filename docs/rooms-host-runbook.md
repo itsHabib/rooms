@@ -126,12 +126,14 @@ rooms ls        # must be clean afterwards — every slot freed
 
 - **Fleet readiness is dominated by nested stage-2 page faults (~1 ms per 4 KiB page here).** A snapshot whose `snapshot.mem` lives on a regular file can only be mapped at 4 KiB; put the snapshot directory on tmpfs mounted `huge=always` and the same restore gets 2 MiB read mappings and ~3× faster eight-clone readiness. `chattr +i` works on tmpfs, so the seal check passes unchanged:
   ```sh
-  sudo mount -t tmpfs -o huge=always,size=600m,mode=0700 tmpfs /mnt/hugesnap
+  sudo mkdir -p /mnt/hugesnap
+  sudo mount -t tmpfs -o huge=always,size=600m,mode=0700 tmpfs /mnt/hugesnap   # ~2x the 256 MiB snapshot
   sudo cp -a <snapshot-dir>/. /mnt/hugesnap/
-  sudo chattr +i /mnt/hugesnap/snapshot.* /mnt/hugesnap
+  sudo sh -c 'chattr +i /mnt/hugesnap/snapshot.* /mnt/hugesnap'   # glob must expand as root (mode 0700)
   sudo mount --bind /mnt/hugesnap <snapshot-dir>
   ```
-  `grep ShmemHugePages /proc/meminfo` should show the whole file. See the readiness profile doc for the measurements.
+  The directory flag is not optional: restore seals the snapshot *directory* as well as its files and refuses one that is not immutable. To stage a newer snapshot, `chattr -i /mnt/hugesnap` first, replace the files, and re-seal. `grep ShmemHugePages /proc/meminfo` should show the whole file. See the readiness profile doc for the measurements.
+
 | Trap | Symptom | Fix |
 | --- | --- | --- |
 | `sudo rooms <verb>` | `rooms ls` says "no rooms" though rooms exist | sudo reads root's `HOME`; run rooms verbs as `mh` |

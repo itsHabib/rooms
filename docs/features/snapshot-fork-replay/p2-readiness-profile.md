@@ -216,7 +216,8 @@ Storage is not involved: the overlay is tmpfs, so `fsync` is a no-op there.
 
 This replaces the working hypothesis above. It is not the exec path or small-file
 writes; it is every first access to a guest-physical page after resume, and
-those faults appear to serialize across clones somewhere below the L1 kernel.
+those faults appear to serialize across clones in the L0 hypervisor (`vz`), below
+the rooms-host kernel and its KVM module.
 
 ### A zero-code mitigation: 2 MiB read mappings
 
