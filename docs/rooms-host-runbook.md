@@ -124,6 +124,14 @@ rooms ls        # must be clean afterwards — every slot freed
 
 ## Gotchas (each cost a debugging cycle — don't relearn them)
 
+- **Fleet readiness is dominated by nested stage-2 page faults (~1 ms per 4 KiB page here).** A snapshot whose `snapshot.mem` lives on a regular file can only be mapped at 4 KiB; put the snapshot directory on tmpfs mounted `huge=always` and the same restore gets 2 MiB read mappings and ~3× faster eight-clone readiness. `chattr +i` works on tmpfs, so the seal check passes unchanged:
+  ```sh
+  sudo mount -t tmpfs -o huge=always,size=600m,mode=0700 tmpfs /mnt/hugesnap
+  sudo cp -a <snapshot-dir>/. /mnt/hugesnap/
+  sudo chattr +i /mnt/hugesnap/snapshot.* /mnt/hugesnap
+  sudo mount --bind /mnt/hugesnap <snapshot-dir>
+  ```
+  `grep ShmemHugePages /proc/meminfo` should show the whole file. See the readiness profile doc for the measurements.
 | Trap | Symptom | Fix |
 | --- | --- | --- |
 | `sudo rooms <verb>` | `rooms ls` says "no rooms" though rooms exist | sudo reads root's `HOME`; run rooms verbs as `mh` |

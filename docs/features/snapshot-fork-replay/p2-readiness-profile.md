@@ -6,6 +6,12 @@ readiness in **< 1 s**; the last two host runs measured **43.0 s** and **48.6 s*
 
 This doc decomposes that number. It changes nothing in `src/`.
 
+> **Update 2026-09-02** — the settling experiment was run; see
+> "Measured on 2026-09-02" below. The working hypothesis in the earlier
+> sections (exec path / small-file writes) is superseded: the cost is the
+> nested-virtualization stage-2 page fault, and a THP-backed `snapshot.mem`
+> cuts fleet readiness ~3× with no code change.
+
 ## Where the data came from
 
 No new instrumentation was needed. `scripts/phase2-killer.sh:99` already pins
@@ -162,6 +168,108 @@ other clones present, then again with eight:
 If (1) goes from milliseconds at N=1 to seconds at N=8, the hypothesis holds and
 the fix is in the storage path, not the protocol. If (1) is slow even at N=1,
 the cost is in the restored guest's device model instead.
+
+## Measured on 2026-09-02: it is the stage-2 fault path
+
+The experiment above was run on the Lima rooms-host (6 vCPU / 8 GiB, kernel
+6.8, Firecracker v1.15.0) against the retained `FMWT` snapshot, driven through
+`rooms clone --command` so every number below comes from the shipped resume
+protocol and the same `elapsed_ms` stamps as the tables above. It settles the
+question, but not the way the working hypothesis expected.
+
+### Scaling sweep
+
+Hygiene ACK of the *last* clone, and the `hostkeys` range, with `--command true`:
+
+| n | last ACK | `hostkeys` | CLI wall |
+| --- | --- | --- | --- |
+| 1 | 1.79 s | 1.30 s | 6.2 s |
+| 1 | 2.24 s | 1.64 s | 8.1 s |
+| 2 | 5.22 s | 4.00–4.10 s | 11.7 s |
+| 4 | 9.01 s | 5.47–5.54 s | 29.6 s |
+| 8 | 31.35 s | 20.3–28.4 s | 81.6 s |
+
+Two clones on six host cores are not competing for CPU, yet n=2 is already
+2.7× n=1, and n=8 is ~15× n=1. That is a serialized shared resource, not a
+scheduler.
+
+### Microbenchmark inside one restored clone (n=1)
+
+Each line is a `sh -c` timed from `/proc/uptime`; the second run of each pair
+repeats it in the same guest.
+
+| probe | first | second | what it isolates |
+| --- | --- | --- | --- |
+| shell loop, 200k iterations | 0.99 s | 0.77 s | pure compute, no faults |
+| `dd` 100 MiB into tmpfs | **31.43 s** | 13.09 s | first touch of fresh guest pages |
+| 200 × `/bin/true` | 2.10 s | 0.90 s | fork/exec |
+| `ssh-keygen -t ed25519` | 0.24 s | 0.13 s | the whole "expensive" keygen, warm |
+| `cat /usr/lib/*.so* /usr/bin/*` | 7.51 s | 4.90 s | block reads + page-cache fill |
+
+Compute is normal. Touching 25,600 fresh 4 KiB pages costs 31 s — **~1.2 ms per
+page**. The same 1 GiB touch on the Lima host itself costs 3.3 s (~13 µs/page),
+so the cost is not the host's memory: it is the guest's **stage-2 page fault**
+under nested virtualization (Firecracker/KVM inside a `vz` VM). A warm
+`ssh-keygen` is 0.1 s; the 1.3 s `hostkeys` stage at n=1 and the 14 s at n=8 are
+that keygen's first-touch pages, and the SSH handshake segment is `sshd`'s.
+Storage is not involved: the overlay is tmpfs, so `fsync` is a no-op there.
+
+This replaces the working hypothesis above. It is not the exec path or small-file
+writes; it is every first access to a guest-physical page after resume, and
+those faults appear to serialize across clones somewhere below the L1 kernel.
+
+### A zero-code mitigation: 2 MiB read mappings
+
+Every clone `MAP_PRIVATE`s the same `snapshot.mem` (§4 D6). On a regular file
+that mapping can only ever be 4 KiB pages, so KVM maps stage-2 at 4 KiB and
+pays one nested fault per page. If the file lives on **tmpfs mounted
+`huge=always`**, read faults populate a 2 MiB PMD and KVM/arm64 upgrades the
+stage-2 mapping to a 2 MiB block (`transparent_hugepage_adjust`) — 512× fewer
+read faults. Writes still CoW at 4 KiB (the PMD is split on first write), so
+this only helps the read side. Setting `chattr +i` works on tmpfs since 6.0, so
+the inode-seal check is satisfied unchanged.
+
+Bind-mounting a `huge=always` tmpfs copy of the snapshot directory over
+`~/.r2/FMWT/snapshot` and rerunning, nothing else changed:
+
+| n | last ACK (4 KiB file) | last ACK (THP tmpfs) | `hostkeys` (THP) |
+| --- | --- | --- | --- |
+| 1 | 1.79–2.24 s | 1.34–1.46 s | 0.93–1.00 s |
+| 4 | 9.01 s | 5.38 s | 3.45–3.55 s |
+| 8 | 28.7–31.4 s | 9.6–11.6 s (three runs) | 6.1–10.4 s |
+
+`/proc/vmstat` confirms the mechanism: `thp_file_mapped` went 0 → 752 and
+`thp_split_pmd` 0 → 519 across the runs. In the n=1 microbenchmark the fresh-page
+touch dropped from 31.4 s to 6.8 s and the page-cache fill from 7.5 s to 2.3 s.
+
+Fleet readiness improves ~3× from a mount option. It does not reach the gate:
+the remaining ~10 s is write faults at 4 KiB granularity, and a fleet-wide
+`< 1 s` bound is roughly another 10× away.
+
+### What would close the rest
+
+- **hugetlbfs-backed `snapshot.mem`.** A `MAP_PRIVATE` mapping of a hugetlbfs
+  file makes the *write* CoW copy a whole 2 MiB page in one fault, so a clone
+  bounds at 128 faults for all 256 MiB instead of up to 65,536. Not yet
+  measured: hugetlbfs has no inode flags, so the current seal check refuses it
+  outright. Trying it needs either a seal policy that accepts hugetlbfs on its
+  own terms (the mount is already root-only and non-writable through `write(2)`)
+  or an explicit experiment flag — an operator decision, not a tuning knob.
+  The cost is the density thesis: 2 MiB CoW granularity inflates per-clone
+  private memory, which is the other open gate bound (fleet PSS).
+- **Fewer distinct pages touched post-resume.** Faults scale with the working
+  set, not the guest size. Everything `hostkeys`/`sshd` need that can be
+  resident and *read-only* in the snapshot benefits from THP; every page the
+  guest must *write* after resume is a 4 KiB fault regardless.
+- **A host that is not nested.** The ~1 ms/fault is the nested-virtualization
+  tax on this development host; the same code on bare-metal KVM should see
+  faults two to three orders of magnitude cheaper. The gate number is host-
+  specific and should say so.
+
+Productizing the THP win is small: stage snapshot artifacts on a `huge=always`
+tmpfs (they are memory-resident across eight clones anyway through the page
+cache), or have the restore preflight warn when `snapshot.mem` is not
+THP-backed. Either belongs in a separate change.
 
 ## Consequences for the gate
 
