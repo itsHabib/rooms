@@ -120,6 +120,23 @@ On Linux, the Alpine builder publishes its rootfs with `FS_IMMUTABLE_FL`; snapsh
 
 `--keep` and `--command` are mutually exclusive on `run`/`restore`; kept modes cannot collect output or witness traffic; `--push-branch` is cursor-only. clap enforces these combinations at parse time.
 
+## Rehearse a change
+
+The [payment rehearsal lab](examples/rehearsal/README.md) compares an original
+handler and an idempotency patch under ordinary delivery, a lost reply followed
+by redelivery, and two legitimate events carrying the same amount. It produces
+an offline comparison report with independently checked ledger/trace evidence.
+
+```sh
+python3 examples/rehearsal/lab.py demo --out /tmp/payment-rehearsal
+```
+
+`demo` uses local processes and labels that limit. The lab's `run` command uses
+six real snapshot clones through `rooms matrix`, with witnessed no-egress
+execution. The same specimen and oracle run on both paths. No credentials or
+external services are needed. See the lab README for the host invocation and
+how to retain and re-check the evidence.
+
 ## Prereqs
 
 - **Host:** Linux with `/dev/kvm` (nested virt enabled if running inside a VM). The v0 dev loop uses an Ubuntu Server VM under Hyper-V on Windows (`rooms-host`).

@@ -46,6 +46,20 @@ jobs:
       # don't have those; the gated e2e tests run on the rooms-host VM only.
       - run: cargo test
 
+  rehearsal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make test-rehearsal
+      - run: python3 examples/rehearsal/lab.py demo --out "${{ runner.temp }}/payment-rehearsal"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payment-rehearsal
+          path: ${{ runner.temp }}/payment-rehearsal
+
   audit:
     runs-on: ubuntu-latest
     permissions:

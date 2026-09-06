@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Rooms · Payment rehearsal</title>
+<style>
+:root{color-scheme:dark;--bg:#101719;--panel:#182225;--line:#334145;--ink:#e6ece8;--muted:#afbfba;--green:#96e8b4;--red:#ffb6a5;--amber:#e7cd8e}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,sans-serif}
+main{max-width:1120px;margin:auto;padding:34px 38px 80px}
+header{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid var(--line);padding-bottom:22px;font-size:13px;color:var(--muted)}
+.brand{font-size:18px;letter-spacing:.2em;color:var(--ink)}
+.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.16em;color:var(--green);margin:46px 0 14px}
+h1{font-size:clamp(36px,5vw,62px);line-height:1.07;letter-spacing:-.045em;max-width:800px;margin:0 0 24px;font-weight:550}
+.intro{max-width:740px;font-size:18px;color:var(--muted)}
+.sequence{display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin:30px 0 38px;font-size:13px}
+.sequence span{padding:8px 14px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+.sequence .fault{color:var(--red);border-color:#75534a}
+.sequence b{color:var(--muted)}
+h2{font-size:22px;font-weight:550;margin:36px 0 6px}
+.caption{color:var(--muted);font-size:14px;margin:0 0 20px}
+.matrix{display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:10px}
+.column{font-size:13px;color:var(--muted);padding:8px 16px}
+.row-label{align-self:center;font-size:15px;padding-right:10px}
+.cell{display:flex;flex-direction:column;gap:4px;border:1px solid var(--line);padding:19px;border-radius:8px;color:var(--ink);text-decoration:none;background:var(--panel);min-height:118px}
+.cell strong{font:600 12px/1.5 ui-monospace,monospace;letter-spacing:.06em}
+.cell span{font-size:14px}
+.cell .inspect{font-size:11px;opacity:.75}
+.passed strong{color:var(--green)}
+.failed{background:#322520;border-color:#80604d}
+.failed strong{color:var(--red)}
+.inconclusive{color:var(--amber)}
+.cell:hover,.cell:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.note{padding:18px 22px;border-left:2px solid var(--green);background:var(--panel);margin-top:26px;font-size:14px;color:var(--muted)}
+details{border:1px solid var(--line);border-radius:8px;margin:10px 0;padding:0 20px}
+details:target{border-color:var(--green)}
+summary{cursor:pointer;display:flex;align-items:center;gap:12px;padding:18px 0;font-size:14px}
+summary>span:last-child{margin-left:auto;color:var(--muted);font-size:12px}
+.dot{height:7px;width:7px;border-radius:50%;background:var(--amber);flex-shrink:0}
+.dot.passed{background:var(--green)}
+.dot.failed{background:var(--red)}
+.evidence{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+h3{font-size:12px;font-weight:500;color:var(--muted)}
+pre{font:12px/1.8 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#0d1214;padding:14px;min-height:100px;border-radius:4px}
+.hash{font:11px/1.8 ui-monospace,monospace;overflow-wrap:anywhere;color:var(--muted)}
+footer{border-top:1px solid var(--line);margin-top:38px;padding-top:20px;color:var(--muted);font-size:12px}
+footer a{color:var(--green)}
+@media(max-width:640px){main{padding:24px 18px 50px}
+header{flex-direction:column;gap:8px}
+.matrix{gap:6px;grid-template-columns:.9fr 1fr 1fr}
+.cell{padding:11px;min-height:124px}
+.row-label{font-size:12px}
+.column{padding:6px;font-size:12px}
+.evidence{grid-template-columns:1fr}
+summary{flex-wrap:wrap}
+.sequence{gap:6px}
+.sequence span{padding:6px 8px}
+}
+
+</style>
+</head>
+<body><main>
+<header><span class="brand">ROOMS / LAB</span><span>{{BACKEND}}</span></header>
+<p class="eyebrow">Specimen 001 · Payment redelivery · {{STATUS}}</p>
+<h1>{{HEADLINE}}</h1><p class="intro">{{NARRATIVE}}</p>
+<div class="sequence" aria-label="Fault scenario"><span>Deliver payment</span><b>→</b><span>Record $25</span><b>→</b><span class="fault">Lose reply</span><b>→</b><span>Retry in a new process</span></div>
+<h2>One change. Three conditions.</h2><p class="caption">Each cell checks the ledger and delivery trace against an independent host-side expectation.</p>
+<div class="matrix"><div></div><div class="column">ORIGINAL<br>Append on delivery</div><div class="column">PROPOSED<br>Deduplicate by event ID</div>{{MATRIX}}</div>
+<div class="note">The third scenario matters: two different payments of $25 must both survive. Suppressing every repeated amount would hide the retry bug by losing legitimate payments.</div>
+<h2>What changed</h2>
+<p class="caption">The proposed handler checks the persistent ledger for the event ID before appending. A repeated delivery gets an acknowledgement without a second ledger entry. The lookup survives a fresh process because it uses the ledger, not process memory.</p>
+<pre>Original:   receive → append payment → acknowledge
+Proposed:   receive → event already recorded? → acknowledge
+                             ↓ no
+                       append payment → acknowledge</pre>
+<h2>Open the evidence</h2><p class="caption">A completed command can still produce incorrect behavior. Missing evidence is inconclusive.</p>
+{{DETAILS}}
+<footer><p>Synthetic sequential fixture. This does not prove concurrent safety, disk durability, arbitrary crash recovery, or hostile-guest evidence integrity. No production services or credentials are used. Results grant no merge or deployment authority.</p><p><a href="summary.md">Markdown summary</a> · <a href="comparison.json">Full comparison JSON</a> · <a href="matrix.json">Executed manifest</a> · <a href="execution.json">Execution record</a></p><p class="hash">Manifest {{DIGEST}}</p></footer>
+</main></body></html>
