@@ -56,6 +56,7 @@ jobs:
       - run: make test-rehearsal
       - run: python3 examples/rehearsal/lab.py demo --out "${{ runner.temp }}/payment-rehearsal"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: payment-rehearsal
           path: ${{ runner.temp }}/payment-rehearsal

@@ -1,6 +1,7 @@
 """Offline views of independently checked rehearsal observations."""
 from html import escape
 from pathlib import Path
+import re
 
 LABELS = {"normal": "Ordinary delivery", "lost-ack": "The reply disappears", "distinct-events": "Same amount, different events"}
 MODES = {"baseline": "Original", "idempotent": "With idempotency"}
@@ -16,8 +17,11 @@ def cell(row):
     noun = "ledger entries"
     if len(ledger) == 1:
         noun = "ledger entry"
+    count = f"{len(ledger)} {noun}"
+    if status == "inconclusive":
+        count = "evidence incomplete"
     return (f'<a class="cell {status}" href="#{row["id"]}">'
-            f'<strong>{text(status.upper())}</strong><span>{len(ledger)} {noun}</span>'
+            f'<strong>{text(status.upper())}</strong><span>{text(count)}</span>'
             '<span class="inspect">Inspect evidence ↗</span></a>')
 
 
@@ -29,9 +33,11 @@ def detail(row):
             f'<p>{text(row["reason"])}</p><div class="evidence">'
             f'<section><h3>Observed ledger</h3><pre>{text(row["ledger"])}</pre></section>'
             f'<section><h3>Expected ledger</h3><pre>{text(expected)}</pre></section>'
-            f'<section><h3>Delivery trace</h3><pre>{text(row["trace"])}</pre></section></div>'
+            f'<section><h3>Observed trace</h3><pre>{text(row["trace"])}</pre></section>'
+            f'<section><h3>Expected trace</h3><pre>{text(row.get("expected_trace", "unavailable"))}</pre></section></div>'
             f'<p class="hash">Command {text(row["execution"].get("command_sha256", "unavailable"))}</p>'
-            f'<p class="hash">Ledger {text(row["hashes"].get("ledger", "unavailable"))}</p></details>')
+            f'<p class="hash">Ledger {text(row["hashes"].get("ledger", "unavailable"))}</p>'
+            f'<p class="hash">Trace {text(row["hashes"].get("trace", "unavailable"))}</p></details>')
 
 
 def summary(report):
@@ -76,7 +82,6 @@ def publish(root, report, write):
                     "NARRATIVE": text(narrative), "MATRIX": "\n".join(matrix),
                     "DETAILS": "\n".join(detail(row) for row in report["cases"]),
                     "DIGEST": text(report.get("matrix_sha256", "unavailable"))}
-    for key, value in replacements.items():
-        template = template.replace("{{" + key + "}}", value)
+    template = re.sub(r"\{\{([A-Z]+)\}\}", lambda match: replacements[match.group(1)], template)
     write(root / "summary.md", summary(report).encode())
     write(root / "report.html", template.encode())

@@ -104,6 +104,17 @@ class RehearsalTests(unittest.TestCase):
         self.assertNotIn('href="https:', html)
         self.assertIn("Local processes", html)
 
+    def test_evidence_placeholders_stay_literal_and_missing_counts_stay_unknown(self):
+        target = self.root / "evidence/baseline-normal/ledger.tsv"
+        target.write_text("{{DIGEST}}")
+        lab.compare(self.root)
+        html = (self.root / "report.html").read_text()
+        self.assertIn("<pre>{{DIGEST}}</pre>", html)
+        self.assertIn("evidence incomplete", html)
+        self.assertNotIn("0 ledger entries", html)
+        self.assertIn("Expected trace", html)
+        self.assertIn("Trace sha256:", html)
+
     def test_symlink_evidence_is_refused(self):
         target = self.root / "evidence/baseline-normal/ledger.tsv"
         target.unlink()

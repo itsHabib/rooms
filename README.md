@@ -131,7 +131,9 @@ an offline comparison report with independently checked ledger/trace evidence.
 python3 examples/rehearsal/lab.py demo --out /tmp/payment-rehearsal
 ```
 
-`demo` uses local processes and labels that limit. The lab's `run` command uses
+`demo` runs ordinary local processes; its report explicitly states that it provides
+no VM isolation evidence. The lab and `make check` require host Python 3.9+
+and POSIX `sh`/`awk`. The lab's `run` command uses
 six real snapshot clones through `rooms matrix`, with witnessed no-egress
 execution. The same specimen and oracle run on both paths. No credentials or
 external services are needed. See the lab README for the host invocation and
