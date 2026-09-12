@@ -15,6 +15,7 @@ import signal
 import sys
 import subprocess
 import tempfile
+from urllib.parse import urlsplit
 
 
 def run(argv, **kwargs):
@@ -33,7 +34,8 @@ def digest(path):
 
 def reject_local_input(declaration):
     url = declaration.get('url', '')
-    if declaration.get('type') == 'path' or url.lower().startswith('file:') or url.startswith('/'):
+    scheme = urlsplit(url).scheme.lower().rsplit('+', 1)[-1]
+    if declaration.get('type') == 'path' or scheme == 'file' or url.startswith('/'):
         raise ValueError('local flake inputs are not supported; keep local modules inside the root flake')
 
 

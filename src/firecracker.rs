@@ -652,8 +652,13 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
     )
     .await?;
     if let Some(toolstore) = req.toolstore {
-        guard =
-            prepare_toolstore(toolstore, jail_root_dir(&chroot_base, &room_id_str), guard).await?;
+        guard = prepare_toolstore(
+            toolstore,
+            jail_root_dir(&chroot_base, &room_id_str),
+            req.resources.disk_gib.is_some(),
+            guard,
+        )
+        .await?;
     }
     let boot = async move {
         if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
@@ -1439,6 +1444,7 @@ fn stage_jail_sync(
 async fn prepare_toolstore(
     toolstore: &crate::toolstore::Toolstore,
     jail: PathBuf,
+    require_scratch: bool,
     guard: RoomGuard,
 ) -> Result<RoomGuard, FirecrackerError> {
     let toolstore = toolstore
@@ -1447,7 +1453,7 @@ async fn prepare_toolstore(
     // The worker owns cleanup until mount completes, even if the awaiting task
     // is dropped. Never race this join against cooperative cancellation.
     tokio::task::spawn_blocking(move || {
-        stage_toolstore(&toolstore, &jail)?;
+        stage_toolstore(&toolstore, &jail, require_scratch)?;
         Ok(guard)
     })
     .await
@@ -1457,6 +1463,7 @@ async fn prepare_toolstore(
 fn stage_toolstore(
     toolstore: &crate::toolstore::Toolstore,
     jail: &Path,
+    require_scratch: bool,
 ) -> Result<(), FirecrackerError> {
     #[cfg(unix)]
     {
@@ -1464,6 +1471,10 @@ fn stage_toolstore(
         // a concurrent image rebuild may have replaced that path during staging.
         crate::rootfs::validate_toolstore_image(&jail.join(JAIL_ROOTFS))
             .map_err(FirecrackerError::Internal)?;
+        if require_scratch {
+            crate::rootfs::validate_scratch_image(&jail.join(JAIL_ROOTFS))
+                .map_err(FirecrackerError::Internal)?;
+        }
         let target = jail.join(JAIL_TOOLSTORE);
         std::fs::File::create_new(&target)
             .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
@@ -1474,7 +1485,7 @@ fn stage_toolstore(
     }
     #[cfg(not(unix))]
     {
-        let _ = (toolstore, jail);
+        let _ = (toolstore, jail, require_scratch);
         Err(FirecrackerError::Internal(
             "toolstores require Linux".to_owned(),
         ))
@@ -2646,15 +2657,38 @@ mod tests {
         )?))?;
         let image = PathBuf::from(std::env::var("ROOMS_TEST_TOOLSTORE_IMAGE")?);
         let old_image = PathBuf::from(std::env::var("ROOMS_TEST_OLD_IMAGE")?);
-        for replace in [false, true] {
+        // A capability-only filesystem fixture; it is never booted.
+        let fixture = tempfile::tempdir()?;
+        let tree = fixture.path().join("tree");
+        std::fs::create_dir_all(tree.join("sbin"))?;
+        std::fs::write(
+            tree.join("sbin/overlay-init"),
+            b"#!/bin/sh\n# rooms-toolstore-v1\n",
+        )?;
+        let no_scratch = fixture.path().join("no-scratch.ext4");
+        std::fs::File::create_new(&no_scratch)?.set_len(16 * 1024 * 1024)?;
+        let made = std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-d"])
+            .arg(&tree)
+            .arg(&no_scratch)
+            .output()?;
+        assert!(made.status.success(), "{made:?}");
+        for (replacement, require_scratch, rejected) in [
+            (&image, false, false),
+            (&image, true, false),
+            (&old_image, false, true),
+            (&no_scratch, false, false),
+            (&no_scratch, true, true),
+        ] {
             let temporary = tempfile::tempdir()?;
             let source = temporary.path().join("image");
             symlink(&image, &source)?;
             assert!(crate::rootfs::validate_toolstore_image(&source).is_ok());
-            if replace {
-                std::fs::remove_file(&source)?;
-                symlink(&old_image, &source)?;
+            if require_scratch {
+                assert!(crate::rootfs::validate_scratch_image(&source).is_ok());
             }
+            std::fs::remove_file(&source)?;
+            symlink(replacement, &source)?;
             let kernel = temporary.path().join("kernel");
             std::fs::write(&kernel, b"not booted by this staging test")?;
             let chroot = temporary.path().join("jailer");
@@ -2668,9 +2702,9 @@ mod tests {
             );
             guard.set_jail_instance_dir(super::jail_instance_dir(&chroot, "probe"));
             super::stage_jail_sync(&chroot, "probe", &kernel, &source, 0, 0)?;
-            let result = super::stage_toolstore(&tools, &jail);
-            assert_eq!(result.is_err(), replace, "{result:?}");
-            assert_eq!(jail.join(super::JAIL_TOOLSTORE).exists(), !replace);
+            let result = super::stage_toolstore(&tools, &jail, require_scratch);
+            assert_eq!(result.is_err(), rejected, "{result:?}");
+            assert_eq!(jail.join(super::JAIL_TOOLSTORE).exists(), !rejected);
             if let Err(error) = result {
                 assert!(error.to_string().contains("requires an image rebuilt"));
             }

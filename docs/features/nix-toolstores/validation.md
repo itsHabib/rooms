@@ -57,6 +57,17 @@ custom modules live inside the frozen root flake; remote inputs stay pinned by
 the lock. The lifecycle table permits `witness_started` between toolstore and
 VMM receipts, matching the existing witnessed-run path.
 
+The mounted-root regression additionally covers five cases: current image with
+and without requested scratch, a replaced unversioned image, and a toolstore-only
+fixture with and without requested scratch. The latter is accepted only without
+`--disk`; the mismatch is rejected before attachment. Both privileged tests and
+full Linux clippy pass. Updated scratch/no-scratch/exit-7 VM runs passed in
+21.035 / 8.520 / 8.017 seconds with literal receipts and cleanup.
+
+Locked-input policy probes reject `file:`, `git+file:`, `hg+file:` and absolute
+local URLs, while accepting the tested HTTPS and `git+https:` declarations. The
+source validator parses the scheme rather than checking only a bare prefix.
+
 ## Environment and inputs
 
 Existing Lima `rooms-host`: aarch64 Ubuntu 24.04, 6 CPUs, 4 GiB RAM, nested KVM,
@@ -170,10 +181,10 @@ the small offline programs above.
 
 ## Retained evidence
 
-Linux `/home/mh.guest/rooms/toolchain-lab/` contains `proof3`, `proof4`,
+The Linux `<lab-dir>/` contains `proof3`, `proof4`,
 `python-final`, `extra-proof`, `builder-failures`, `fault-proof2`, kernel logs,
 build logs and manifests. The operator's exported packet is
-`~/Documents/Codex/2026-09-12/rooms-toolchain-lab/`. Each experiment retains
+`<export-dir>/` (the handoff records the machine-specific location). Each experiment retains
 host lifecycle JSONL plus available result/log artifacts; failed runs remain
 present. Local logs are supplemental evidence, not portable CI.
 
