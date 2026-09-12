@@ -29,6 +29,7 @@ const JAIL_API_SOCK: &str = "api.sock";
 /// Bind-mount target names inside the jail root for kernel and rootfs.
 const JAIL_KERNEL: &str = "kernel";
 pub(crate) const JAIL_ROOTFS: &str = "rootfs";
+const JAIL_TOOLSTORE: &str = "toolstore.sqfs";
 
 /// `ip netns` bind-mount directory consumed by jailer's `--netns` flag.
 const NETWORK_NAMESPACE_DIR: &str = "/run/netns";
@@ -651,6 +652,8 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
     )
     .await?;
     if let Some(toolstore) = req.toolstore {
+        // Keep binding synchronous under the jail's cleanup guard. Device
+        // ordering is assigned later by configure_vm, independently of staging.
         stage_toolstore(toolstore, &jail_root_dir(&chroot_base, &room_id_str))?;
     }
     let boot = async move {
@@ -1440,14 +1443,11 @@ fn stage_toolstore(
 ) -> Result<(), FirecrackerError> {
     #[cfg(unix)]
     {
-        let target = jail.join("toolstore.sqfs");
-        let source = toolstore
-            .mount_source()
-            .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+        let target = jail.join(JAIL_TOOLSTORE);
         std::fs::File::create_new(&target)
             .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
-        bind_mount(&source, &target)?;
-        crate::inode_seal::require(&target, "attached toolstore")
+        toolstore
+            .bind_into(&target)
             .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
         Ok(())
     }
@@ -1567,7 +1567,7 @@ fn teardown_jail_sync(instance_dir: &Path) -> bool {
         JAIL_KERNEL,
         JAIL_ROOTFS,
         crate::snapshot::SNAPSHOT_MEM_FILE,
-        "toolstore.sqfs",
+        JAIL_TOOLSTORE,
     ] {
         let target = jail_root.join(name);
         if target.exists() {
@@ -1801,7 +1801,7 @@ async fn configure_vm(
             socket,
             "/drives/toolstore",
             &serde_json::json!({
-                "drive_id": "toolstore", "path_on_host": "/toolstore.sqfs",
+                "drive_id": "toolstore", "path_on_host": format!("/{JAIL_TOOLSTORE}"),
                 "is_root_device": false, "is_read_only": true,
             }),
             config,

@@ -33,7 +33,9 @@ reservation/staging directory may need operator inspection and removal.
 checks manifest version, host architecture, kernel-enforced immutability,
 squashfs magic and the full disk hash before claiming a slot. It holds the
 verified inode open, binds that descriptor into the jail, and attaches it as a
-read-only virtio drive. This prevents path replacement between hashing and mount
+read-only virtio drive. The bind disables mount-helper path canonicalization and
+checks the mounted device/inode against the held descriptor before VM setup.
+This prevents path replacement between hashing and mount
 from substituting unchecked bytes. The existing guard unmounts the shared inode
 on success, error, cancellation and orphan cleanup; it never deletes the source.
 

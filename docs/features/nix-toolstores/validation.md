@@ -4,6 +4,13 @@ This is partial qualification of the cold-command toolstore seam, not the full
 agent-dev-environments G1/G2 gates. Subsequent exact-head CI/reviewer results and
 additional experiments belong on the PR.
 
+Review follow-up: Codex identified that mount(8)'s default canonicalization could
+resolve the proc-fd source back into a racy pathname. Attachment now uses
+`--no-canonicalize` and verifies mounted device/inode identity before VM setup.
+The privileged test was extended to perform the real bind and reject a different
+inode. The CLI test also exposed that Clap's transitive requirements allowed
+`--toolstore --task`; the conflict is now explicit.
+
 ## Environment and inputs
 
 Existing Lima `rooms-host`: aarch64 Ubuntu 24.04, 6 CPUs, 4 GiB RAM, nested KVM,

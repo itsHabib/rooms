@@ -50,7 +50,7 @@ enum Command {
         disk: Option<u32>,
         /// Sealed Nix toolstore directory built by scripts/build-toolstore.py.
         /// Cold command runs only; mounted read-only and added to PATH.
-        #[arg(long, requires = "command", conflicts_with = "keep")]
+        #[arg(long, requires = "command", conflicts_with_all = ["keep", "task"])]
         toolstore: Option<PathBuf>,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
         /// Mutually exclusive with the exec paths. Suppresses cleanup for debugging.
@@ -6399,6 +6399,7 @@ mod tests {
         ];
         assert!(Cli::try_parse_from(base).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--keep"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--task", "do work"])).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--command", "cargo test"])).is_ok());
     }
 }

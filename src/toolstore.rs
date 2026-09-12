@@ -122,7 +122,7 @@ impl Toolstore {
 
     /// Linux mount(8) resolves the parent's descriptor rather than reopening
     /// the caller's original path. Keep this object alive until binding ends.
-    pub(crate) fn mount_source(&self) -> anyhow::Result<PathBuf> {
+    fn mount_source(&self) -> anyhow::Result<PathBuf> {
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;
@@ -138,6 +138,42 @@ impl Toolstore {
         {
             let _ = &self.file;
             anyhow::bail!("toolstores require a Linux host")
+        }
+    }
+
+    /// Bind the descriptor without mount(8) resolving it back to a pathname,
+    /// then check the mounted inode before Firecracker can open it.
+    pub(crate) fn bind_into(&self, target: &Path) -> anyhow::Result<()> {
+        let output = std::process::Command::new("mount")
+            .args(["--no-canonicalize", "--bind"])
+            .arg(self.mount_source()?)
+            .arg(target)
+            .output()
+            .context("bind verified toolstore descriptor")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "bind toolstore failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.verify_attachment(target)
+    }
+
+    fn verify_attachment(&self, target: &Path) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mounted = std::fs::metadata(target)?;
+            let admitted = self.file.metadata()?;
+            anyhow::ensure!(
+                mounted.dev() == admitted.dev() && mounted.ino() == admitted.ino(),
+                "mounted toolstore differs from verified inode"
+            );
+            crate::inode_seal::require(target, "attached toolstore")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (self, target);
+            anyhow::bail!("toolstores require Linux")
         }
     }
 }
@@ -184,6 +220,7 @@ mod tests {
     #[test]
     #[ignore = "requires root with immutable-inode support; run explicitly on the Rooms host"]
     fn attachment_holds_admitted_inode_after_directory_replacement() -> anyhow::Result<()> {
+        use anyhow::Context;
         use rustix::fs::{ioctl_getflags, ioctl_setflags, IFlags};
         use sha2::{Digest, Sha256};
         let temporary = tempfile::tempdir()?;
@@ -209,7 +246,20 @@ mod tests {
             std::fs::write(&path, b"hsqs-substituted-bytes")?;
             anyhow::ensure!(std::fs::read(admitted.mount_source()?)? == bytes);
             anyhow::ensure!(std::fs::read(&path)? != bytes);
-            Ok(())
+            let error = admitted
+                .verify_attachment(&path)
+                .err()
+                .context("substituted inode must be refused")?;
+            anyhow::ensure!(error.to_string().contains("differs from verified inode"));
+            let target = temporary.path().join("mount-target");
+            std::fs::File::create_new(&target)?;
+            let mounted = admitted.bind_into(&target).and_then(|()| {
+                anyhow::ensure!(std::fs::read(&target)? == bytes);
+                Ok(())
+            });
+            let unmounted = std::process::Command::new("umount").arg(&target).status()?;
+            anyhow::ensure!(unmounted.success(), "test mount cleanup failed");
+            mounted
         })();
         ioctl_setflags(&file, baseline)?;
         result
