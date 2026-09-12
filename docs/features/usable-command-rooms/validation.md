@@ -31,3 +31,11 @@ collection must fail, preserve that file, and still finish cleanup. The final
 run's result is recorded on the PR. This is targeted cold-run validation; it does
 not qualify snapshot restore with extra drives, x86_64, hostile-guest patch
 verification, or a complete Fleet/agent workflow.
+
+Review fixes were revalidated with the full smoke sequence. A locked Git index
+now returns CLI error 2 while preserving command exit 7, its failed status and
+logs in result.json, without claiming a patch exists. Rejected symlink archives
+leave caller-owned changeset diagnostics. Both a deliberately stalled formatter
+and a stalled Firecracker API client were cancelled with SIGTERM: exit 143,
+no boot/workload handoff, and no child process, slot or jail residue. The existing
+pre-feature Alpine image was separately rejected by --disk before a slot claim.

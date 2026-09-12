@@ -613,7 +613,7 @@ async fn exec_repository_command(
         shell_single_quote(command)
     );
     let run = run_wrapped(target, key, &inner, timeout).await?;
-    generate_result_patch(target, key, timeout).await?;
+    let patch = generate_result_patch(target, key, timeout).await;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let mut result = ResultJson::from_exec(
         run.exit_code,
@@ -622,8 +622,10 @@ async fn exec_repository_command(
         run.ended_at,
         guest_command_argv(command),
     );
-    result.patch_path = Some("result.patch".to_owned());
+    result.patch_path = patch.as_ref().ok().map(|()| "result.patch".to_owned());
     write_guest_result_json_with_timeout(target, key, &result, timeout).await?;
+    // Preserve the command outcome before reporting an incomplete patch export.
+    patch?;
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
         status,

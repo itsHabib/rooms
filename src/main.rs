@@ -1253,12 +1253,24 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         egress: &egress_plan,
         base: false,
     };
-    let mut vm = match firecracker::boot(&boot_req, config).await {
+    let cancelled = async {
+        let Some(source) = &cancellation else {
+            return std::future::pending::<()>().await;
+        };
+        wait_for_clone_termination(&mut source.receiver()).await;
+    };
+    let mut vm = match firecracker::boot_with_cancellation(&boot_req, config, cancelled).await {
         Ok(vm) => vm,
         Err(e) => {
             lifecycle.emit(&Event::BootFailed {
                 error: e.to_string(),
             });
+            if let Some(signal) = cancellation
+                .as_ref()
+                .and_then(|source| observed_clone_termination(&source.receiver))
+            {
+                return Ok(signal.exit_code());
+            }
             return Err(e.into());
         }
     };
@@ -1294,6 +1306,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
     let code = outcome?;
+    // Missing requested output is a run failure even when the guest succeeded.
     collection?;
     Ok(code)
 }
@@ -3872,12 +3885,10 @@ async fn collect_run_artifacts(
         (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
         _ => Ok(()),
     };
-    let ownership = match (out_dir, collection.is_ok(), action) {
-        (Some(dir), true, Action::Exec(_)) if dir.exists() => {
-            runner::return_artifact_ownership(dir)
-                .await
-                .map_err(|e| e.to_string())
-        }
+    let ownership = match (out_dir, action) {
+        (Some(dir), Action::Exec(_)) if dir.is_dir() => runner::return_artifact_ownership(dir)
+            .await
+            .map_err(|e| e.to_string()),
         _ => Ok(()),
     };
     let errors = [collection.err(), witness.err(), ownership.err()]

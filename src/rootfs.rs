@@ -153,7 +153,7 @@ fn debugfs(path: &Path, request: &str) -> Result<String, String> {
         .map_err(|e| debugfs_spawn_error(&e))?;
     if !output.status.success() {
         return Err(format!(
-            "inspect snapshot base image {} ({request}): {}",
+            "inspect image {} ({request}): {}",
             path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
@@ -163,9 +163,9 @@ fn debugfs(path: &Path, request: &str) -> Result<String, String> {
 
 fn debugfs_spawn_error(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
-        return "snapshot base admission requires debugfs; install e2fsprogs (for example: apt install e2fsprogs)".to_owned();
+        return "image admission requires debugfs; install e2fsprogs (for example: apt install e2fsprogs)".to_owned();
     }
-    format!("inspect snapshot base image with debugfs: {error}")
+    format!("inspect image with debugfs: {error}")
 }
 
 fn baked_host_private_key(listing: &str) -> Option<&str> {

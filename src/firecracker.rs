@@ -524,6 +524,7 @@ impl Default for Resources {
 }
 
 impl Resources {
+    // Keep these limits aligned with the cold-run clap value parsers.
     fn validate(self, readonly: bool, base: bool) -> Result<(), FirecrackerError> {
         if !(1..=32).contains(&self.cpus)
             || !(128..=65536).contains(&self.memory_mib)
@@ -586,6 +587,24 @@ pub async fn boot(
     req: &BootRequest<'_>,
     config: &RoomsConfig,
 ) -> Result<BootedVm, FirecrackerError> {
+    boot_with_cancellation(req, config, std::future::pending()).await
+}
+
+/// Cancel after any in-flight jail staging finishes, then unwind through the
+/// same guard.
+///
+/// Staging cannot be dropped: its blocking worker may still mount
+/// files after an early cleanup. Formatting, API waits and VMM setup can abort.
+#[allow(
+    clippy::too_many_lines,
+    reason = "jail staging must finish before cancellation can unwind its guard; keep that ownership boundary visible"
+)]
+pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
+    req: &BootRequest<'_>,
+    config: &RoomsConfig,
+    cancellation: C,
+) -> Result<BootedVm, FirecrackerError> {
+    tokio::pin!(cancellation);
     let state_base = config
         .resolved_state_base()
         .ok_or(FirecrackerError::HomeUnset)?;
@@ -594,8 +613,11 @@ pub async fn boot(
         .map(|slot| PendingSlotClaim::new(state_base.clone(), slot, req.room_id));
     req.resources.validate(req.readonly_rootfs, req.base)?;
 
-    let (firecracker_binary, jailer_binary, fc_uid, fc_gid) =
-        resolve_boot_dependencies(config).await?;
+    let (firecracker_binary, jailer_binary, fc_uid, fc_gid) = tokio::select! {
+        biased;
+        () = &mut cancellation => return Err(boot_cancelled()),
+        result = resolve_boot_dependencies(config) => result?,
+    };
 
     let room_id_str = req.room_id.to_owned();
     let per_room_dir = state_base.join(&room_id_str);
@@ -621,95 +643,118 @@ pub async fn boot(
         fc_gid,
     )
     .await?;
-    if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
-        return Err(FirecrackerError::Internal(
-            "guard and staged jail layout paths diverged".to_owned(),
-        ));
-    }
-    if let Some(gib) = req.resources.disk_gib {
-        prepare_scratch(
-            &jail_root_dir(&chroot_base, &room_id_str),
-            gib,
+    let boot = async move {
+        if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
+            return Err(FirecrackerError::Internal(
+                "guard and staged jail layout paths diverged".to_owned(),
+            ));
+        }
+        if let Some(gib) = req.resources.disk_gib {
+            prepare_scratch(
+                &jail_root_dir(&chroot_base, &room_id_str),
+                gib,
+                fc_uid,
+                fc_gid,
+            )
+            .await?;
+        }
+        let log_path = per_room_dir.join("firecracker.log");
+
+        // Claim custody moved to the guard before jail staging. Create the TAP only
+        // after that handoff, so every later failure unwinds through resource-aware
+        // cleanup and can retain the claim when teardown is incomplete.
+        if let Some(slot) = req.slot {
+            create_slot_tap(slot, None)?;
+        }
+
+        // Start the egress capture the moment the tap exists and before the VMM —
+        // so no guest packet predates it — but after the guard owns the tap, so an
+        // unwind still deletes the interface. A start failure here is fatal: the
+        // caller asked to be witnessed, and running unwitnessed would be worse. A
+        // witness on a slotless (legacy shared-tap) boot fails closed for the same
+        // reason — the shared tap carries other rooms' traffic, so it isn't a valid
+        // per-room witness surface.
+        let witness = boot_witness(req, &per_room_dir).await?;
+
+        // Install the per-room egress chain once the tap exists and before the VMM,
+        // so it is fail-closed before the guest can transmit — the same posture as
+        // the witness start, and the guard (already owning the tap) unwinds it via
+        // `release_tap` on any failure.
+        install_egress(req.egress, req.slot)?;
+
+        let secrets_delivery =
+            bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
+        let provisioning_delivery = bind_provisioning_listener(
+            req.provisioning,
+            &chroot_base,
+            &room_id_str,
             fc_uid,
             fc_gid,
+        )?;
+
+        let launch = build_jailer_launch_plan(&JailerLaunchInput {
+            jailer_binary: &jailer_binary,
+            firecracker_binary: &firecracker_binary,
+            chroot_base: &chroot_base,
+            room_id: &room_id_str,
+            fc_uid,
+            fc_gid,
+            layout: &jail_layout,
+            network_namespace: None,
+        });
+
+        let log_handles = open_log_file(&log_path).await?;
+        let mut child = spawn_jailer(&launch, log_handles)?;
+        guard.set_child(&child);
+        write_room_meta(
+            &per_room_dir,
+            &room_id_str,
+            req.descriptor,
+            child.id(),
+            req.slot.cloned(),
+            req.base,
+        )?;
+
+        wait_for_socket(
+            &socket,
+            config.api_socket_timeout,
+            &mut child,
+            Some(&log_path),
         )
         .await?;
-    }
-    let log_path = per_room_dir.join("firecracker.log");
 
-    // Claim custody moved to the guard before jail staging. Create the TAP only
-    // after that handoff, so every later failure unwinds through resource-aware
-    // cleanup and can retain the claim when teardown is incomplete.
-    if let Some(slot) = req.slot {
-        create_slot_tap(slot, None)?;
-    }
+        configure_boot(&socket, req, &launch, config).await?;
 
-    // Start the egress capture the moment the tap exists and before the VMM —
-    // so no guest packet predates it — but after the guard owns the tap, so an
-    // unwind still deletes the interface. A start failure here is fatal: the
-    // caller asked to be witnessed, and running unwitnessed would be worse. A
-    // witness on a slotless (legacy shared-tap) boot fails closed for the same
-    // reason — the shared tap carries other rooms' traffic, so it isn't a valid
-    // per-room witness surface.
-    let witness = match (req.witness, req.slot) {
+        Ok(BootedVm {
+            witness,
+            secrets_delivery,
+            provisioning_delivery,
+            guard,
+            child,
+        })
+    };
+    tokio::select! {
+        biased;
+        () = &mut cancellation => Err(boot_cancelled()),
+        result = boot => result,
+    }
+}
+
+fn boot_cancelled() -> FirecrackerError {
+    FirecrackerError::Internal("boot cancelled before handoff".to_owned())
+}
+
+async fn boot_witness(
+    req: &BootRequest<'_>,
+    per_room_dir: &Path,
+) -> Result<Option<Capture>, FirecrackerError> {
+    Ok(match (req.witness, req.slot) {
         (false, _) => None,
-        (true, Some(slot)) => Some(start_witness(&slot.tap, &per_room_dir).await?),
+        (true, Some(slot)) => Some(start_witness(&slot.tap, per_room_dir).await?),
         (true, None) => return Err(FirecrackerError::Internal(
             "witness: requires a pool slot (the per-room tap); refusing to witness the shared tap"
                 .to_owned(),
         )),
-    };
-
-    // Install the per-room egress chain once the tap exists and before the VMM,
-    // so it is fail-closed before the guest can transmit — the same posture as
-    // the witness start, and the guard (already owning the tap) unwinds it via
-    // `release_tap` on any failure.
-    install_egress(req.egress, req.slot)?;
-
-    let secrets_delivery =
-        bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
-    let provisioning_delivery =
-        bind_provisioning_listener(req.provisioning, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
-
-    let launch = build_jailer_launch_plan(&JailerLaunchInput {
-        jailer_binary: &jailer_binary,
-        firecracker_binary: &firecracker_binary,
-        chroot_base: &chroot_base,
-        room_id: &room_id_str,
-        fc_uid,
-        fc_gid,
-        layout: &jail_layout,
-        network_namespace: None,
-    });
-
-    let log_handles = open_log_file(&log_path).await?;
-    let mut child = spawn_jailer(&launch, log_handles)?;
-    guard.set_child(&child);
-    write_room_meta(
-        &per_room_dir,
-        &room_id_str,
-        req.descriptor,
-        child.id(),
-        req.slot.cloned(),
-        req.base,
-    )?;
-
-    wait_for_socket(
-        &socket,
-        config.api_socket_timeout,
-        &mut child,
-        Some(&log_path),
-    )
-    .await?;
-
-    configure_boot(&socket, req, &launch, config).await?;
-
-    Ok(BootedVm {
-        witness,
-        secrets_delivery,
-        provisioning_delivery,
-        guard,
-        child,
     })
 }
 
@@ -735,7 +780,9 @@ async fn configure_boot(
         // deliver. Either forces the device on.
         vsock: req.secrets.is_some() || req.base,
     };
-    configure_vm(socket, &spec, config).await
+    configure_vm(socket, &spec, config).await?;
+    info!("microVM booted");
+    Ok(())
 }
 
 /// The jail guard owns this file from creation through teardown, including a
