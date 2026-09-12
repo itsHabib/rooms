@@ -1295,16 +1295,16 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             return Err(e.into());
         }
     };
-    emit_started(
-        &lifecycle,
-        vm.pid(),
-        args.witness.then(|| claimed.tap.clone()),
-    );
     if let Some(toolstore) = &toolstore {
         lifecycle.emit(&Event::ToolstoreAttached {
             sha256: toolstore.digest().to_owned(),
         });
     }
+    emit_started(
+        &lifecycle,
+        vm.pid(),
+        args.witness.then(|| claimed.tap.clone()),
+    );
     if args.keep {
         vm.guard_mut().set_suppress_cleanup(true);
     }

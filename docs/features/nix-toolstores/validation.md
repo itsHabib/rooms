@@ -11,6 +11,9 @@ The privileged test was extended to perform the real bind and reject a different
 inode. The CLI test also exposed that Clap's transitive requirements allowed
 `--toolstore --task`; the conflict is now explicit.
 
+The lifecycle receipt now records `toolstore_attached` before `vmm_started`,
+which includes a successful InstanceStart. The live harness checks this order.
+
 ## Environment and inputs
 
 Existing Lima `rooms-host`: aarch64 Ubuntu 24.04, 6 CPUs, 4 GiB RAM, nested KVM,
@@ -55,6 +58,15 @@ reproducibility on this host/tool version, not independent upstream rebuilds.
   reached the intended guest mount failure and kernel panic before SSH. The
   host reported timeout/collection failure, released the VM and completed
   cleanup. This tests mount failure; magic/hash admission is not an fsck.
+- Two smaller concurrent workloads shared the same toolstore, wrote private
+  scratch files, executed Python hashing, rejected guest-root writes and cleaned
+  up. Their workload intervals overlapped. A separate exit-7 workload retained
+  its stdout and failed result; the backing image hash was unchanged.
+- SIGTERM during a real Nix derivation containing a controlled 120-second sleep:
+  the builder exited 143 in 0.022 seconds, both observed build descendants
+  disappeared (PID/starttime checked), and no output, reservation or staging
+  remained. Python 3.12's `subprocess.run` exception path kills and reaps its
+  active child; no extra process-tracking layer was needed for this result.
 
 ## Failed or not established
 
@@ -67,6 +79,12 @@ subsequently completed. An earlier 300-second run likewise timed out. The full
 Do not interpret successful attachment as concurrent build throughput or density
 qualification. Repeat on a suitable real host before making those claims.
 
+The actual Rooms repository at `5bf1d4cafbd2c58fc8c95cd0c895539d70097258`
+cloned successfully, fetched its locked dependencies and compiled with Nix Rust,
+but hit its 900-second cap before tests ran. It returned 124, collected logs and
+recorded `cleanup_done` (909.483 seconds total). This is not a passing repository
+test. Both large cold-build qualifications remain open for the real-host trial.
+
 A 30-second no-scratch probe expired before readiness; a longer diagnostic
 captured normal boot and SSH. Flat `--egress none` blocked host SSH replies and
 was explicitly cancelled with cleanup; see `docs/follow-ups.md`. Removing a
@@ -76,7 +94,7 @@ isolation. The guest remains able to change its own routes via sudo.
 Not established here: x86_64 execution, bare-metal performance, snapshot restore
 with toolstores, project dependency caching, multi-tenant security, or cloud
 deployment. The full repository Cargo workload is a separate qualification from
-the small offline programs above; consult the PR for its result.
+the small offline programs above.
 
 ## Retained evidence
 

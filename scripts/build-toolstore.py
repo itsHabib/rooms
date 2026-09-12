@@ -135,6 +135,7 @@ def build(args, flake):
 
 
 def terminate(_signum, _frame):
+    # Unwinding subprocess.run kills and reaps its active child before cleanup.
     raise SystemExit(143)
 
 

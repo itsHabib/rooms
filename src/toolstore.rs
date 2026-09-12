@@ -98,6 +98,7 @@ impl Toolstore {
             if count == 0 {
                 break;
             }
+            // Read bounds count; get follows the crate's indexing restriction.
             hash.update(
                 buffer
                     .get(..count)

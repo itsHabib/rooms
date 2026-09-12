@@ -105,6 +105,7 @@ def run(args, name, command, expected=0, store=None, extra=(), memory=1024):
     assert result['exit_code'] == expected, (name, result)
     assert all(p.lstat().st_uid == int(os.environ['SUDO_UID']) for p in [output, *output.rglob('*')])
     attached = next(event for event in history if event['event'] == 'toolstore_attached')
+    assert attached['seq'] < next(event['seq'] for event in history if event['event'] == 'vmm_started')
     assert attached['sha256'] == json.loads(((store or args.toolstore) / 'meta.json').read_text())['sha256']
     evidence['room_id'] = attached['room_id']
     evidence['workload_started'] = next(event['ts'] for event in history if event['event'] == 'workload_started')
