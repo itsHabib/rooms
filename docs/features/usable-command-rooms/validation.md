@@ -39,3 +39,10 @@ leave caller-owned changeset diagnostics. Both a deliberately stalled formatter
 and a stalled Firecracker API client were cancelled with SIGTERM: exit 143,
 no boot/workload handoff, and no child process, slot or jail residue. The existing
 pre-feature Alpine image was separately rejected by --disk before a slot claim.
+
+The subsequent finalization fix passed its targeted real-host checks: SIGTERM
+while ownership repair was deliberately delayed returned 143 after cleanup,
+while the already-completed guest's result.json remained succeeded/0. Both earlier
+boot-cancellation probes and an ordinary completed command passed again. A fresh
+64 MiB ext4 fixture with no overlay-init was rejected before a slot claim in both
+--disk and --repo-without-disk modes. `make check` remained green.

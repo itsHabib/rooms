@@ -55,18 +55,20 @@ def run_case(args, name, command, expected, extra=(), terminate=False, guest_exi
     return out, result
 
 
-def cancel_during_setup(args, program):
+def cancellation_probe(args, program):
     tools = args.out / (program + '-tools')
     tools.mkdir()
-    marker = tools / 'format-started'
+    marker = tools / 'started'
     formatter = tools / program
-    formatter.write_text('#!/bin/sh\necho $$ > ' + shlex.quote(str(marker)) + '\nexec sleep 120\n')
+    finish = {'mkfs.ext4': 'exec sleep 120', 'curl': 'exec sleep 120',
+              'chown': 'sleep 2; exec /usr/bin/chown "$@"'}[program]
+    formatter.write_text('#!/bin/sh\necho $$ > ' + shlex.quote(str(marker)) + '\n' + finish + '\n')
     formatter.chmod(0o755)
     lifecycle = args.out / (program + '-cancel.ndjson')
     environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'])
     with (args.out / (program + '-cancel.host.log')).open('w') as log:
         process = subprocess.Popen([str(args.rooms), 'run', '--image', str(args.image),
-                                    '--disk', '1', '--command', 'echo MUST_NOT_RUN',
+                                    '--disk', '1', '--command', 'echo COMPLETED_COMMAND', '--out', str(tools / 'out'),
                                     '--lifecycle', str(lifecycle)], env=environment,
                                    stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -87,13 +89,37 @@ def cancel_during_setup(args, program):
         time.sleep(.05)
     assert not Path(f'/proc/{formatter_pid}').exists(), program + ' survived cancellation'
     history = events(lifecycle)
-    assert not any(e['event'] in ('vmm_started', 'workload_started') for e in history), history
+    booted = any(e['event'] == 'vmm_started' for e in history)
+    assert booted == (program == 'chown'), history
+    if program == 'chown':
+        assert history[-1]['event'] == 'cleanup_done'
+        result = json.loads((tools / 'out/result.json').read_text())
+        assert result['status'] == 'succeeded' and result['exit_code'] == 0
     claim = next(e for e in history if e['event'] == 'slot_allocated')
     state = Path.home() / '.local/state/rooms'
     assert not (state / claim['room_id']).exists()
     assert not (state / 'jailer/firecracker' / claim['room_id']).exists()
     assert not (state / 'slots' / str(claim['slot'])).exists()
-    print(program + '-cancel: 143, no boot handoff, no child/slot/jail residue', flush=True)
+    print(program + '-cancel: 143, no child/slot/jail residue', flush=True)
+
+
+def reject_missing_init(args):
+    directory = args.out / 'missing-init'
+    directory.mkdir()
+    image = directory / 'rootfs.ext4'
+    with image.open('wb') as disk:
+        disk.truncate(64 * 1024 * 1024)
+    subprocess.run(['mkfs.ext4', '-q', '-F', str(image)], check=True)
+    (directory / 'vmlinux.bin').symlink_to(args.image.parent.resolve() / 'vmlinux.bin')
+    for name, extra in [('scratch', ['--disk', '1']), ('repo', ['--repo', args.repo])]:
+        lifecycle = directory / (name + '.ndjson')
+        result = subprocess.run([str(args.rooms), 'run', '--image', str(image),
+                                 '--command', 'true', '--json', '--lifecycle', str(lifecycle), *extra],
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 2, result
+        assert not events(lifecycle), 'invalid image claimed a room'
+        assert json.loads(result.stdout)['error_kind'] == 'internal'
+    print('missing init: scratch and repo modes rejected before claim', flush=True)
 
 
 def main():
@@ -159,10 +185,12 @@ echo DISK_AND_REPO_OK
     assert (partial_out / 'changeset.json').exists()
     for path in [partial_out, *partial_out.rglob('*')]:
         assert path.lstat().st_uid == int(os.environ.get('SUDO_UID', os.getuid())), path
-    cancel_during_setup(args, 'mkfs.ext4')
-    cancel_during_setup(args, 'curl')
+    cancellation_probe(args, 'mkfs.ext4')
+    cancellation_probe(args, 'curl')
+    cancellation_probe(args, 'chown')
+    reject_missing_init(args)
     assert sha256(args.image) == before, 'shared image changed'
-    print('PASS: resources, repository, patch, isolation, timeout, SIGTERM, ownership, collection failure, patch failure, boot cancellation, cleanup, image hash')
+    print('PASS: resources, repository, patch, isolation, timeout, SIGTERM, ownership, collection failure, patch failure, boot/finalization cancellation, image admission, cleanup, image hash')
 
 
 if __name__ == '__main__':

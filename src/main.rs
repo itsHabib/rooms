@@ -1167,6 +1167,9 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     if args.resources.disk_gib.is_some() {
         rootfs::validate_scratch_image(&args.image).map_err(RoomsError::Internal)?;
     }
+    if args.repo.is_some() && args.resources.disk_gib.is_none() {
+        rootfs::validate_overlay_image(&args.image).map_err(RoomsError::Internal)?;
+    }
     // `--secret` admission, part two (values were harvested pre-runtime in
     // `main`): prove the guest kernel can even open a vsock, before any slot
     // is claimed or VM booted.
@@ -1199,7 +1202,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     // slot.
     let key = key_path()?;
     let action = resolve_action(&args).await?;
-    let cancellation = matches!(action, Action::Exec(_))
+    let mut cancellation = matches!(action, Action::Exec(_))
         .then(CloneSignalSource::arm)
         .transpose()?;
     // Repository and disk-backed runs share the immutable image. Bare commands
@@ -1305,6 +1308,13 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
+    // Complete cleanup before acknowledging a signal received during collection.
+    // The retained result.json still describes the already-finished guest command.
+    if let Some(source) = cancellation.as_mut() {
+        if let Some(signal) = source.commit_terminal_handoff().await? {
+            return Ok(signal.exit_code());
+        }
+    }
     let code = outcome?;
     // Missing requested output is a run failure even when the guest succeeded.
     collection?;

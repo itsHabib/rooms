@@ -19,7 +19,7 @@ cold-run slice of the agent-development-environments (#118) and local-hardening
   existing partial logs. Collection failure makes a cold run fail after teardown.
   Completed and partial artifacts belong to the invoking sudo user rather than a guest UID.
 - A scratch run requires a freshly rebuilt Alpine image. Admission rejects older
-  overlay-init scripts. Missing/unmountable scratch fails boot without RAM fallback.
+  overlay-init scripts. Repository runs also reject a missing overlay-init before claiming a slot. Missing/unmountable scratch fails boot without RAM fallback.
 
 ## Deliberate cuts
 
@@ -34,6 +34,8 @@ Patch/changeset contents are guest-produced, not trusted evidence. Abrupt VM los
 can still prevent collection. SIGKILL cannot run cleanup. SIGTERM handling here
 covers cold command runs (including boot), not the legacy keep/idle modes.
 Blocking jail staging finishes before cancellation can safely unwind its mounts.
+A termination signal received during finalization is acknowledged after cleanup;
+the collected result continues to describe the guest command that already finished.
 Patch-export failure preserves result.json and the command exit code there, while
 the CLI reports the export failure. Cancellation preserves
 logs but does not promise a complete repository patch. The existing 15-second

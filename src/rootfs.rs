@@ -118,6 +118,15 @@ pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Check that an image has the entry point needed for a read-only overlay boot.
+pub fn validate_overlay_image(path: &Path) -> Result<(), String> {
+    let overlay = debugfs(path, "stat /sbin/overlay-init")?;
+    if overlay.contains("File not found") || !overlay.contains("Inode:") {
+        return Err(format!("image {} lacks /sbin/overlay-init", path.display()));
+    }
+    Ok(())
+}
+
 /// Fail-closed admission for a snapshot-capable base image.
 ///
 /// The immutable lower layer must contain the overlay entry point and must not
@@ -127,13 +136,7 @@ pub fn validate_snapshot_base_image(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     crate::inode_seal::require(path, "snapshot base image").map_err(|error| error.to_string())?;
 
-    let overlay = debugfs(path, "stat /sbin/overlay-init")?;
-    if overlay.contains("File not found") || !overlay.contains("Inode:") {
-        return Err(format!(
-            "snapshot base image {} lacks /sbin/overlay-init",
-            path.display()
-        ));
-    }
+    validate_overlay_image(path)?;
 
     let ssh_dir = debugfs(path, "ls -p /etc/ssh")?;
     if let Some(key) = baked_host_private_key(&ssh_dir) {
