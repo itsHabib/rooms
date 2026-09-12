@@ -150,7 +150,9 @@ def build(args, flake):
 
 
 def terminate(_signum, _frame):
-    # Unwinding subprocess.run kills and reaps its active child before cleanup.
+    # subprocess.run catches BaseException (including SystemExit), calls
+    # process.kill(), then Popen.__exit__ waits before staging unwinds.
+    # See Lib/subprocess.py:run in CPython; verified with a live Nix derivation.
     raise SystemExit(143)
 
 
