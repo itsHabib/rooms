@@ -31,12 +31,16 @@ def digest(path):
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def reject_local_input(declaration):
+    url = declaration.get('url', '')
+    if declaration.get('type') == 'path' or url.lower().startswith('file:') or url.startswith('/'):
+        raise ValueError('local flake inputs are not supported; keep local modules inside the root flake')
+
+
 def validate_locked_inputs(lock):
     for node in json.loads(lock.read_text())['nodes'].values():
-        for declaration in [node.get('locked', {}), node.get('original', {})]:
-            url = declaration.get('url', '')
-            if declaration.get('type') == 'path' or url.lower().startswith('file:') or url.startswith('/'):
-                raise ValueError('local flake inputs are not supported; keep local modules inside the root flake')
+        reject_local_input(node.get('locked', {}))
+        reject_local_input(node.get('original', {}))
 
 
 def write_manifest(path, manifest):

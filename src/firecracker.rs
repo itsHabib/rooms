@@ -2661,10 +2661,10 @@ mod tests {
             let jail = super::jail_root_dir(&chroot, "probe");
             let room = temporary.path().join("room");
             std::fs::create_dir(&room)?;
-            let mut guard = super::RoomGuard::new(
+            let mut guard = RoomGuard::new(
                 room,
                 jail.join(super::JAIL_API_SOCK),
-                &crate::config::RoomsConfig::default(),
+                &RoomsConfig::default(),
             );
             guard.set_jail_instance_dir(super::jail_instance_dir(&chroot, "probe"));
             super::stage_jail_sync(&chroot, "probe", &kernel, &source, 0, 0)?;
