@@ -215,6 +215,28 @@ fn gcp_up_creates_an_auto_deleting_nested_spot_vm() {
 }
 
 #[test]
+fn gcp_up_honors_the_boot_disk_override() {
+    let h = Harness::new();
+    let out = h.run(
+        &[
+            "up",
+            "cloudbox",
+            "--backend",
+            "gcp",
+            "--project",
+            "sandbox-1",
+        ],
+        &[("ROOMS_BOX_GCP_DISK", "100GB")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        h.calls().contains("--boot-disk-size=100GB"),
+        "{}",
+        h.calls()
+    );
+}
+
+#[test]
 fn lima_up_uses_the_repo_definition_without_mounts() {
     let h = Harness::new();
     let out = h.up("localbox", "lima", &[]);

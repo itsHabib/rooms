@@ -129,6 +129,7 @@ lima_check_free() {
 }
 
 lima_up() {
+    # $3 is the gcp project, unused here.
     local name="$1" dir="$2" token="$4" expr instance_dir
     # Lima rejects a param nothing uses, so a provision step consumes it, which
     # also leaves the token readable in the guest at /etc/rooms-box-token.

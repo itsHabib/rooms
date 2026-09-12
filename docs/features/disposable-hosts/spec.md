@@ -74,6 +74,9 @@ without such a rule `up` stops when SSH does not answer in time.
   clean up a half-created box.
 - No VM carrying the token means the box is already gone (Spot preemption or
   maximum run time); a failed lookup keeps the state for a retry.
+- Residual race, recorded in `docs/follow-ups.md`: the ownership lookup and the
+  delete are two calls, because neither backend can condition a delete on a
+  param or label. A same-named VM created in that window would be deleted.
 - `check` requires `schema_version` 1 and a boolean `ok`, string `name`, and
   string `message` on every check; anything else fails closed.
 - Box names must be valid for both Lima and Compute Engine.
