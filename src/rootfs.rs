@@ -105,6 +105,19 @@ fn kernel_matches_host_arch(header: &[u8; 60]) -> bool {
     }
 }
 
+/// Older overlay-init scripts silently ignore a scratch drive. Reject them
+/// before claiming a room instead of giving the caller an unexpected RAM disk.
+pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
+    let init = debugfs(path, "cat /sbin/overlay-init")?;
+    if !init.contains("rooms.scratch=1") {
+        return Err(
+            "--disk requires an image rebuilt with the current scripts/build-rootfs-alpine.sh"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Fail-closed admission for a snapshot-capable base image.
 ///
 /// The immutable lower layer must contain the overlay entry point and must not
