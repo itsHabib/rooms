@@ -122,6 +122,14 @@ for i in 1 2 3; do rooms run --command "echo room-$i-$(hostname)" & done; wait
 rooms ls        # must be clean afterwards — every slot freed
 ```
 
+## 4. Disposable boxes
+
+For a throwaway host instead of this long-lived one, `scripts/box.sh` builds a
+local Lima VM or an auto-deleting GCP Spot VM, provisions it at an exact
+revision, and accepts it only when every `rooms doctor` check is ok. See
+[`scripts/README.md`](../scripts/README.md#disposable-hosts-boxsh) and
+[`docs/features/disposable-hosts/spec.md`](features/disposable-hosts/spec.md).
+
 ## Gotchas (each cost a debugging cycle — don't relearn them)
 
 - **Fleet readiness is dominated by nested stage-2 page faults (~1 ms per 4 KiB page here).** A snapshot whose `snapshot.mem` lives on a regular file can only be mapped at 4 KiB; put the snapshot directory on tmpfs mounted `huge=always` and the same restore gets 2 MiB read mappings and ~3× faster eight-clone readiness. `chattr +i` works on tmpfs, so the seal check passes unchanged:
