@@ -19,8 +19,9 @@
 # progress goes to stderr. `check` passes only when every `rooms doctor` check
 # is ok (warnings allowed) and saves the report beside the box's state.
 #
-# State lives under ${ROOMS_BOX_STATE:-~/.rooms-box}/<name>/. `down` only deletes
-# boxes recorded there, so it can never remove a VM this script did not create.
+# State lives under ${ROOMS_BOX_STATE:-~/.rooms-box}/<name>/. `up` refuses a name
+# the backend already has and stamps a random token on the VM it creates; `down`
+# deletes only a VM carrying that token, so it never removes one it did not create.
 #
 # GCP settings (environment):
 #   ROOMS_BOX_GCP_PROJECT   required unless --project is given; gcloud's active
@@ -37,6 +38,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_ROOT="${ROOMS_BOX_STATE:-$HOME/.rooms-box}"
 SSH_TIMEOUT="${ROOMS_BOX_SSH_TIMEOUT:-300}"
+GCP_ZONE="${ROOMS_BOX_GCP_ZONE:-us-central1-a}"
 
 log()   { printf '[box] %s\n' "$*" >&2; }
 fatal() { printf '[box] error: %s\n' "$*" >&2; exit 1; }
@@ -68,6 +70,11 @@ validate_name() {
 }
 
 box_dir() { printf '%s/%s\n' "$STATE_ROOT" "$1"; }
+
+# A random token `up` stamps on the VM it creates (a Lima param, a GCP label).
+# `down` deletes only a VM carrying its box's token, never one that merely
+# shares the name.
+new_token() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 
 # record DIR KEY VALUE [KEY VALUE...] appends shell-quoted assignments.
 record() {
@@ -102,11 +109,27 @@ wait_for_ssh() {
 
 # --- lima backend ---
 
+# Prints "<name> <token>" per instance; the token is empty on instances this
+# script did not create.
+lima_instances() {
+    limactl list --format '{{.Name}} {{index .Config.Param "roomsBoxToken"}}'
+}
+
+lima_check_free() {
+    local instances
+    instances="$(lima_instances)" || fatal "could not list lima instances"
+    if awk -v n="$1" '$1 == n { found = 1 } END { exit !found }' <<<"$instances"; then
+        fatal "lima already has an instance named '$1'; pick another name"
+    fi
+}
+
 lima_up() {
-    local name="$1" dir="$2" instance_dir
-    require_cmd limactl
-    record "$dir" BOX_BACKEND lima
-    limactl create --tty=false --name "$name" --set '.mounts = []' \
+    local name="$1" dir="$2" token="$4" expr instance_dir
+    # Lima rejects a param nothing uses, so a provision step consumes it, which
+    # also leaves the token readable in the guest at /etc/rooms-box-token.
+    # shellcheck disable=SC2016 # $PARAM_roomsBoxToken expands in the guest
+    expr='.mounts = [] | .param.roomsBoxToken = "'"$token"'" | .provision += [{"mode": "system", "script": "#!/bin/sh\nprintf %s \"$PARAM_roomsBoxToken\" > /etc/rooms-box-token\n"}]'
+    limactl create --tty=false --name "$name" --set "$expr" \
         "$REPO_ROOT/scripts/lima-rooms-host.yaml" >&2
     limactl start --tty=false "$name" >&2
     instance_dir="$(limactl list --format '{{.Dir}}' "$name")"
@@ -115,11 +138,10 @@ lima_up() {
 }
 
 lima_down() {
-    local name="$1" names
-    names="$(limactl list --format '{{.Name}}')" \
-        || fatal "could not list lima instances; state kept in $BOX_DIR"
-    if ! grep -qx -- "$name" <<<"$names"; then
-        log "lima instance $name is already gone"
+    local name="$1" instances
+    instances="$(lima_instances)" || fatal "could not list lima instances; state kept in $BOX_DIR"
+    if ! awk -v n="$name" -v t="$BOX_TOKEN" '$1 == n && $2 == t { found = 1 } END { exit !found }' <<<"$instances"; then
+        log "no lima instance named $name carries this box's token; nothing to delete"
         return 0
     fi
     limactl delete --force "$name" >&2
@@ -127,14 +149,27 @@ lima_down() {
 
 # --- gcp backend ---
 
+# gcp_find PROJECT ZONE NAME [TOKEN] prints the matching instance names.
+gcp_find() {
+    local filter="name=$3"
+    [[ -z "${4:-}" ]] || filter+=" AND labels.rooms_box_token=$4"
+    gcloud compute instances list --project="$1" --zones="$2" \
+        --filter="$filter" --format='value(name)'
+}
+
+gcp_check_free() {
+    local found
+    found="$(gcp_find "$2" "$GCP_ZONE" "$1")" || fatal "could not look up gcp instances in $2"
+    [[ -z "$found" ]] || fatal "gcp project $2 already has an instance named '$1' in $GCP_ZONE; pick another name"
+}
+
 gcp_up() {
-    local name="$1" dir="$2" project="$3" ip
-    local zone="${ROOMS_BOX_GCP_ZONE:-us-central1-a}"
-    require_cmd gcloud ssh-keygen
+    local name="$1" dir="$2" project="$3" token="$4" ip
+    local zone="$GCP_ZONE"
     ssh-keygen -q -t ed25519 -N '' -C "rooms-box-$name" -f "$dir/id_ed25519"
     printf 'rooms:%s\n' "$(cat "$dir/id_ed25519.pub")" >"$dir/ssh-keys"
     # Recorded before creation so `down` can clean up a half-created box.
-    record "$dir" BOX_BACKEND gcp BOX_PROJECT "$project" BOX_ZONE "$zone"
+    record "$dir" BOX_PROJECT "$project" BOX_ZONE "$zone"
     gcloud compute instances create "$name" \
         --project="$project" --zone="$zone" \
         --machine-type="${ROOMS_BOX_GCP_MACHINE:-n2-standard-4}" \
@@ -144,7 +179,7 @@ gcp_up() {
         --max-run-duration="${ROOMS_BOX_GCP_MAX_RUN:-3h}" \
         --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud \
         --boot-disk-size=50GB \
-        --labels=purpose=rooms-box \
+        --labels="purpose=rooms-box,rooms_box_token=$token" \
         --metadata-from-file=ssh-keys="$dir/ssh-keys" >&2
     ip="$(gcloud compute instances describe "$name" --project="$project" --zone="$zone" \
         --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"
@@ -163,15 +198,15 @@ EOF
     record "$dir" BOX_SSH_CONFIG "$dir/ssh.config" BOX_HOST "box-$name"
 }
 
-# A missing instance is already gone (Spot preemption or max run duration both
-# delete it); a failed lookup is not, so it stops before the state is removed.
+# Deletes only an instance carrying this box's token. None found means the box
+# is already gone (Spot preemption and max run duration both delete it); a
+# failed lookup is not, so it stops before the state is removed.
 gcp_down() {
     local name="$1" found
-    found="$(gcloud compute instances list --project="$BOX_PROJECT" --zones="$BOX_ZONE" \
-        --filter="name=$name" --format='value(name)')" \
+    found="$(gcp_find "$BOX_PROJECT" "$BOX_ZONE" "$name" "$BOX_TOKEN")" \
         || fatal "could not look up gcp instance $name; state kept in $BOX_DIR"
     if [[ -z "$found" ]]; then
-        log "gcp instance $name is already gone"
+        log "no gcp instance named $name carries this box's token; nothing to delete"
         return 0
     fi
     gcloud compute instances delete "$name" --project="$BOX_PROJECT" --zone="$BOX_ZONE" --quiet >&2
@@ -180,7 +215,7 @@ gcp_down() {
 # --- commands ---
 
 cmd_up() {
-    local name="${1:-}" backend="" project="${ROOMS_BOX_GCP_PROJECT:-}" dir
+    local name="${1:-}" backend="" project="${ROOMS_BOX_GCP_PROJECT:-}" dir token
     [[ -n "$name" ]] || usage
     shift
     while [[ $# -gt 0 ]]; do
@@ -193,16 +228,23 @@ cmd_up() {
     validate_name "$name"
     require_cmd ssh jq
     case "$backend" in
-        lima) ;;
-        gcp) [[ -n "$project" ]] || fatal "gcp needs an explicit project: pass --project or set ROOMS_BOX_GCP_PROJECT" ;;
+        lima) require_cmd limactl ;;
+        gcp)
+            [[ -n "$project" ]] || fatal "gcp needs an explicit project: pass --project or set ROOMS_BOX_GCP_PROJECT"
+            require_cmd gcloud ssh-keygen
+            ;;
         *) fatal "--backend must be lima or gcp" ;;
     esac
     dir="$(box_dir "$name")"
     [[ ! -e "$dir" ]] || fatal "box '$name' already exists ($dir); run 'box.sh down $name' first"
+    "${backend}_check_free" "$name" "$project"
+    token="$(new_token)"
+    [[ "$token" =~ ^[0-9a-f]{16}$ ]] || fatal "could not generate a box token"
     mkdir -p "$dir"
     chmod 700 "$dir"
+    record "$dir" BOX_BACKEND "$backend" BOX_TOKEN "$token"
     log "creating $backend box $name"
-    "${backend}_up" "$name" "$dir" "$project"
+    "${backend}_up" "$name" "$dir" "$project" "$token"
     load_box "$name"
     wait_for_ssh "$name"
     jq -cn --arg name "$name" --arg backend "$BOX_BACKEND" \
@@ -247,12 +289,15 @@ cmd_check() {
     # doctor exits non-zero on any failed check; the report, not the exit code, decides.
     # shellcheck disable=SC2016 # $HOME must expand on the box, not locally
     remote 'sudo -E rooms doctor --json --image "$HOME/rooms/images/rootfs.ext4"' >"$report.tmp" || true
-    jq -e '(.checks | type) == "array" and (.checks | length) > 0' "$report.tmp" >/dev/null 2>&1 \
-        || fatal "rooms doctor on $name returned no readable report (raw output in $report.tmp)"
+    jq -e '.schema_version == 1
+        and (.checks | type) == "array" and (.checks | length) > 0
+        and all(.checks[]; (.name | type) == "string" and (.ok | type) == "boolean" and (.message | type) == "string")' \
+        "$report.tmp" >/dev/null 2>&1 \
+        || fatal "rooms doctor on $name returned no readable report (want schema_version 1 with boolean ok fields; raw output in $report.tmp)"
     mv "$report.tmp" "$report"
-    jq -r '.checks[] | select(.ok and (.message | startswith("warn:"))) | "[box] warn \(.name): \(.message)"' "$report" >&2
-    jq -r '.checks[] | select(.ok | not) | "[box] FAIL \(.name): \(.message)"' "$report" >&2
-    failed="$(jq '[.checks[] | select(.ok | not)] | length' "$report")"
+    jq -r '.checks[] | select(.ok == true and (.message | startswith("warn:"))) | "[box] warn \(.name): \(.message)"' "$report" >&2
+    jq -r '.checks[] | select(.ok == false) | "[box] FAIL \(.name): \(.message)"' "$report" >&2
+    failed="$(jq '[.checks[] | select(.ok == false)] | length' "$report")"
     [[ "$failed" -eq 0 ]] || fatal "$name is not ready: $failed rooms doctor check(s) failed (report: $report)"
     log "$name is ready: every rooms doctor check passed (report: $report)"
 }

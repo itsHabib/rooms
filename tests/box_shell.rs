@@ -10,11 +10,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+// `BOX_TEST_LIMA_INSTANCES` holds "<name> <token>" lines, as `limactl list` prints them.
 const FAKE_LIMACTL: &str = r#"#!/bin/sh
 echo "limactl $*" >>"$BOX_TEST_LOG"
 case "$1 $3" in
     "list {{.Dir}}") printf '%s\n' "$BOX_TEST_LIMA_DIR" ;;
-    "list {{.Name}}") printf '%s\n' "${BOX_TEST_LIMA_NAMES:-}" ;;
+    "list {{.Name}} "*) printf '%s\n' "${BOX_TEST_LIMA_INSTANCES:-}" ;;
 esac
 exit 0
 "#;
@@ -113,6 +114,14 @@ impl Harness {
         assert!(out.status.success(), "up failed: {}", stderr(&out));
         out
     }
+
+    fn token(&self, name: &str) -> String {
+        let env = fs::read_to_string(self.path(&format!("state/{name}/box.env"))).expect("box.env");
+        env.lines()
+            .find_map(|line| line.strip_prefix("BOX_TOKEN="))
+            .expect("box.env records a token")
+            .to_owned()
+    }
 }
 
 fn repo_root() -> PathBuf {
@@ -188,6 +197,11 @@ fn gcp_up_creates_an_auto_deleting_nested_spot_vm() {
     ] {
         assert!(calls.contains(flag), "missing {flag} in:\n{calls}");
     }
+    let label = format!(
+        "--labels=purpose=rooms-box,rooms_box_token={}",
+        h.token("cloudbox")
+    );
+    assert!(calls.contains(&label), "missing {label} in:\n{calls}");
     let config = fs::read_to_string(h.path("state/cloudbox/ssh.config")).expect("ssh config");
     assert!(config.contains("HostName 203.0.113.7"), "{config}");
     assert!(config.contains("User rooms"), "{config}");
@@ -206,10 +220,59 @@ fn lima_up_uses_the_repo_definition_without_mounts() {
         "{calls}"
     );
     assert!(calls.contains("scripts/lima-rooms-host.yaml"), "{calls}");
+    let param = format!(r#".param.roomsBoxToken = "{}""#, h.token("localbox"));
+    assert!(calls.contains(&param), "missing {param} in:\n{calls}");
     let line = stdout(&out);
     assert!(line.contains(r#""host":"lima-localbox""#), "{line}");
     let expected = h.path("lima-instance/ssh.config");
     assert!(line.contains(&*expected.to_string_lossy()), "{line}");
+}
+
+#[test]
+fn up_refuses_a_name_lima_already_has() {
+    let h = Harness::new();
+    let out = h.run(
+        &["up", "rooms-host", "--backend", "lima"],
+        &[("BOX_TEST_LIMA_INSTANCES", "rooms-host ")],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("already has an instance"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!h.calls().contains("limactl create"), "{}", h.calls());
+    assert!(
+        !h.path("state/rooms-host").exists(),
+        "no state for a refused box"
+    );
+}
+
+#[test]
+fn up_refuses_a_name_the_gcp_zone_already_has() {
+    let h = Harness::new();
+    let out = h.run(
+        &[
+            "up",
+            "cloudbox",
+            "--backend",
+            "gcp",
+            "--project",
+            "sandbox-1",
+        ],
+        &[("BOX_TEST_GCP_LISTED", "cloudbox")],
+    );
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("already has an instance"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!h.calls().contains("instances create"), "{}", h.calls());
+    assert!(
+        !h.path("state/cloudbox").exists(),
+        "no state for a refused box"
+    );
 }
 
 #[test]
@@ -242,12 +305,15 @@ fn down_refuses_boxes_it_did_not_create() {
 fn down_deletes_the_recorded_gcp_instance() {
     let h = Harness::new();
     h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    let token = h.token("cloudbox");
     let out = h.run(
         &["down", "cloudbox"],
         &[("BOX_TEST_GCP_LISTED", "cloudbox")],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = h.calls();
+    let filter = format!("--filter=name=cloudbox AND labels.rooms_box_token={token}");
+    assert!(calls.contains(&filter), "missing {filter} in:\n{calls}");
     assert!(
         calls
             .contains("instances delete cloudbox --project=sandbox-1 --zone=us-central1-a --quiet"),
@@ -265,7 +331,11 @@ fn down_treats_a_missing_gcp_instance_as_gone() {
     h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
     let out = h.run(&["down", "cloudbox"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stderr(&out).contains("already gone"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("nothing to delete"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!h.calls().contains("instances delete"), "{}", h.calls());
     assert!(!h.path("state/cloudbox").exists());
 }
@@ -287,9 +357,10 @@ fn down_keeps_state_when_the_gcp_lookup_fails() {
 fn down_deletes_a_lima_box_and_its_state() {
     let h = Harness::new();
     h.up("localbox", "lima", &[]);
+    let instances = format!("rooms-host \nlocalbox {}", h.token("localbox"));
     let out = h.run(
         &["down", "localbox"],
-        &[("BOX_TEST_LIMA_NAMES", "rooms-host\nlocalbox")],
+        &[("BOX_TEST_LIMA_INSTANCES", instances.as_str())],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
@@ -306,12 +377,50 @@ fn down_treats_a_missing_lima_instance_as_gone() {
     h.up("localbox", "lima", &[]);
     let out = h.run(
         &["down", "localbox"],
-        &[("BOX_TEST_LIMA_NAMES", "rooms-host")],
+        &[("BOX_TEST_LIMA_INSTANCES", "rooms-host ")],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stderr(&out).contains("already gone"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("nothing to delete"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!h.calls().contains("limactl delete"), "{}", h.calls());
     assert!(!h.path("state/localbox").exists());
+}
+
+#[test]
+fn down_never_deletes_a_same_named_lima_instance_without_the_token() {
+    let h = Harness::new();
+    h.up("localbox", "lima", &[]);
+    let out = h.run(
+        &["down", "localbox"],
+        &[("BOX_TEST_LIMA_INSTANCES", "localbox 00000000deadbeef")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("nothing to delete"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!h.calls().contains("limactl delete"), "{}", h.calls());
+}
+
+#[test]
+fn ssh_forwards_the_recorded_host_and_command() {
+    let h = Harness::new();
+    h.up("localbox", "lima", &[]);
+    let out = h.run(&["ssh", "localbox", "rooms", "ls"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let expected = format!(
+        "ssh -F {} lima-localbox rooms ls",
+        h.path("lima-instance/ssh.config").display()
+    );
+    assert!(
+        h.calls().contains(&expected),
+        "missing {expected} in:\n{}",
+        h.calls()
+    );
 }
 
 #[test]
@@ -353,6 +462,25 @@ fn check_fails_closed_on_an_unreadable_report() {
         "{}",
         stderr(&out)
     );
+}
+
+#[test]
+fn check_fails_closed_on_a_schema_invalid_report() {
+    let h = Harness::new();
+    h.up("localbox", "lima", &[]);
+    for report in [
+        r#"{"schema_version":1,"checks":[{"name":"kvm","ok":"false","message":"x"}]}"#,
+        r#"{"schema_version":2,"checks":[{"name":"kvm","ok":true,"message":"x"}]}"#,
+    ] {
+        fs::write(h.path("doctor.json"), report).expect("invalid report");
+        let out = h.run(&["check", "localbox"], &[]);
+        assert!(!out.status.success(), "accepted {report}");
+        assert!(
+            stderr(&out).contains("no readable report"),
+            "{}",
+            stderr(&out)
+        );
+    }
 }
 
 #[test]

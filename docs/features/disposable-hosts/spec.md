@@ -57,12 +57,24 @@ without such a rule `up` stops when SSH does not answer in time.
 
 ## Safety
 
-- State lives under `${ROOMS_BOX_STATE:-~/.rooms-box}/<name>/`. `down` only
-  deletes boxes recorded there, so it cannot remove a VM (for example the
-  long-lived `rooms-host`) that `box.sh` did not create.
-- GCP state is written before the instance is created, so `down` can clean up
-  a half-created box. A missing instance (Spot preemption or maximum run time)
-  counts as already gone; a failed lookup keeps the state for a retry.
+- State lives under `${ROOMS_BOX_STATE:-~/.rooms-box}/<name>/`; `down` refuses
+  any name without state there.
+- Ownership is proven, not assumed. `up` refuses a name the backend already
+  has, then stamps a random token on the VM it creates: a `roomsBoxToken`
+  param on a Lima instance (also written to `/etc/rooms-box-token` in the
+  guest, since Lima rejects an unused param) or a `rooms_box_token` label on a
+  GCP instance. `down` deletes only a VM that carries its box's token, so a
+  failed `up` can never lead `down` to a same-named VM it did not create, such
+  as the long-lived `rooms-host`.
+- The state file (backend and token) is written right after the state
+  directory, and tool and name checks run before either, so a failed `up`
+  never strands a directory that `up` refuses and `down` cannot remove. GCP's
+  project and zone are recorded before the instance is created, so `down` can
+  clean up a half-created box.
+- No VM carrying the token means the box is already gone (Spot preemption or
+  maximum run time); a failed lookup keeps the state for a retry.
+- `check` requires `schema_version` 1 and a boolean `ok`, string `name`, and
+  string `message` on every check; anything else fails closed.
 - Box names must be valid for both Lima and Compute Engine.
 
 ## Acceptance
