@@ -14,7 +14,7 @@ const FAKE_LIMACTL: &str = r#"#!/bin/sh
 echo "limactl $*" >>"$BOX_TEST_LOG"
 case "$1 $3" in
     "list {{.Dir}}") printf '%s\n' "$BOX_TEST_LIMA_DIR" ;;
-    "list ") printf '%s\n' "${BOX_TEST_LIMA_NAMES:-}" ;;
+    "list {{.Name}}") printf '%s\n' "${BOX_TEST_LIMA_NAMES:-}" ;;
 esac
 exit 0
 "#;
@@ -138,8 +138,16 @@ fn rejects_invalid_names_before_any_backend_call() {
     let h = Harness::new();
     let out = h.run(&["up", "Bad_Name", "--backend", "lima"], &[]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("invalid box name"), "{}", stderr(&out));
-    assert!(h.calls().is_empty(), "no backend call expected: {}", h.calls());
+    assert!(
+        stderr(&out).contains("invalid box name"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        h.calls().is_empty(),
+        "no backend call expected: {}",
+        h.calls()
+    );
 }
 
 #[test]
@@ -147,9 +155,20 @@ fn gcp_up_requires_an_explicit_project() {
     let h = Harness::new();
     let out = h.run(&["up", "cloudbox", "--backend", "gcp"], &[]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("ROOMS_BOX_GCP_PROJECT"), "{}", stderr(&out));
-    assert!(h.calls().is_empty(), "no gcloud call expected: {}", h.calls());
-    assert!(!h.path("state/cloudbox").exists(), "no state for a refused box");
+    assert!(
+        stderr(&out).contains("ROOMS_BOX_GCP_PROJECT"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        h.calls().is_empty(),
+        "no gcloud call expected: {}",
+        h.calls()
+    );
+    assert!(
+        !h.path("state/cloudbox").exists(),
+        "no state for a refused box"
+    );
 }
 
 #[test]
@@ -182,7 +201,10 @@ fn lima_up_uses_the_repo_definition_without_mounts() {
     let h = Harness::new();
     let out = h.up("localbox", "lima", &[]);
     let calls = h.calls();
-    assert!(calls.contains("limactl create --tty=false --name localbox --set .mounts = []"), "{calls}");
+    assert!(
+        calls.contains("limactl create --tty=false --name localbox --set .mounts = []"),
+        "{calls}"
+    );
     assert!(calls.contains("scripts/lima-rooms-host.yaml"), "{calls}");
     let line = stdout(&out);
     assert!(line.contains(r#""host":"lima-localbox""#), "{line}");
@@ -204,22 +226,37 @@ fn down_refuses_boxes_it_did_not_create() {
     let h = Harness::new();
     let out = h.run(&["down", "rooms-host"], &[]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("only manages boxes it created"), "{}", stderr(&out));
-    assert!(h.calls().is_empty(), "no backend call expected: {}", h.calls());
+    assert!(
+        stderr(&out).contains("only manages boxes it created"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        h.calls().is_empty(),
+        "no backend call expected: {}",
+        h.calls()
+    );
 }
 
 #[test]
 fn down_deletes_the_recorded_gcp_instance() {
     let h = Harness::new();
     h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
-    let out = h.run(&["down", "cloudbox"], &[("BOX_TEST_GCP_LISTED", "cloudbox")]);
+    let out = h.run(
+        &["down", "cloudbox"],
+        &[("BOX_TEST_GCP_LISTED", "cloudbox")],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = h.calls();
     assert!(
-        calls.contains("instances delete cloudbox --project=sandbox-1 --zone=us-central1-a --quiet"),
+        calls
+            .contains("instances delete cloudbox --project=sandbox-1 --zone=us-central1-a --quiet"),
         "{calls}"
     );
-    assert!(!h.path("state/cloudbox").exists(), "state removed after down");
+    assert!(
+        !h.path("state/cloudbox").exists(),
+        "state removed after down"
+    );
 }
 
 #[test]
@@ -240,16 +277,40 @@ fn down_keeps_state_when_the_gcp_lookup_fails() {
     let out = h.run(&["down", "cloudbox"], &[("BOX_TEST_GCP_LIST_FAILS", "1")]);
     assert!(!out.status.success());
     assert!(!h.calls().contains("instances delete"), "{}", h.calls());
-    assert!(h.path("state/cloudbox/box.env").exists(), "state kept for a retry");
+    assert!(
+        h.path("state/cloudbox/box.env").exists(),
+        "state kept for a retry"
+    );
 }
 
 #[test]
 fn down_deletes_a_lima_box_and_its_state() {
     let h = Harness::new();
     h.up("localbox", "lima", &[]);
-    let out = h.run(&["down", "localbox"], &[("BOX_TEST_LIMA_NAMES", "rooms-host\nlocalbox")]);
+    let out = h.run(
+        &["down", "localbox"],
+        &[("BOX_TEST_LIMA_NAMES", "rooms-host\nlocalbox")],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(h.calls().contains("limactl delete --force localbox"), "{}", h.calls());
+    assert!(
+        h.calls().contains("limactl delete --force localbox"),
+        "{}",
+        h.calls()
+    );
+    assert!(!h.path("state/localbox").exists());
+}
+
+#[test]
+fn down_treats_a_missing_lima_instance_as_gone() {
+    let h = Harness::new();
+    h.up("localbox", "lima", &[]);
+    let out = h.run(
+        &["down", "localbox"],
+        &[("BOX_TEST_LIMA_NAMES", "rooms-host")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("already gone"), "{}", stderr(&out));
+    assert!(!h.calls().contains("limactl delete"), "{}", h.calls());
     assert!(!h.path("state/localbox").exists());
 }
 
@@ -259,8 +320,15 @@ fn check_passes_when_doctor_reports_only_warnings() {
     h.up("localbox", "lima", &[]);
     let out = h.run(&["check", "localbox"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stderr(&out).contains("warn anthropic_api_key"), "{}", stderr(&out));
-    assert!(h.path("state/localbox/doctor.json").exists(), "report is kept");
+    assert!(
+        stderr(&out).contains("warn anthropic_api_key"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        h.path("state/localbox/doctor.json").exists(),
+        "report is kept"
+    );
 }
 
 #[test]
@@ -280,7 +348,11 @@ fn check_fails_closed_on_an_unreadable_report() {
     fs::write(h.path("doctor.json"), "ssh: connect to host: timed out").expect("garbage");
     let out = h.run(&["check", "localbox"], &[]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("no readable report"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no readable report"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -292,11 +364,17 @@ fn provision_ships_the_exact_committed_revision_then_builds() {
 
     let head = git_head(&repo_root());
     let calls = h.calls();
-    assert!(calls.contains(&format!("{head} > ~/rooms/.box-revision")), "{calls}");
+    assert!(
+        calls.contains(&format!("{head} > ~/rooms/.box-revision")),
+        "{calls}"
+    );
     let setup = position(&calls, "scripts/setup-rooms-host.sh");
     let network = position(&calls, "scripts/setup-tap.sh --host");
     let build = position(&calls, "cargo build --release --locked");
-    assert!(setup < network && network < build, "provision order:\n{calls}");
+    assert!(
+        setup < network && network < build,
+        "provision order:\n{calls}"
+    );
 
     let listing = Command::new("tar")
         .arg("-tf")
@@ -312,7 +390,11 @@ fn provision_refuses_an_unknown_revision_before_shipping() {
     h.up("localbox", "lima", &[]);
     let out = h.run(&["provision", "localbox", "--rev", "no-such-revision"], &[]);
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("unknown revision"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("unknown revision"),
+        "{}",
+        stderr(&out)
+    );
     assert!(!h.calls().contains("tar -x"), "{}", h.calls());
 }
 
