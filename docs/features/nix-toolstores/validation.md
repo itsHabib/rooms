@@ -25,6 +25,22 @@ attachment before VMM start. A first attempt after host reboot correctly refused
 before boot because host TAP firewall setup was absent; the passing retry followed
 the documented `setup-tap.sh --host` step.
 
+Current command/compatibility follow-up: `make check` now passes 536 portable
+tests; Linux passes 566 plus the explicit privileged bind test. Command metadata
+remains the caller's literal text for both plain and repository commands. The
+boot hook configures SSH session PATH after validating its mounted toolchain;
+live lifecycle/result receipts agree with the original command. The image now
+declares `# rooms-toolstore-v1`; misleading substrings, old markers and quoted
+marker strings are rejected in regression tests. The real earlier unversioned
+image was refused before claim. This marker is compatibility metadata from the
+trusted image builder, not authentication of arbitrary image code.
+
+The rebuilt versioned image SHA is
+`8a40aa5146328785741daa2ac46f7c956d718403304a6cdc4d0622aef92ac1ca`.
+Its scratch/no-scratch/exit-7 runs passed in 22.036 / 8.525 / 8.513 seconds,
+including literal receipt checks, tool execution, read-only enforcement and
+cleanup. Earlier image hashes/timings below remain evidence from their own runs.
+
 ## Environment and inputs
 
 Existing Lima `rooms-host`: aarch64 Ubuntu 24.04, 6 CPUs, 4 GiB RAM, nested KVM,

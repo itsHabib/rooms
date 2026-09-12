@@ -1,4 +1,5 @@
 #!/bin/sh
+# rooms-toolstore-v1
 # /sbin/overlay-init — PID 1 under a read-only rootfs. Build a tmpfs-backed
 # overlay (RO root = lowerdir) and pivot into BusyBox /sbin/init.
 set -e
@@ -32,6 +33,9 @@ for arg in $(cat /proc/cmdline); do
         echo "rooms: toolstore is missing its buildEnv bin directory" >/dev/console
         exit 1
       fi
+      # SSH sessions inherit toolchains without rewriting command receipts.
+      sed -i '1iSetEnv PATH=/nix/var/rooms/env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+        /mnt/newroot/etc/ssh/sshd_config
       ;;
   esac
 done

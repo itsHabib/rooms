@@ -121,13 +121,17 @@ pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
 /// Refuse older boot images that would silently ignore a toolchain disk.
 pub fn validate_toolstore_image(path: &Path) -> Result<(), String> {
     let init = debugfs(path, "cat /sbin/overlay-init")?;
-    if !init.contains("rooms.toolstore=") {
+    if !has_toolstore_hook(&init) {
         return Err(
             "--toolstore requires an image rebuilt with the current scripts/build-rootfs-alpine.sh"
                 .to_owned(),
         );
     }
     Ok(())
+}
+
+fn has_toolstore_hook(init: &str) -> bool {
+    init.lines().any(|line| line == "# rooms-toolstore-v1")
 }
 
 /// Check that an image has the entry point needed for a read-only overlay boot.
@@ -236,6 +240,21 @@ mod tests {
     use super::validate_snapshot_base_image;
     use super::{baked_host_private_key, debugfs_spawn_error, validate_kernel};
     use crate::error::RootfsError;
+
+    #[test]
+    fn toolstore_hook_requires_the_current_explicit_capability() {
+        assert!(super::has_toolstore_hook(include_str!(
+            "../scripts/lib/overlay-init.sh"
+        )));
+        for decoy in [
+            "# rooms.toolstore=vdb is not implemented\nexec /sbin/init",
+            "echo 'rooms.toolstore='",
+            "# rooms-toolstore-v0",
+            "echo '# rooms-toolstore-v1'",
+        ] {
+            assert!(!super::has_toolstore_hook(decoy));
+        }
+    }
 
     fn write_kernel(bytes: &[u8]) -> tempfile::NamedTempFile {
         use std::io::Write as _;

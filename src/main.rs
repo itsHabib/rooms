@@ -4180,10 +4180,6 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
                 ));
             }
             let action = args.command.clone().map_or(Action::Idle, |command| {
-                let command = match args.toolstore {
-                    Some(_) => format!("export PATH=/nix/var/rooms/env/bin:$PATH; {command}"),
-                    None => command,
-                };
                 let Some(repo_url) = args.repo.clone() else {
                     return Action::Exec(runner::Runner::Command(command));
                 };
@@ -6248,6 +6244,41 @@ mod tests {
             ),
             Ok(_) => panic!("--push-branch with the default command runner should be rejected"),
             Err(other) => panic!("expected an Internal error; got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn toolstore_preserves_literal_command_in_plain_and_repository_receipts() {
+        let command = "# caller comment\nprintf 'literal command\\n'";
+        let mut args = RunArgs {
+            resources: rooms::firecracker::Resources::default(),
+            toolstore: Some(PathBuf::from("store")),
+            image: PathBuf::from("image"),
+            keep: false,
+            command: Some(command.to_owned()),
+            runner: RunnerKind::Command,
+            repo: None,
+            task: None,
+            model: None,
+            base_sha: None,
+            push_branch: None,
+            out_dir: None,
+            readonly_rootfs: false,
+            max_wall: None,
+            max_pool: None,
+            json: false,
+            lifecycle: None,
+            witness: false,
+            secrets: None,
+            egress: crate::egress::Policy::Observe,
+        };
+        for repo in [None, Some("https://example.com/repo.git".to_owned())] {
+            args.repo = repo;
+            let super::Action::Exec(run) = resolve_action(&args).await.expect("command action")
+            else {
+                panic!("expected executable command");
+            };
+            assert_eq!(run.command_argv(), vec!["sh", "-c", command]);
         }
     }
 

@@ -43,10 +43,13 @@ This prevents path replacement between hashing and mount
 from substituting unchecked bytes. The existing guard unmounts the shared inode
 on success, error, cancellation and orphan cleanup; it never deletes the source.
 
-The image must contain the updated overlay-init hook. Mount failure aborts boot
+The image must declare the exact `# rooms-toolstore-v1` overlay-init capability.
+This is a compatibility declaration by a trusted image builder, not image
+authentication or proof of arbitrary script behavior. Mount failure aborts boot
 before SSH. Boot also resolves and checks the actual buildEnv `bin` directory
 inside the new root, so a missing environment cannot fall back to Alpine tools.
-Commands receive `/nix/var/rooms/env/bin` at the front of PATH; the
+The hook sets `/nix/var/rooms/env/bin` first in SSH session PATH while retaining
+the caller's literal command in room metadata and receipts. The
 host lifecycle records the verified SHA in `toolstore_attached`. A caller should
 retain `--lifecycle` beside `--out` to preserve that host-authored provenance.
 The toolchain disk is vdc with scratch and vdb without it; the existing vdb
