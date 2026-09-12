@@ -27,7 +27,11 @@ for arg in $(cat /proc/cmdline); do
     rooms.toolstore=vdb|rooms.toolstore=vdc)
       mkdir -p /mnt/newroot/nix
       mount -t squashfs -o ro "/dev/${arg#rooms.toolstore=}" /mnt/newroot/nix
-      test -d /mnt/newroot/nix/var/rooms
+      # Resolve the buildEnv's absolute /nix/store links inside the new root.
+      if ! chroot /mnt/newroot /bin/sh -c 'test -d /nix/var/rooms/env/bin'; then
+        echo "rooms: toolstore is missing its buildEnv bin directory" >/dev/console
+        exit 1
+      fi
       ;;
   esac
 done

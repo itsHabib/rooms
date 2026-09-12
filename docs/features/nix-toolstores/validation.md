@@ -74,6 +74,19 @@ reproducibility on this host/tool version, not independent upstream rebuilds.
   All four source files were retained byte-for-byte with matching manifest
   hashes. After moving the original tree away, Nix rebuilt the same buildEnv
   from the retained `flake/`; the packed Python image hash was unchanged.
+- Manifest serialization accepts exactly 1 MiB and rejects one byte more before
+  writing. A normal Python build still passed and retained the baseline hash.
+- `nix build --out-link` followed by `nix-store --query --roots` reported that
+  exact result link as a registered root. The probe removed only its own link
+  after recording the result; no store garbage collection was requested.
+- The buildEnv boot guard was tested with a rebuilt Alpine image, SHA-256
+  `5ac5864fb57f87e500edde4640f1a08459b7f2c6eb8a20399b1c4ee619520e68`.
+  Scratch, no-scratch and exit-7 smoke runs passed (21.039 / 7.012 / 8.028 s).
+  A valid sealed squashfs containing `/var/rooms` but no environment printed
+  the explicit missing-buildEnv error, started no workload, and cleaned up after
+  timeout/artifact collection failure (CLI 2). The first guard attempt used an
+  absent `/bin/test`; its failed boot was cancelled and retained. The corrected
+  guard uses `/bin/sh`'s builtin inside the new root, resolving absolute Nix links.
 - A sealed 4 KiB image with matching hash/magic but invalid squashfs contents
   reached the intended guest mount failure and kernel panic before SSH. The
   host reported timeout/collection failure, released the VM and completed
@@ -98,6 +111,13 @@ subsequently completed. An earlier 300-second run likewise timed out. The full
 `scripts/test-toolstores.py` suite therefore did **not** pass on this host.
 Do not interpret successful attachment as concurrent build throughput or density
 qualification. Repeat on a suitable real host before making those claims.
+
+A diagnostic host control compiled the same Go sum-of-squares program directly
+on the Lima Linux host with the same Nix environment, an empty Go build cache,
+`GOMAXPROCS=2`, `go build -p 2`, and network package fetching disabled. It passed
+in 2.379 seconds. Host filesystem caches were not cleared and RAM was not capped
+to the guest's 1 GiB, so this is not an isolated measurement of virtualization
+overhead. It motivates matched host/guest measurements on the next host.
 
 The actual Rooms repository at `5bf1d4cafbd2c58fc8c95cd0c895539d70097258`
 cloned successfully, fetched its locked dependencies and compiled with Nix Rust,

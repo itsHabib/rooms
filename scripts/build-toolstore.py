@@ -31,6 +31,13 @@ def digest(path):
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def write_manifest(path, manifest):
+    data = (json.dumps(manifest, indent=2) + '\n').encode('utf-8')
+    if len(data) > 1_048_576:
+        raise ValueError('toolstore manifest exceeds 1 MiB')
+    path.write_bytes(data)
+
+
 def sync_directory(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -115,7 +122,7 @@ def build(args, flake):
                         lock_sha256=digest(frozen / 'flake.lock'),
                         source_files_sha256={str(path.relative_to(frozen)): digest(path)
                                              for path in sorted(frozen.rglob('*')) if path.is_file()})
-        (publish / 'meta.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        write_manifest(publish / 'meta.json', manifest)
         shutil.copytree(frozen, publish / 'flake')
         for directory, _, files in os.walk(publish, topdown=False):
             for name in files:

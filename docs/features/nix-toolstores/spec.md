@@ -25,6 +25,7 @@ packing of the same closure with the same squashfs tool version/options.
 The output directory contains `toolstore.sqfs`, `meta.json`, and the exact flake
 tree under `flake/`, including imported local files and its lock. The manifest
 records architecture, closure, buildEnv, and hashes of every retained source file.
+The builder refuses manifests above the same 1 MiB limit enforced at admission.
 Only `chattr +i` runs through sudo. A sibling `.building` reservation excludes
 cooperative concurrent builders for the same output. Publication never replaces
 an existing output. Normal failure removes staging; after SIGKILL an abandoned
@@ -43,7 +44,9 @@ from substituting unchecked bytes. The existing guard unmounts the shared inode
 on success, error, cancellation and orphan cleanup; it never deletes the source.
 
 The image must contain the updated overlay-init hook. Mount failure aborts boot
-before SSH. Commands receive `/nix/var/rooms/env/bin` at the front of PATH; the
+before SSH. Boot also resolves and checks the actual buildEnv `bin` directory
+inside the new root, so a missing environment cannot fall back to Alpine tools.
+Commands receive `/nix/var/rooms/env/bin` at the front of PATH; the
 host lifecycle records the verified SHA in `toolstore_attached`. A caller should
 retain `--lifecycle` beside `--out` to preserve that host-authored provenance.
 The toolchain disk is vdc with scratch and vdb without it; the existing vdb
