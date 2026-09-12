@@ -11,7 +11,7 @@ of its Alpine image. On the Linux host, build it as your normal user, then run:
 ```sh
 bash scripts/setup-nix-host.sh  # once, on the Ubuntu Rooms host; then log in again
 python3 scripts/build-toolstore.py --preset polyglot --out ~/rooms/toolstores/dev
-sudo -E rooms run --image ~/rooms/images/agent.ext4 \
+sudo -E rooms run --image ~/rooms/images/rootfs.ext4 \
   --toolstore ~/rooms/toolstores/dev --cpus 2 --memory 2048 --disk 4 \
   --repo https://github.com/itsHabib/rooms --command 'cargo test --locked --lib' \
   --out out --lifecycle run.ndjson

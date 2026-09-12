@@ -80,6 +80,9 @@ def build(args, flake):
         # from the expression Nix evaluated. Store dependencies are pinned by lock.
         frozen = work / 'flake'
         shutil.copytree(flake, frozen, symlinks=True)
+        for path in frozen.rglob('*'):
+            if path.is_symlink():
+                raise ValueError(f'symlinked local flake input is not supported: {path.relative_to(frozen)}')
         nix = ['nix', '--extra-experimental-features', 'nix-command flakes']
         output = run(nix + ['build', '--no-update-lock-file', '--no-write-lock-file',
                            '--json', '--out-link', str(work / 'result'),

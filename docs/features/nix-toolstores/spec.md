@@ -52,9 +52,11 @@ No snapshot/restore attachment or cached project envs yet. `--toolstore` require
 a cold `--command`, preventing kept rooms or snapshot bases from acquiring an
 unrecorded extra disk. No CLI toolstore catalog/GC, proxy, cloud provisioning or
 Fleet changes. The builder requires a local locked flake and one of the named
-outputs; it does not fetch arbitrary unpinned flake URLs. Its cache is Nix's
-existing build cache, and its output is an explicit directory rather than a
-second content-addressed cache managed by Rooms.
+outputs; it does not fetch arbitrary unpinned flake URLs. Local flake inputs must
+be regular files/directories. Symlinks are rejected in the frozen copy before
+Nix runs, so later edits to a link target cannot change the declared inputs after
+evaluation. Its cache is Nix's existing build cache, and its output is an explicit
+directory rather than a second content-addressed cache managed by Rooms.
 
 The pinned declaration is portable; successful execution on another architecture
 still requires an actual host test. A kernel needs squashfs with zstd support.

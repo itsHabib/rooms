@@ -54,6 +54,9 @@ reproducibility on this host/tool version, not independent upstream rebuilds.
   to the original bytes.
 - Existing output, missing lock and malformed flake refused; the failing builder
   left no published output, reservation or temporary staging directory.
+- Review follow-up: linked `flake.nix`, `flake.lock` and another local input were
+  rejected before Nix evaluation, with staging removed. The regular Python
+  preset rebuilt successfully through that guard with its original image hash.
 - A sealed 4 KiB image with matching hash/magic but invalid squashfs contents
   reached the intended guest mount failure and kernel panic before SSH. The
   host reported timeout/collection failure, released the VM and completed
