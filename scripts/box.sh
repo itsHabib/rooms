@@ -30,6 +30,7 @@
 #   ROOMS_BOX_GCP_MACHINE   default n2-standard-4 (Intel; E2, Arm, and most AMD
 #                           machine types cannot nest)
 #   ROOMS_BOX_GCP_MAX_RUN   default 3h; GCP deletes the VM when it elapses
+#   ROOMS_BOX_GCP_DISK      boot disk size, default 50GB
 #
 # ROOMS_BOX_SSH_TIMEOUT bounds how long `up` waits for SSH (default 300 seconds).
 
@@ -76,14 +77,16 @@ box_dir() { printf '%s/%s\n' "$STATE_ROOT" "$1"; }
 # shares the name.
 new_token() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 
-# record DIR KEY VALUE [KEY VALUE...] appends shell-quoted assignments.
+# record DIR KEY VALUE [KEY VALUE...] appends shell-quoted assignments in one
+# write, so an interrupted call leaves all of its pairs or none.
 record() {
-    local dir="$1"
+    local dir="$1" lines=""
     shift
     while [[ $# -ge 2 ]]; do
-        printf '%s=%q\n' "$1" "$2" >>"$dir/box.env"
+        lines+="$(printf '%s=%q' "$1" "$2")"$'\n'
         shift 2
     done
+    printf '%s' "$lines" >>"$dir/box.env"
 }
 
 load_box() {
@@ -91,6 +94,8 @@ load_box() {
     BOX_DIR="$(box_dir "$1")"
     [[ -f "$BOX_DIR/box.env" ]] \
         || fatal "no box named '$1' under $STATE_ROOT; box.sh only manages boxes it created"
+    # Trusted input: the state dir is created mode 700 by this user and every
+    # value in box.env was shell-quoted by record().
     # shellcheck disable=SC1091
     source "$BOX_DIR/box.env"
 }
@@ -178,7 +183,7 @@ gcp_up() {
         --instance-termination-action=DELETE \
         --max-run-duration="${ROOMS_BOX_GCP_MAX_RUN:-3h}" \
         --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud \
-        --boot-disk-size=50GB \
+        --boot-disk-size="${ROOMS_BOX_GCP_DISK:-50GB}" \
         --labels="purpose=rooms-box,rooms_box_token=$token" \
         --metadata-from-file=ssh-keys="$dir/ssh-keys" >&2
     ip="$(gcloud compute instances describe "$name" --project="$project" --zone="$zone" \

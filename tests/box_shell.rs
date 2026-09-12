@@ -15,7 +15,9 @@ const FAKE_LIMACTL: &str = r#"#!/bin/sh
 echo "limactl $*" >>"$BOX_TEST_LOG"
 case "$1 $3" in
     "list {{.Dir}}") printf '%s\n' "$BOX_TEST_LIMA_DIR" ;;
-    "list {{.Name}} "*) printf '%s\n' "${BOX_TEST_LIMA_INSTANCES:-}" ;;
+    "list {{.Name}} "*)
+        [ -n "${BOX_TEST_LIMA_LIST_FAILS:-}" ] && exit 1
+        printf '%s\n' "${BOX_TEST_LIMA_INSTANCES:-}" ;;
 esac
 exit 0
 "#;
@@ -193,6 +195,8 @@ fn gcp_up_creates_an_auto_deleting_nested_spot_vm() {
         "--instance-termination-action=DELETE",
         "--max-run-duration=3h",
         "--image-family=ubuntu-2404-lts-amd64",
+        "--image-project=ubuntu-os-cloud",
+        "--boot-disk-size=50GB",
         "--labels=purpose=rooms-box",
     ] {
         assert!(calls.contains(flag), "missing {flag} in:\n{calls}");
@@ -387,6 +391,19 @@ fn down_treats_a_missing_lima_instance_as_gone() {
     );
     assert!(!h.calls().contains("limactl delete"), "{}", h.calls());
     assert!(!h.path("state/localbox").exists());
+}
+
+#[test]
+fn down_keeps_state_when_the_lima_lookup_fails() {
+    let h = Harness::new();
+    h.up("localbox", "lima", &[]);
+    let out = h.run(&["down", "localbox"], &[("BOX_TEST_LIMA_LIST_FAILS", "1")]);
+    assert!(!out.status.success());
+    assert!(!h.calls().contains("limactl delete"), "{}", h.calls());
+    assert!(
+        h.path("state/localbox/box.env").exists(),
+        "state kept for a retry"
+    );
 }
 
 #[test]

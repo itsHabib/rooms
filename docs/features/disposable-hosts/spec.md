@@ -47,8 +47,9 @@ alias. Everything after that runs over SSH and is identical on every backend:
 | `gcp` | Compute Engine | Intel `n2-standard-4` Spot VM with `--enable-nested-virtualization`, `--instance-termination-action=DELETE`, and `--max-run-duration=3h`, so a forgotten box deletes itself. Labeled `purpose=rooms-box`. SSH uses a per-box key injected through instance metadata. |
 
 GCP never falls back to gcloud's active project: `--project` or
-`ROOMS_BOX_GCP_PROJECT` is required. Zone, machine type, and maximum run time
-are `ROOMS_BOX_GCP_ZONE`, `ROOMS_BOX_GCP_MACHINE`, and `ROOMS_BOX_GCP_MAX_RUN`.
+`ROOMS_BOX_GCP_PROJECT` is required. Zone, machine type, maximum run time, and
+boot disk size are `ROOMS_BOX_GCP_ZONE`, `ROOMS_BOX_GCP_MACHINE`,
+`ROOMS_BOX_GCP_MAX_RUN`, and `ROOMS_BOX_GCP_DISK`.
 Compute Engine refuses nested virtualization on E2, Arm, and most AMD machine
 types, so the default stays Intel. The instance joins the project's default
 network and relies on an existing rule that allows SSH (the default network's
