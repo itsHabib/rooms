@@ -14,6 +14,17 @@ inode. The CLI test also exposed that Clap's transitive requirements allowed
 The lifecycle receipt now records `toolstore_attached` before `vmm_started`,
 which includes a successful InstanceStart. The live harness checks this order.
 
+Later review fixes move toolstore binding to a blocking worker that owns the
+cleanup guard until mount completes, and recheck the held inode seal after
+hashing. Source publication now retains the whole frozen flake tree and records
+per-file hashes, including imported files. The updated optimized runtime passed
+three additional VM runs: scratch C/Rust compilation plus Go/Node execution
+(21.537 s), no-scratch Python/OpenSSL (8.524 s), and retained exit-7 output
+(8.520 s). Each ended with `cleanup_done`, preserved source hashes and emitted
+attachment before VMM start. A first attempt after host reboot correctly refused
+before boot because host TAP firewall setup was absent; the passing retry followed
+the documented `setup-tap.sh --host` step.
+
 ## Environment and inputs
 
 Existing Lima `rooms-host`: aarch64 Ubuntu 24.04, 6 CPUs, 4 GiB RAM, nested KVM,
@@ -57,6 +68,12 @@ reproducibility on this host/tool version, not independent upstream rebuilds.
 - Review follow-up: linked `flake.nix`, `flake.lock` and another local input were
   rejected before Nix evaluation, with staging removed. The regular Python
   preset rebuilt successfully through that guard with its original image hash.
+- Direct, nested and symlink-alias output paths inside the source flake were
+  refused before creating directories; the source tree remained unchanged.
+- A custom flake imported `toolchains.nix` and contained a nested regular file.
+  All four source files were retained byte-for-byte with matching manifest
+  hashes. After moving the original tree away, Nix rebuilt the same buildEnv
+  from the retained `flake/`; the packed Python image hash was unchanged.
 - A sealed 4 KiB image with matching hash/magic but invalid squashfs contents
   reached the intended guest mount failure and kernel panic before SSH. The
   host reported timeout/collection failure, released the VM and completed

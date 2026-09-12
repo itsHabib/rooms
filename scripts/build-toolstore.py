@@ -61,9 +61,11 @@ def main():
     if not lock.is_file():
         parser.error('flake.lock is required; lock the inputs before building')
     args.out = args.out.absolute()
-    args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.out.exists() or args.out.is_symlink():
         parser.error('output already exists; use a fresh directory')
+    if args.out.resolve().is_relative_to(flake):
+        parser.error('output must be outside the flake directory')
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     # mkdir is the reservation; publication is one sibling-directory rename.
     reservation = args.out.with_name(args.out.name + '.building')
     reservation.mkdir()
@@ -110,13 +112,16 @@ def build(args, flake):
         manifest = dict(schema_version=1, system=platform.machine() + '-linux',
                         preset=args.preset, environment=str(environment), closure=closure,
                         sha256=digest(image), flake_sha256=digest(frozen / 'flake.nix'),
-                        lock_sha256=digest(frozen / 'flake.lock'))
+                        lock_sha256=digest(frozen / 'flake.lock'),
+                        source_files_sha256={str(path.relative_to(frozen)): digest(path)
+                                             for path in sorted(frozen.rglob('*')) if path.is_file()})
         (publish / 'meta.json').write_text(json.dumps(manifest, indent=2) + '\n')
-        shutil.copyfile(frozen / 'flake.nix', publish / 'flake.nix')
-        shutil.copyfile(frozen / 'flake.lock', publish / 'flake.lock')
-        for path in publish.iterdir():
-            with path.open('rb') as artifact:
-                os.fsync(artifact.fileno())
+        shutil.copytree(frozen, publish / 'flake')
+        for directory, _, files in os.walk(publish, topdown=False):
+            for name in files:
+                with (Path(directory) / name).open('rb') as artifact:
+                    os.fsync(artifact.fileno())
+            sync_directory(Path(directory))
         try:
             run(['sudo', '-n', 'chattr', '+i', '--', str(image)])
             with image.open('rb') as sealed:

@@ -116,6 +116,14 @@ impl Toolstore {
         })
     }
 
+    /// Duplicate the admitted descriptor for an owned blocking mount worker.
+    pub(crate) fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone()?,
+            digest: self.digest.clone(),
+        })
+    }
+
     /// The digest verified from the held inode, suitable for a run receipt.
     #[must_use]
     pub fn digest(&self) -> &str {

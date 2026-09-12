@@ -23,7 +23,8 @@ absolute store symlinks. A squashfs mounts at `/nix`; the buildEnv is reached vi
 packing of the same closure with the same squashfs tool version/options.
 
 The output directory contains `toolstore.sqfs`, `meta.json`, and the exact flake
-and lock used. The manifest records architecture, closure, buildEnv, and hashes.
+tree under `flake/`, including imported local files and its lock. The manifest
+records architecture, closure, buildEnv, and hashes of every retained source file.
 Only `chattr +i` runs through sudo. A sibling `.building` reservation excludes
 cooperative concurrent builders for the same output. Publication never replaces
 an existing output. Normal failure removes staging; after SIGKILL an abandoned
@@ -35,6 +36,8 @@ squashfs magic and the full disk hash before claiming a slot. It holds the
 verified inode open, binds that descriptor into the jail, and attaches it as a
 read-only virtio drive. The bind disables mount-helper path canonicalization and
 checks the mounted device/inode against the held descriptor before VM setup.
+The blocking mount worker owns the cleanup guard until it completes, including
+when the awaiting async task is dropped.
 This prevents path replacement between hashing and mount
 from substituting unchecked bytes. The existing guard unmounts the shared inode
 on success, error, cancellation and orphan cleanup; it never deletes the source.
@@ -55,7 +58,9 @@ Fleet changes. The builder requires a local locked flake and one of the named
 outputs; it does not fetch arbitrary unpinned flake URLs. Local flake inputs must
 be regular files/directories. Symlinks are rejected in the frozen copy before
 Nix runs, so later edits to a link target cannot change the declared inputs after
-evaluation. Its cache is Nix's existing build cache, and its output is an explicit
+evaluation. The output must be outside the source flake tree (including symlink
+aliases); otherwise staging would recursively copy itself. Its cache is Nix's
+existing build cache, and its output is an explicit
 directory rather than a second content-addressed cache managed by Rooms.
 
 The pinned declaration is portable; successful execution on another architecture

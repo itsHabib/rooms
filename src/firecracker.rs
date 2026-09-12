@@ -652,9 +652,8 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
     )
     .await?;
     if let Some(toolstore) = req.toolstore {
-        // Keep binding synchronous under the jail's cleanup guard. Device
-        // ordering is assigned later by configure_vm, independently of staging.
-        stage_toolstore(toolstore, &jail_root_dir(&chroot_base, &room_id_str))?;
+        guard =
+            prepare_toolstore(toolstore, jail_root_dir(&chroot_base, &room_id_str), guard).await?;
     }
     let boot = async move {
         if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
@@ -1435,6 +1434,24 @@ fn stage_jail_sync(
         return Err(e);
     }
     Ok(())
+}
+
+async fn prepare_toolstore(
+    toolstore: &crate::toolstore::Toolstore,
+    jail: PathBuf,
+    guard: RoomGuard,
+) -> Result<RoomGuard, FirecrackerError> {
+    let toolstore = toolstore
+        .try_clone()
+        .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+    // The worker owns cleanup until mount completes, even if the awaiting task
+    // is dropped. Never race this join against cooperative cancellation.
+    tokio::task::spawn_blocking(move || {
+        stage_toolstore(&toolstore, &jail)?;
+        Ok(guard)
+    })
+    .await
+    .map_err(|error| FirecrackerError::Internal(format!("toolstore worker failed: {error}")))?
 }
 
 fn stage_toolstore(
