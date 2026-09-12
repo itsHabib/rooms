@@ -104,6 +104,14 @@ four and a half minutes of Spot time.
 Both boxes were then removed with `down`; the project listed no instances
 afterward and the long-lived Lima `rooms-host` was untouched.
 
+**Ownership rerun at `ec4f1b0`** (after review): `up rooms-host --backend lima`
+against the real long-lived host exited 1 without writing state. A fresh Lima
+box carried the same token in `/etc/rooms-box-token` as in its state file,
+passed `check` under the stricter schema validation (schema 1, 15 checks, 0
+failed), and `down` found and deleted it by that token. A fresh GCP box carried
+the token as its `rooms_box_token` label, and `down` found it through the label
+filter and deleted it, leaving the project empty.
+
 ## Out of scope
 
 Each is recorded in [`docs/follow-ups.md`](../../follow-ups.md):
