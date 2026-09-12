@@ -109,6 +109,7 @@ impl Toolstore {
             format!("{:x}", hash.finalize()) == manifest.sha256,
             "toolstore hash mismatch"
         );
+        crate::inode_seal::require_file(&file, &path, "toolstore")?;
         Ok(Self {
             file,
             digest: manifest.sha256,
