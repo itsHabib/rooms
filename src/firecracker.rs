@@ -1460,6 +1460,10 @@ fn stage_toolstore(
 ) -> Result<(), FirecrackerError> {
     #[cfg(unix)]
     {
+        // Preflight checked the caller path. Recheck the mounted inode because
+        // a concurrent image rebuild may have replaced that path during staging.
+        crate::rootfs::validate_toolstore_image(&jail.join(JAIL_ROOTFS))
+            .map_err(FirecrackerError::Internal)?;
         let target = jail.join(JAIL_TOOLSTORE);
         std::fs::File::create_new(&target)
             .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
@@ -2629,6 +2633,52 @@ mod tests {
         clippy::panic,
         reason = "test module"
     )]
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires root plus ROOMS_TEST_TOOLSTORE, ROOMS_TEST_TOOLSTORE_IMAGE and ROOMS_TEST_OLD_IMAGE fixtures"]
+    fn toolstore_staging_rechecks_rootfs_after_preflight_path_replacement() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+        use std::path::PathBuf;
+
+        let tools = crate::toolstore::Toolstore::open(&PathBuf::from(std::env::var(
+            "ROOMS_TEST_TOOLSTORE",
+        )?))?;
+        let image = PathBuf::from(std::env::var("ROOMS_TEST_TOOLSTORE_IMAGE")?);
+        let old_image = PathBuf::from(std::env::var("ROOMS_TEST_OLD_IMAGE")?);
+        for replace in [false, true] {
+            let temporary = tempfile::tempdir()?;
+            let source = temporary.path().join("image");
+            symlink(&image, &source)?;
+            assert!(crate::rootfs::validate_toolstore_image(&source).is_ok());
+            if replace {
+                std::fs::remove_file(&source)?;
+                symlink(&old_image, &source)?;
+            }
+            let kernel = temporary.path().join("kernel");
+            std::fs::write(&kernel, b"not booted by this staging test")?;
+            let chroot = temporary.path().join("jailer");
+            let jail = super::jail_root_dir(&chroot, "probe");
+            let room = temporary.path().join("room");
+            std::fs::create_dir(&room)?;
+            let mut guard = super::RoomGuard::new(
+                room,
+                jail.join(super::JAIL_API_SOCK),
+                &crate::config::RoomsConfig::default(),
+            );
+            guard.set_jail_instance_dir(super::jail_instance_dir(&chroot, "probe"));
+            super::stage_jail_sync(&chroot, "probe", &kernel, &source, 0, 0)?;
+            let result = super::stage_toolstore(&tools, &jail);
+            assert_eq!(result.is_err(), replace, "{result:?}");
+            assert_eq!(jail.join(super::JAIL_TOOLSTORE).exists(), !replace);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("requires an image rebuilt"));
+            }
+            drop(guard);
+            assert!(!jail.exists(), "staging left mounted jail resources");
+        }
+        Ok(())
+    }
 
     #[test]
     fn write_room_meta_base_records_provisioning_provenance() {

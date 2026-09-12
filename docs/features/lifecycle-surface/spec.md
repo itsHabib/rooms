@@ -43,7 +43,7 @@ externally visible transition of the run.
 | --- | --- | --- |
 | `slot_allocated` | `slot`, `tap` | pool slot claimed; the room owns its /30 |
 | `pool_full` | `cap` | admission rejected: every slot up to the cap is claimed |
-| `toolstore_attached` | `sha256` (verified lowercase hex digest) | cold toolchain disk attached read-only; recorded after successful boot, immediately before `vmm_started` |
+| `toolstore_attached` | `sha256` (verified lowercase hex digest) | cold toolchain disk attached read-only; recorded after successful boot, before `vmm_started` (`witness_started` may intervene) |
 | `vmm_started` | `pid` | firecracker up, API answered, instance started — **not** readiness |
 | `boot_failed` | `error` | boot never reached a started VMM |
 | `guest_ready` | — | guest kernel is up (answered ICMP; or proven via SSH, below) |

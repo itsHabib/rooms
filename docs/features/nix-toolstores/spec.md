@@ -37,6 +37,8 @@ squashfs magic and the full disk hash before claiming a slot. It holds the
 verified inode open, binds that descriptor into the jail, and attaches it as a
 read-only virtio drive. The bind disables mount-helper path canonicalization and
 checks the mounted device/inode against the held descriptor before VM setup.
+It also rechecks the boot capability from the rootfs already mounted in the jail,
+so replacing the original image pathname during staging cannot bypass admission.
 The blocking mount worker owns the cleanup guard until it completes, including
 when the awaiting async task is dropped.
 This prevents path replacement between hashing and mount
@@ -63,8 +65,9 @@ unrecorded extra disk. No CLI toolstore catalog/GC, proxy, cloud provisioning or
 Fleet changes. The builder requires a local locked flake and one of the named
 outputs; it does not fetch arbitrary unpinned flake URLs. Local flake inputs must
 be regular files/directories. Symlinks are rejected in the frozen copy before
-Nix runs, so later edits to a link target cannot change the declared inputs after
-evaluation. The output must be outside the source flake tree (including symlink
+Nix runs. Locked local path/file inputs are rejected; local modules must stay
+inside the root flake tree, while remote dependencies remain pinned by the lock.
+The output must be outside the source flake tree (including symlink
 aliases); otherwise staging would recursively copy itself. Its cache is Nix's
 existing build cache, and its output is an explicit
 directory rather than a second content-addressed cache managed by Rooms.

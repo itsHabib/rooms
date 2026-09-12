@@ -6248,7 +6248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn toolstore_preserves_literal_command_in_plain_and_repository_receipts() {
+    async fn toolstore_preserves_literal_command_in_plain_and_repository_action_metadata() {
         let command = "# caller comment\nprintf 'literal command\\n'";
         let mut args = RunArgs {
             resources: rooms::firecracker::Resources::default(),

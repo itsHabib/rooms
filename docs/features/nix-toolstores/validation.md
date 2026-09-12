@@ -41,6 +41,22 @@ Its scratch/no-scratch/exit-7 runs passed in 22.036 / 8.525 / 8.513 seconds,
 including literal receipt checks, tool execution, read-only enforcement and
 cleanup. Earlier image hashes/timings below remain evidence from their own runs.
 
+Mounted-root follow-up: an additional root-only staging regression first
+validates a compatible image, replaces its input path with an incompatible image,
+then exercises real kernel/rootfs/toolstore bind staging. The mounted-root recheck
+refuses the replacement; the unchanged-image control passes; both guarded jails
+are removed. Normal test counts remain 536 portable / 566 Linux, with two
+privileged tests run separately. The updated optimized runtime also passed
+scratch/no-scratch/exit-7 VM smoke runs in 21.533 / 7.509 / 8.016 seconds, including
+literal receipts, Nix tool execution, read-only enforcement and cleanup.
+
+A real flake lock containing an out-of-tree local `path:` input was rejected
+before evaluation/packing, with no publication, reservation or staging left.
+The ordinary Python preset still built with the same squashfs hash. Supported
+custom modules live inside the frozen root flake; remote inputs stay pinned by
+the lock. The lifecycle table permits `witness_started` between toolstore and
+VMM receipts, matching the existing witnessed-run path.
+
 ## Environment and inputs
 
 Existing Lima `rooms-host`: aarch64 Ubuntu 24.04, 6 CPUs, 4 GiB RAM, nested KVM,
@@ -165,3 +181,11 @@ For the explicit privileged test, build `cargo test --lib --no-run`, then run
 the emitted test binary under sudo with
 `toolstore::tests::attachment_holds_admitted_inode_after_directory_replacement
 --ignored --exact`. It creates and unseals only its own temporary test inode.
+
+For the additional rootfs replacement regression, set `ROOMS_TEST_TOOLSTORE` to
+a sealed toolstore directory, `ROOMS_TEST_TOOLSTORE_IMAGE` to a current versioned
+image and `ROOMS_TEST_OLD_IMAGE` to an image without that capability. Invoke the
+library test binary under sudo with those variables and
+`firecracker::tests::toolstore_staging_rechecks_rootfs_after_preflight_path_replacement
+--ignored --exact`. It reads the fixtures and mounts them only inside its own
+temporary jail; it never changes their bytes or seals.

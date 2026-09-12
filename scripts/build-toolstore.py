@@ -31,6 +31,14 @@ def digest(path):
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def validate_locked_inputs(lock):
+    for node in json.loads(lock.read_text())['nodes'].values():
+        for declaration in [node.get('locked', {}), node.get('original', {})]:
+            url = declaration.get('url', '')
+            if declaration.get('type') == 'path' or url.lower().startswith('file:') or url.startswith('/'):
+                raise ValueError('local flake inputs are not supported; keep local modules inside the root flake')
+
+
 def write_manifest(path, manifest):
     data = (json.dumps(manifest, indent=2) + '\n').encode('utf-8')
     if len(data) > 1_048_576:
@@ -92,6 +100,7 @@ def build(args, flake):
         for path in frozen.rglob('*'):
             if path.is_symlink():
                 raise ValueError(f'symlinked local flake input is not supported: {path.relative_to(frozen)}')
+        validate_locked_inputs(frozen / 'flake.lock')
         nix = ['nix', '--extra-experimental-features', 'nix-command flakes']
         output = run(nix + ['build', '--no-update-lock-file', '--no-write-lock-file',
                            '--json', '--out-link', str(work / 'result'),
