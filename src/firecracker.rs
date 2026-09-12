@@ -545,6 +545,8 @@ impl Resources {
 
 /// Inputs to a cold boot, including the claimed slot transferred to its guard.
 pub struct BootRequest<'a> {
+    /// Optional immutable Nix toolchain inode for a cold command run.
+    pub toolstore: Option<&'a crate::toolstore::Toolstore>,
     pub resources: Resources,
     pub kernel: &'a Path,
     pub rootfs: &'a Path,
@@ -612,6 +614,11 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
         .slot
         .map(|slot| PendingSlotClaim::new(state_base.clone(), slot, req.room_id));
     req.resources.validate(req.readonly_rootfs, req.base)?;
+    if req.toolstore.is_some() && (!req.readonly_rootfs || req.base) {
+        return Err(FirecrackerError::Internal(
+            "toolstore requires a read-only cold room".to_owned(),
+        ));
+    }
 
     let (firecracker_binary, jailer_binary, fc_uid, fc_gid) = tokio::select! {
         biased;
@@ -643,6 +650,9 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
         fc_gid,
     )
     .await?;
+    if let Some(toolstore) = req.toolstore {
+        stage_toolstore(toolstore, &jail_root_dir(&chroot_base, &room_id_str))?;
+    }
     let boot = async move {
         if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
             return Err(FirecrackerError::Internal(
@@ -768,9 +778,18 @@ async fn configure_boot(
     if req.resources.disk_gib.is_some() {
         boot_args.push_str(" rooms.scratch=1");
     }
+    if req.toolstore.is_some() {
+        let device = match req.resources.disk_gib {
+            Some(_) => "vdc",
+            None => "vdb",
+        };
+        boot_args.push_str(" rooms.toolstore=");
+        boot_args.push_str(device);
+    }
     let rootfs_drive = rootfs_drive_payload(&launch.rootfs_path_in_jail, req.readonly_rootfs);
     let spec = VmSpec {
         resources: req.resources,
+        toolstore: req.toolstore.is_some(),
         kernel: &launch.kernel_path_in_jail,
         rootfs_drive: &rootfs_drive,
         network: req.network,
@@ -1415,6 +1434,32 @@ fn stage_jail_sync(
     Ok(())
 }
 
+fn stage_toolstore(
+    toolstore: &crate::toolstore::Toolstore,
+    jail: &Path,
+) -> Result<(), FirecrackerError> {
+    #[cfg(unix)]
+    {
+        let target = jail.join("toolstore.sqfs");
+        let source = toolstore
+            .mount_source()
+            .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+        std::fs::File::create_new(&target)
+            .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+        bind_mount(&source, &target)?;
+        crate::inode_seal::require(&target, "attached toolstore")
+            .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (toolstore, jail);
+        Err(FirecrackerError::Internal(
+            "toolstores require Linux".to_owned(),
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn bind_mount(source: &Path, target: &Path) -> Result<(), FirecrackerError> {
     use std::process::Command;
@@ -1518,7 +1563,12 @@ fn teardown_jail_sync(instance_dir: &Path) -> bool {
     // snapshot.mem is a restore room's bind-mounted shared memory inode; in a
     // boot room's jail it's at most a plain file, where the unmount fails
     // harmlessly ("not mounted") and dir removal proceeds.
-    for name in [JAIL_KERNEL, JAIL_ROOTFS, crate::snapshot::SNAPSHOT_MEM_FILE] {
+    for name in [
+        JAIL_KERNEL,
+        JAIL_ROOTFS,
+        crate::snapshot::SNAPSHOT_MEM_FILE,
+        "toolstore.sqfs",
+    ] {
         let target = jail_root.join(name);
         if target.exists() {
             if let Err(e) = unmount_settled(&target) {
@@ -1707,6 +1757,7 @@ fn rootfs_drive_payload(rootfs: &Path, readonly_rootfs: bool) -> serde_json::Val
 /// `configure_vm` walks through the Firecracker REST calls before
 /// `InstanceStart`.
 struct VmSpec<'a> {
+    toolstore: bool,
     resources: Resources,
     kernel: &'a Path,
     rootfs_drive: &'a serde_json::Value,
@@ -1745,6 +1796,18 @@ async fn configure_vm(
         .await?;
     }
 
+    if spec.toolstore {
+        transport::api_put(
+            socket,
+            "/drives/toolstore",
+            &serde_json::json!({
+                "drive_id": "toolstore", "path_on_host": "/toolstore.sqfs",
+                "is_root_device": false, "is_read_only": true,
+            }),
+            config,
+        )
+        .await?;
+    }
     transport::api_put(
         socket,
         "/machine-config",
@@ -3434,6 +3497,7 @@ mod e2e_tests {
         let egress_plan = crate::egress::Plan::Observe;
         let req = BootRequest {
             resources: crate::firecracker::Resources::default(),
+            toolstore: None,
             kernel: &kernel,
             rootfs: &rootfs,
             network: None,

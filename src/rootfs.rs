@@ -118,6 +118,18 @@ pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse older boot images that would silently ignore a toolchain disk.
+pub fn validate_toolstore_image(path: &Path) -> Result<(), String> {
+    let init = debugfs(path, "cat /sbin/overlay-init")?;
+    if !init.contains("rooms.toolstore=") {
+        return Err(
+            "--toolstore requires an image rebuilt with the current scripts/build-rootfs-alpine.sh"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Check that an image has the entry point needed for a read-only overlay boot.
 pub fn validate_overlay_image(path: &Path) -> Result<(), String> {
     let overlay = debugfs(path, "stat /sbin/overlay-init")?;

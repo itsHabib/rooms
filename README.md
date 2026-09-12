@@ -5,6 +5,24 @@
 
 Disposable Firecracker microVMs with specified deps. The cold path takes a rootfs image, a repo, and a command; it boots an ephemeral microVM under the Firecracker jailer, SSHes the command into the guest, propagates the exit code, collects `/workspace/out` back to the host, and tears the VM down. The warm path creates one credential-free neutral base, snapshots it, then restores one room or forks up to eight isolated clones from that shared state. The first consumer is an LLM agent (`--runner cursor` drives a baked SDK runner against a cloned repo), but the substrate doesn't know that: it sees "exec a command," same as it would for a test suite or a shell script.
 
+A pinned Nix toolchain can now be attached to a cold command room independently
+of its Alpine image. On the Linux host, build it as your normal user, then run:
+
+```sh
+bash scripts/setup-nix-host.sh  # once, on the Ubuntu Rooms host; then log in again
+python3 scripts/build-toolstore.py --preset polyglot --out ~/rooms/toolstores/dev
+sudo -E rooms run --image ~/rooms/images/agent.ext4 \
+  --toolstore ~/rooms/toolstores/dev --cpus 2 --memory 2048 --disk 4 \
+  --repo https://github.com/itsHabib/rooms --command 'cargo test --locked --lib' \
+  --out out --lifecycle run.ndjson
+```
+
+The image must be rebuilt with the current Alpine builder's boot hook. Nix runs
+only on the Linux host; its sealed squashfs carries the tools and their runtime
+closure into the guest. See [Nix toolstores](docs/features/nix-toolstores/spec.md)
+for host prerequisites, scope, and validation. Snapshot attachment and cached
+project environments remain separate work.
+
 ## Status
 
 **v0.1.0 — tagged + public, dogfooded on the rooms-host.** The cold-room path remains intact:

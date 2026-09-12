@@ -19,6 +19,19 @@ mount -t overlay overlay \
   -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work \
   /mnt/newroot
 
+# Toolchains carry their own dynamic loaders and libc under /nix/store.
+# Mount the complete closure outside the writable overlay. Any failure aborts
+# before SSH starts; no fallback to an incomplete PATH is allowed.
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    rooms.toolstore=vdb|rooms.toolstore=vdc)
+      mkdir -p /mnt/newroot/nix
+      mount -t squashfs -o ro "/dev/${arg#rooms.toolstore=}" /mnt/newroot/nix
+      test -d /mnt/newroot/nix/var/rooms
+      ;;
+  esac
+done
+
 # A base boots without an interactive surface. These changes live only in the
 # tmpfs upper layer; ordinary rooms run boots retain the image's sshd/getty.
 if grep -qw 'rooms.base=1' /proc/cmdline; then
