@@ -50,7 +50,10 @@ GCP never falls back to gcloud's active project: `--project` or
 `ROOMS_BOX_GCP_PROJECT` is required. Zone, machine type, and maximum run time
 are `ROOMS_BOX_GCP_ZONE`, `ROOMS_BOX_GCP_MACHINE`, and `ROOMS_BOX_GCP_MAX_RUN`.
 Compute Engine refuses nested virtualization on E2, Arm, and most AMD machine
-types, so the default stays Intel.
+types, so the default stays Intel. The instance joins the project's default
+network and relies on an existing rule that allows SSH (the default network's
+`default-allow-ssh`); `box.sh` never creates or changes firewall rules, and
+without such a rule `up` stops when SSH does not answer in time.
 
 ## Safety
 
@@ -77,6 +80,16 @@ types, so the default stays Intel.
 `jailer_file_access`, `tun_device`, `rooms_fwd`, `slots_dir`, `orphaned_taps`,
 `kernel`, `kernel_vsock`, `rootfs`, `anthropic_api_key` as a warning,
 `nested_virt`, `sha_drift`).
+
+**GCP** (`rooms-box-gcp`, x86_64 `n2-standard-4` Spot in `us-central1-a`):
+the live instance reported `enableNestedVirtualization: true`,
+`instanceTerminationAction: DELETE`, and `maxRunDuration: 10800s`. Provisioned
+at `144b1fc` (release build 1m07s); the same 15 checks ok, with
+`nested_virt` reading `kvm_intel` `nested=Y`. `up` through `check` took about
+four and a half minutes of Spot time.
+
+Both boxes were then removed with `down`; the project listed no instances
+afterward and the long-lived Lima `rooms-host` was untouched.
 
 ## Out of scope
 
