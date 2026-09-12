@@ -29,6 +29,7 @@ const JAIL_API_SOCK: &str = "api.sock";
 /// Bind-mount target names inside the jail root for kernel and rootfs.
 const JAIL_KERNEL: &str = "kernel";
 pub(crate) const JAIL_ROOTFS: &str = "rootfs";
+const JAIL_TOOLSTORE: &str = "toolstore.sqfs";
 
 /// `ip netns` bind-mount directory consumed by jailer's `--netns` flag.
 const NETWORK_NAMESPACE_DIR: &str = "/run/netns";
@@ -545,6 +546,8 @@ impl Resources {
 
 /// Inputs to a cold boot, including the claimed slot transferred to its guard.
 pub struct BootRequest<'a> {
+    /// Optional immutable Nix toolchain inode for a cold command run.
+    pub toolstore: Option<&'a crate::toolstore::Toolstore>,
     pub resources: Resources,
     pub kernel: &'a Path,
     pub rootfs: &'a Path,
@@ -612,6 +615,11 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
         .slot
         .map(|slot| PendingSlotClaim::new(state_base.clone(), slot, req.room_id));
     req.resources.validate(req.readonly_rootfs, req.base)?;
+    if req.toolstore.is_some() && (!req.readonly_rootfs || req.base) {
+        return Err(FirecrackerError::Internal(
+            "toolstore requires a read-only cold room".to_owned(),
+        ));
+    }
 
     let (firecracker_binary, jailer_binary, fc_uid, fc_gid) = tokio::select! {
         biased;
@@ -643,6 +651,15 @@ pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
         fc_gid,
     )
     .await?;
+    if let Some(toolstore) = req.toolstore {
+        guard = prepare_toolstore(
+            toolstore,
+            jail_root_dir(&chroot_base, &room_id_str),
+            req.resources.disk_gib.is_some(),
+            guard,
+        )
+        .await?;
+    }
     let boot = async move {
         if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
             return Err(FirecrackerError::Internal(
@@ -768,9 +785,18 @@ async fn configure_boot(
     if req.resources.disk_gib.is_some() {
         boot_args.push_str(" rooms.scratch=1");
     }
+    if req.toolstore.is_some() {
+        let device = match req.resources.disk_gib {
+            Some(_) => "vdc",
+            None => "vdb",
+        };
+        boot_args.push_str(" rooms.toolstore=");
+        boot_args.push_str(device);
+    }
     let rootfs_drive = rootfs_drive_payload(&launch.rootfs_path_in_jail, req.readonly_rootfs);
     let spec = VmSpec {
         resources: req.resources,
+        toolstore: req.toolstore.is_some(),
         kernel: &launch.kernel_path_in_jail,
         rootfs_drive: &rootfs_drive,
         network: req.network,
@@ -1415,6 +1441,57 @@ fn stage_jail_sync(
     Ok(())
 }
 
+async fn prepare_toolstore(
+    toolstore: &crate::toolstore::Toolstore,
+    jail: PathBuf,
+    require_scratch: bool,
+    guard: RoomGuard,
+) -> Result<RoomGuard, FirecrackerError> {
+    let toolstore = toolstore
+        .try_clone()
+        .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+    // The worker owns cleanup until mount completes, even if the awaiting task
+    // is dropped. Never race this join against cooperative cancellation.
+    tokio::task::spawn_blocking(move || {
+        stage_toolstore(&toolstore, &jail, require_scratch)?;
+        Ok(guard)
+    })
+    .await
+    .map_err(|error| FirecrackerError::Internal(format!("toolstore worker failed: {error}")))?
+}
+
+fn stage_toolstore(
+    toolstore: &crate::toolstore::Toolstore,
+    jail: &Path,
+    require_scratch: bool,
+) -> Result<(), FirecrackerError> {
+    #[cfg(unix)]
+    {
+        // Preflight checked the caller path. Recheck the mounted inode because
+        // a concurrent image rebuild may have replaced that path during staging.
+        crate::rootfs::validate_toolstore_image(&jail.join(JAIL_ROOTFS))
+            .map_err(FirecrackerError::Internal)?;
+        if require_scratch {
+            crate::rootfs::validate_scratch_image(&jail.join(JAIL_ROOTFS))
+                .map_err(FirecrackerError::Internal)?;
+        }
+        let target = jail.join(JAIL_TOOLSTORE);
+        std::fs::File::create_new(&target)
+            .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+        toolstore
+            .bind_into(&target)
+            .map_err(|error| FirecrackerError::Internal(error.to_string()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (toolstore, jail, require_scratch);
+        Err(FirecrackerError::Internal(
+            "toolstores require Linux".to_owned(),
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn bind_mount(source: &Path, target: &Path) -> Result<(), FirecrackerError> {
     use std::process::Command;
@@ -1518,7 +1595,12 @@ fn teardown_jail_sync(instance_dir: &Path) -> bool {
     // snapshot.mem is a restore room's bind-mounted shared memory inode; in a
     // boot room's jail it's at most a plain file, where the unmount fails
     // harmlessly ("not mounted") and dir removal proceeds.
-    for name in [JAIL_KERNEL, JAIL_ROOTFS, crate::snapshot::SNAPSHOT_MEM_FILE] {
+    for name in [
+        JAIL_KERNEL,
+        JAIL_ROOTFS,
+        crate::snapshot::SNAPSHOT_MEM_FILE,
+        JAIL_TOOLSTORE,
+    ] {
         let target = jail_root.join(name);
         if target.exists() {
             if let Err(e) = unmount_settled(&target) {
@@ -1707,6 +1789,7 @@ fn rootfs_drive_payload(rootfs: &Path, readonly_rootfs: bool) -> serde_json::Val
 /// `configure_vm` walks through the Firecracker REST calls before
 /// `InstanceStart`.
 struct VmSpec<'a> {
+    toolstore: bool,
     resources: Resources,
     kernel: &'a Path,
     rootfs_drive: &'a serde_json::Value,
@@ -1745,6 +1828,18 @@ async fn configure_vm(
         .await?;
     }
 
+    if spec.toolstore {
+        transport::api_put(
+            socket,
+            "/drives/toolstore",
+            &serde_json::json!({
+                "drive_id": "toolstore", "path_on_host": format!("/{JAIL_TOOLSTORE}"),
+                "is_root_device": false, "is_read_only": true,
+            }),
+            config,
+        )
+        .await?;
+    }
     transport::api_put(
         socket,
         "/machine-config",
@@ -2549,6 +2644,75 @@ mod tests {
         clippy::panic,
         reason = "test module"
     )]
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires root plus ROOMS_TEST_TOOLSTORE, ROOMS_TEST_TOOLSTORE_IMAGE and ROOMS_TEST_OLD_IMAGE fixtures"]
+    fn toolstore_staging_rechecks_rootfs_after_preflight_path_replacement() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+        use std::path::PathBuf;
+
+        let tools = crate::toolstore::Toolstore::open(&PathBuf::from(std::env::var(
+            "ROOMS_TEST_TOOLSTORE",
+        )?))?;
+        let image = PathBuf::from(std::env::var("ROOMS_TEST_TOOLSTORE_IMAGE")?);
+        let old_image = PathBuf::from(std::env::var("ROOMS_TEST_OLD_IMAGE")?);
+        // A capability-only filesystem fixture; it is never booted.
+        let fixture = tempfile::tempdir()?;
+        let tree = fixture.path().join("tree");
+        std::fs::create_dir_all(tree.join("sbin"))?;
+        std::fs::write(
+            tree.join("sbin/overlay-init"),
+            b"#!/bin/sh\n# rooms-toolstore-v1\n",
+        )?;
+        let no_scratch = fixture.path().join("no-scratch.ext4");
+        std::fs::File::create_new(&no_scratch)?.set_len(16 * 1024 * 1024)?;
+        let made = std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-d"])
+            .arg(&tree)
+            .arg(&no_scratch)
+            .output()?;
+        assert!(made.status.success(), "{made:?}");
+        for (replacement, require_scratch, rejected) in [
+            (&image, false, false),
+            (&image, true, false),
+            (&old_image, false, true),
+            (&no_scratch, false, false),
+            (&no_scratch, true, true),
+        ] {
+            let temporary = tempfile::tempdir()?;
+            let source = temporary.path().join("image");
+            symlink(&image, &source)?;
+            assert!(crate::rootfs::validate_toolstore_image(&source).is_ok());
+            if require_scratch {
+                assert!(crate::rootfs::validate_scratch_image(&source).is_ok());
+            }
+            std::fs::remove_file(&source)?;
+            symlink(replacement, &source)?;
+            let kernel = temporary.path().join("kernel");
+            std::fs::write(&kernel, b"not booted by this staging test")?;
+            let chroot = temporary.path().join("jailer");
+            let jail = super::jail_root_dir(&chroot, "probe");
+            let room = temporary.path().join("room");
+            std::fs::create_dir(&room)?;
+            let mut guard = RoomGuard::new(
+                room,
+                jail.join(super::JAIL_API_SOCK),
+                &RoomsConfig::default(),
+            );
+            guard.set_jail_instance_dir(super::jail_instance_dir(&chroot, "probe"));
+            super::stage_jail_sync(&chroot, "probe", &kernel, &source, 0, 0)?;
+            let result = super::stage_toolstore(&tools, &jail, require_scratch);
+            assert_eq!(result.is_err(), rejected, "{result:?}");
+            assert_eq!(jail.join(super::JAIL_TOOLSTORE).exists(), !rejected);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("requires an image rebuilt"));
+            }
+            drop(guard);
+            assert!(!jail.exists(), "staging left mounted jail resources");
+        }
+        Ok(())
+    }
 
     #[test]
     fn write_room_meta_base_records_provisioning_provenance() {
@@ -3434,6 +3598,7 @@ mod e2e_tests {
         let egress_plan = crate::egress::Plan::Observe;
         let req = BootRequest {
             resources: crate::firecracker::Resources::default(),
+            toolstore: None,
             kernel: &kernel,
             rootfs: &rootfs,
             network: None,
