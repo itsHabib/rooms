@@ -504,10 +504,48 @@ pub struct JailerLaunchPlan {
     pub rootfs_path_in_jail: PathBuf,
 }
 
-/// Inputs to [`boot`]. Bundled because the room id + slot join the kernel /
-/// rootfs / network / descriptor already threaded through — past the argument
-/// cap as positionals.
+/// Resource limits for a cold room; snapshots retain their recorded machine shape.
+#[derive(Debug, Clone, Copy)]
+pub struct Resources {
+    pub cpus: u8,
+    pub memory_mib: u32,
+    /// Private ext4 overlay capacity; absent keeps the existing tmpfs overlay.
+    pub disk_gib: Option<u32>,
+}
+
+impl Default for Resources {
+    fn default() -> Self {
+        Self {
+            cpus: 1,
+            memory_mib: 256,
+            disk_gib: None,
+        }
+    }
+}
+
+impl Resources {
+    // Keep these limits aligned with the cold-run clap value parsers.
+    fn validate(self, readonly: bool, base: bool) -> Result<(), FirecrackerError> {
+        if !(1..=32).contains(&self.cpus)
+            || !(128..=65536).contains(&self.memory_mib)
+            || self.disk_gib.is_some_and(|gib| !(1..=1024).contains(&gib))
+        {
+            return Err(FirecrackerError::Internal(
+                "invalid room resources".to_owned(),
+            ));
+        }
+        if self.disk_gib.is_some() && (!readonly || base) {
+            return Err(FirecrackerError::Internal(
+                "scratch requires a read-only cold room".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Inputs to a cold boot, including the claimed slot transferred to its guard.
 pub struct BootRequest<'a> {
+    pub resources: Resources,
     pub kernel: &'a Path,
     pub rootfs: &'a Path,
     /// Guest network wiring; `None` boots with no NIC (the e2e reachability path).
@@ -549,15 +587,37 @@ pub async fn boot(
     req: &BootRequest<'_>,
     config: &RoomsConfig,
 ) -> Result<BootedVm, FirecrackerError> {
+    boot_with_cancellation(req, config, std::future::pending()).await
+}
+
+/// Cancel after any in-flight jail staging finishes, then unwind through the
+/// same guard.
+///
+/// Staging cannot be dropped: its blocking worker may still mount
+/// files after an early cleanup. Formatting, API waits and VMM setup can abort.
+#[allow(
+    clippy::too_many_lines,
+    reason = "jail staging must finish before cancellation can unwind its guard; keep that ownership boundary visible"
+)]
+pub async fn boot_with_cancellation<C: std::future::Future<Output = ()>>(
+    req: &BootRequest<'_>,
+    config: &RoomsConfig,
+    cancellation: C,
+) -> Result<BootedVm, FirecrackerError> {
+    tokio::pin!(cancellation);
     let state_base = config
         .resolved_state_base()
         .ok_or(FirecrackerError::HomeUnset)?;
     let mut pending_slot = req
         .slot
         .map(|slot| PendingSlotClaim::new(state_base.clone(), slot, req.room_id));
+    req.resources.validate(req.readonly_rootfs, req.base)?;
 
-    let (firecracker_binary, jailer_binary, fc_uid, fc_gid) =
-        resolve_boot_dependencies(config).await?;
+    let (firecracker_binary, jailer_binary, fc_uid, fc_gid) = tokio::select! {
+        biased;
+        () = &mut cancellation => return Err(boot_cancelled()),
+        result = resolve_boot_dependencies(config) => result?,
+    };
 
     let room_id_str = req.room_id.to_owned();
     let per_room_dir = state_base.join(&room_id_str);
@@ -583,81 +643,134 @@ pub async fn boot(
         fc_gid,
     )
     .await?;
-    if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
-        return Err(FirecrackerError::Internal(
-            "guard and staged jail layout paths diverged".to_owned(),
-        ));
-    }
-    let log_path = per_room_dir.join("firecracker.log");
+    let boot = async move {
+        if jail_layout.instance_dir != instance_dir || jail_layout.host_socket != socket {
+            return Err(FirecrackerError::Internal(
+                "guard and staged jail layout paths diverged".to_owned(),
+            ));
+        }
+        if let Some(gib) = req.resources.disk_gib {
+            prepare_scratch(
+                &jail_root_dir(&chroot_base, &room_id_str),
+                gib,
+                fc_uid,
+                fc_gid,
+            )
+            .await?;
+        }
+        let log_path = per_room_dir.join("firecracker.log");
 
-    // Claim custody moved to the guard before jail staging. Create the TAP only
-    // after that handoff, so every later failure unwinds through resource-aware
-    // cleanup and can retain the claim when teardown is incomplete.
-    if let Some(slot) = req.slot {
-        create_slot_tap(slot, None)?;
-    }
+        // Claim custody moved to the guard before jail staging. Create the TAP only
+        // after that handoff, so every later failure unwinds through resource-aware
+        // cleanup and can retain the claim when teardown is incomplete.
+        if let Some(slot) = req.slot {
+            create_slot_tap(slot, None)?;
+        }
 
-    // Start the egress capture the moment the tap exists and before the VMM —
-    // so no guest packet predates it — but after the guard owns the tap, so an
-    // unwind still deletes the interface. A start failure here is fatal: the
-    // caller asked to be witnessed, and running unwitnessed would be worse. A
-    // witness on a slotless (legacy shared-tap) boot fails closed for the same
-    // reason — the shared tap carries other rooms' traffic, so it isn't a valid
-    // per-room witness surface.
-    let witness = match (req.witness, req.slot) {
+        // Start the egress capture the moment the tap exists and before the VMM —
+        // so no guest packet predates it — but after the guard owns the tap, so an
+        // unwind still deletes the interface. A start failure here is fatal: the
+        // caller asked to be witnessed, and running unwitnessed would be worse. A
+        // witness on a slotless (legacy shared-tap) boot fails closed for the same
+        // reason — the shared tap carries other rooms' traffic, so it isn't a valid
+        // per-room witness surface.
+        let witness = boot_witness(req, &per_room_dir).await?;
+
+        // Install the per-room egress chain once the tap exists and before the VMM,
+        // so it is fail-closed before the guest can transmit — the same posture as
+        // the witness start, and the guard (already owning the tap) unwinds it via
+        // `release_tap` on any failure.
+        install_egress(req.egress, req.slot)?;
+
+        let secrets_delivery =
+            bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
+        let provisioning_delivery = bind_provisioning_listener(
+            req.provisioning,
+            &chroot_base,
+            &room_id_str,
+            fc_uid,
+            fc_gid,
+        )?;
+
+        let launch = build_jailer_launch_plan(&JailerLaunchInput {
+            jailer_binary: &jailer_binary,
+            firecracker_binary: &firecracker_binary,
+            chroot_base: &chroot_base,
+            room_id: &room_id_str,
+            fc_uid,
+            fc_gid,
+            layout: &jail_layout,
+            network_namespace: None,
+        });
+
+        let log_handles = open_log_file(&log_path).await?;
+        let mut child = spawn_jailer(&launch, log_handles)?;
+        guard.set_child(&child);
+        write_room_meta(
+            &per_room_dir,
+            &room_id_str,
+            req.descriptor,
+            child.id(),
+            req.slot.cloned(),
+            req.base,
+        )?;
+
+        wait_for_socket(
+            &socket,
+            config.api_socket_timeout,
+            &mut child,
+            Some(&log_path),
+        )
+        .await?;
+
+        configure_boot(&socket, req, &launch, config).await?;
+
+        Ok(BootedVm {
+            witness,
+            secrets_delivery,
+            provisioning_delivery,
+            guard,
+            child,
+        })
+    };
+    tokio::select! {
+        biased;
+        () = &mut cancellation => Err(boot_cancelled()),
+        result = boot => result,
+    }
+}
+
+fn boot_cancelled() -> FirecrackerError {
+    FirecrackerError::Internal("boot cancelled before handoff".to_owned())
+}
+
+async fn boot_witness(
+    req: &BootRequest<'_>,
+    per_room_dir: &Path,
+) -> Result<Option<Capture>, FirecrackerError> {
+    Ok(match (req.witness, req.slot) {
         (false, _) => None,
-        (true, Some(slot)) => Some(start_witness(&slot.tap, &per_room_dir).await?),
+        (true, Some(slot)) => Some(start_witness(&slot.tap, per_room_dir).await?),
         (true, None) => return Err(FirecrackerError::Internal(
             "witness: requires a pool slot (the per-room tap); refusing to witness the shared tap"
                 .to_owned(),
         )),
-    };
+    })
+}
 
-    // Install the per-room egress chain once the tap exists and before the VMM,
-    // so it is fail-closed before the guest can transmit — the same posture as
-    // the witness start, and the guard (already owning the tap) unwinds it via
-    // `release_tap` on any failure.
-    install_egress(req.egress, req.slot)?;
-
-    let secrets_delivery =
-        bind_secrets_listener(req.secrets, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
-    let provisioning_delivery =
-        bind_provisioning_listener(req.provisioning, &chroot_base, &room_id_str, fc_uid, fc_gid)?;
-
-    let launch = build_jailer_launch_plan(&JailerLaunchInput {
-        jailer_binary: &jailer_binary,
-        firecracker_binary: &firecracker_binary,
-        chroot_base: &chroot_base,
-        room_id: &room_id_str,
-        fc_uid,
-        fc_gid,
-        layout: &jail_layout,
-        network_namespace: None,
-    });
-
-    let log_handles = open_log_file(&log_path).await?;
-    let mut child = spawn_jailer(&launch, log_handles)?;
-    guard.set_child(&child);
-    write_room_meta(
-        &per_room_dir,
-        &room_id_str,
-        req.descriptor,
-        child.id(),
-        req.slot.cloned(),
-        req.base,
-    )?;
-
-    wait_for_socket(
-        &socket,
-        config.api_socket_timeout,
-        &mut child,
-        Some(&log_path),
-    )
-    .await?;
-
-    let boot_args = build_boot_args(req.network, req.readonly_rootfs, req.base);
+async fn configure_boot(
+    socket: &Path,
+    req: &BootRequest<'_>,
+    launch: &JailerLaunchPlan,
+    config: &RoomsConfig,
+) -> Result<(), FirecrackerError> {
+    let mut boot_args = build_boot_args(req.network, req.readonly_rootfs, req.base);
+    if req.resources.disk_gib.is_some() {
+        boot_args.push_str(" rooms.scratch=1");
+    }
     let rootfs_drive = rootfs_drive_payload(&launch.rootfs_path_in_jail, req.readonly_rootfs);
     let spec = VmSpec {
+        resources: req.resources,
         kernel: &launch.kernel_path_in_jail,
         rootfs_drive: &rootfs_drive,
         network: req.network,
@@ -667,16 +780,47 @@ pub async fn boot(
         // deliver. Either forces the device on.
         vsock: req.secrets.is_some() || req.base,
     };
-    configure_vm(&socket, &spec, config).await?;
-
+    configure_vm(socket, &spec, config).await?;
     info!("microVM booted");
-    Ok(BootedVm {
-        witness,
-        secrets_delivery,
-        provisioning_delivery,
-        guard,
-        child,
-    })
+    Ok(())
+}
+
+/// The jail guard owns this file from creation through teardown, including a
+/// failed format or boot. Sparse capacity limits guest writes without eagerly
+/// allocating the entire disk on the host.
+async fn prepare_scratch(
+    jail: &Path,
+    gib: u32,
+    uid: u32,
+    gid: u32,
+) -> Result<(), FirecrackerError> {
+    let path = jail.join("scratch.ext4");
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await?;
+    file.set_len(u64::from(gib) * 1024 * 1024 * 1024).await?;
+    drop(file);
+    let output = Command::new("mkfs.ext4")
+        .args(["-q", "-F", "-m", "0"])
+        .arg(&path)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(FirecrackerError::Internal(format!(
+            "format scratch disk: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{chown, PermissionsExt};
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        chown(&path, Some(uid), Some(gid))?;
+    }
+    Ok(())
 }
 
 async fn resolve_boot_dependencies(
@@ -1563,6 +1707,7 @@ fn rootfs_drive_payload(rootfs: &Path, readonly_rootfs: bool) -> serde_json::Val
 /// `configure_vm` walks through the Firecracker REST calls before
 /// `InstanceStart`.
 struct VmSpec<'a> {
+    resources: Resources,
     kernel: &'a Path,
     rootfs_drive: &'a serde_json::Value,
     network: Option<&'a NetworkConfig>,
@@ -1587,13 +1732,25 @@ async fn configure_vm(
     .await?;
 
     transport::api_put(socket, "/drives/rootfs", spec.rootfs_drive, config).await?;
+    if spec.resources.disk_gib.is_some() {
+        transport::api_put(
+            socket,
+            "/drives/scratch",
+            &serde_json::json!({
+                "drive_id": "scratch", "path_on_host": "/scratch.ext4",
+                "is_root_device": false, "is_read_only": false,
+            }),
+            config,
+        )
+        .await?;
+    }
 
     transport::api_put(
         socket,
         "/machine-config",
         &serde_json::json!({
-            "vcpu_count": 1,
-            "mem_size_mib": 256,
+            "vcpu_count": spec.resources.cpus,
+            "mem_size_mib": spec.resources.memory_mib,
         }),
         config,
     )
@@ -3276,6 +3433,7 @@ mod e2e_tests {
         let descriptor = crate::room::RoomDescriptor::default();
         let egress_plan = crate::egress::Plan::Observe;
         let req = BootRequest {
+            resources: crate::firecracker::Resources::default(),
             kernel: &kernel,
             rootfs: &rootfs,
             network: None,

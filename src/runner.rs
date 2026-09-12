@@ -51,6 +51,12 @@ const WORKSPACE_UNWRITABLE_MARKER: &str = "ROOMS_WORKSPACE_UNWRITABLE";
 pub enum Runner {
     /// Run the operator's literal command (the existing `--command` path).
     Command(String),
+    /// Clone a repository, run a command at its pinned base, and export edits.
+    RepositoryCommand {
+        command: String,
+        repo_url: String,
+        base_sha: String,
+    },
     /// Drive the baked `cursor-runner.js` one-shot against `/workspace/repo`.
     Cursor(CursorRequest),
 }
@@ -59,7 +65,9 @@ impl Runner {
     /// The argv recorded in `result.json`'s `command` field.
     pub fn command_argv(&self) -> Vec<String> {
         match self {
-            Self::Command(command) => guest_command_argv(command),
+            Self::Command(command) | Self::RepositoryCommand { command, .. } => {
+                guest_command_argv(command)
+            }
             Self::Cursor(_) => cursor_command_argv(),
         }
     }
@@ -324,6 +332,11 @@ pub async fn exec(
 ) -> Result<GuestExecOutcome> {
     match runner {
         Runner::Command(command) => exec_in_guest(target, key_path, command, config).await,
+        Runner::RepositoryCommand {
+            command,
+            repo_url,
+            base_sha,
+        } => exec_repository_command(target, key_path, command, repo_url, base_sha, config).await,
         Runner::Cursor(request) => exec_cursor_in_guest(target, key_path, request, config).await,
     }
 }
@@ -367,7 +380,12 @@ pub async fn collect_out_to_host(
     }
     // The archive is guest-controlled: reject unsafe members before extracting.
     ensure_tar_regular_only(&ssh_out.stdout).await?;
-    let extract = run_host_tar(&ssh_out.stdout, &["-xf", "-", "-C"], Some(host_dir)).await?;
+    let extract = run_host_tar(
+        &ssh_out.stdout,
+        &["--no-same-owner", "-xf", "-", "-C"],
+        Some(host_dir),
+    )
+    .await?;
     if !extract.status.success() {
         let stderr = String::from_utf8_lossy(&extract.stderr);
         anyhow::bail!(
@@ -400,6 +418,28 @@ find "$UP" \( -type f -o -type l -o -type b -o -type p -o -type s -o -type c \) 
   elif [ -e "$LOW/$rel" ] || [ -L "$LOW/$rel" ]; then printf "M\t%s\0" "$rel"
   else printf "A\t%s\0" "$rel"; fi
 done'"#;
+
+/// Return finalized output to the invoking sudo user, without following links.
+/// Direct root invocations retain root ownership.
+pub async fn return_artifact_ownership(dir: &Path) -> Result<()> {
+    let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) else {
+        return Ok(());
+    };
+    let owner = format!("{}:{}", uid.parse::<u32>()?, gid.parse::<u32>()?);
+    let output = Command::new("chown")
+        .args(["-hR", "--", &owner])
+        .arg(dir)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "return --out ownership: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
 
 /// Enumerate the overlay change set in the guest and write `changeset.json` into
 /// `host_dir`. Best-effort and read-only: callers run this after
@@ -549,6 +589,43 @@ pub async fn exec_in_guest(
     );
     write_guest_result_json_with_timeout(target, key_path, &result, connect_timeout).await?;
 
+    Ok(GuestExecOutcome {
+        exit_code: run.exit_code,
+        status,
+        started_at: run.started_at,
+        ended_at: run.ended_at,
+        push_error: None,
+    })
+}
+
+async fn exec_repository_command(
+    target: GuestTarget<'_>,
+    key: &Path,
+    command: &str,
+    repo: &str,
+    base: &str,
+    config: &RoomsConfig,
+) -> Result<GuestExecOutcome> {
+    let timeout = config.guest_reach_timeout;
+    clone_repo_in_guest(target, key, repo, base, timeout).await?;
+    let inner = format!(
+        "cd /workspace/repo && bash -c {}",
+        shell_single_quote(command)
+    );
+    let run = run_wrapped(target, key, &inner, timeout).await?;
+    let patch = generate_result_patch(target, key, timeout).await;
+    let status = ResultJson::status_from_exit_code(run.exit_code);
+    let mut result = ResultJson::from_exec(
+        run.exit_code,
+        status,
+        run.started_at,
+        run.ended_at,
+        guest_command_argv(command),
+    );
+    result.patch_path = patch.as_ref().ok().map(|()| "result.patch".to_owned());
+    write_guest_result_json_with_timeout(target, key, &result, timeout).await?;
+    // Preserve the command outcome before reporting an incomplete patch export.
+    patch?;
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
         status,
@@ -766,8 +843,9 @@ async fn clone_repo_in_guest(
     let url = shell_single_quote(repo_url);
     let sha = shell_single_quote(base_sha);
     let remote = format!(
-        "rm -rf /workspace/repo && git clone {url} /workspace/repo && \
-         git -C /workspace/repo checkout {sha} && \
+        "rm -rf /workspace/repo && git clone -- {url} /workspace/repo && \
+         base=$(git -C /workspace/repo rev-parse --verify --end-of-options {sha}^{{commit}}) && \
+         git -C /workspace/repo checkout --detach \"$base\" && \
          git -C /workspace/repo update-ref refs/rooms/base HEAD"
     );
     run_setup_ssh(
@@ -871,7 +949,7 @@ fn run_git(cwd: &Path, args: &[&str], action: &str) -> Result<(), FirecrackerErr
     )))
 }
 
-fn repo_url_has_userinfo(repo: &str) -> bool {
+pub fn repo_url_has_userinfo(repo: &str) -> bool {
     repo.split_once("://")
         .and_then(|(_, rest)| rest.split('/').next())
         .is_some_and(|authority| authority.contains('@'))
@@ -925,8 +1003,8 @@ async fn generate_result_patch(
     key_path: &Path,
     connect_timeout: Duration,
 ) -> Result<()> {
-    let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
-         git diff --cached refs/rooms/base > /workspace/out/result.patch 2>/dev/null || true";
+    let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A && \
+         git diff --binary --cached refs/rooms/base > /workspace/out/result.patch";
     run_setup_ssh(
         target,
         key_path,
@@ -1000,8 +1078,7 @@ pub async fn ensure_guest_artifact_skeleton(
     key_path: &Path,
 ) -> Result<()> {
     let remote = "mkdir -p /workspace/out/logs \
-         && : > /workspace/out/logs/stdout.log \
-         && : > /workspace/out/logs/stderr.log";
+         && touch /workspace/out/logs/stdout.log /workspace/out/logs/stderr.log";
     run_setup_ssh(
         target,
         key_path,

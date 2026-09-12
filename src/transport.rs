@@ -57,6 +57,7 @@ async fn api_request(
         .arg("--show-error")
         .arg("--max-time")
         .arg(timeout.as_secs_f64().to_string())
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| TransportError::CurlFailed(e.to_string()))?;

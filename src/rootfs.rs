@@ -105,6 +105,28 @@ fn kernel_matches_host_arch(header: &[u8; 60]) -> bool {
     }
 }
 
+/// Older overlay-init scripts silently ignore a scratch drive. Reject them
+/// before claiming a room instead of giving the caller an unexpected RAM disk.
+pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
+    let init = debugfs(path, "cat /sbin/overlay-init")?;
+    if !init.contains("rooms.scratch=1") {
+        return Err(
+            "--disk requires an image rebuilt with the current scripts/build-rootfs-alpine.sh"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Check that an image has the entry point needed for a read-only overlay boot.
+pub fn validate_overlay_image(path: &Path) -> Result<(), String> {
+    let overlay = debugfs(path, "stat /sbin/overlay-init")?;
+    if overlay.contains("File not found") || !overlay.contains("Inode:") {
+        return Err(format!("image {} lacks /sbin/overlay-init", path.display()));
+    }
+    Ok(())
+}
+
 /// Fail-closed admission for a snapshot-capable base image.
 ///
 /// The immutable lower layer must contain the overlay entry point and must not
@@ -114,13 +136,7 @@ pub fn validate_snapshot_base_image(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     crate::inode_seal::require(path, "snapshot base image").map_err(|error| error.to_string())?;
 
-    let overlay = debugfs(path, "stat /sbin/overlay-init")?;
-    if overlay.contains("File not found") || !overlay.contains("Inode:") {
-        return Err(format!(
-            "snapshot base image {} lacks /sbin/overlay-init",
-            path.display()
-        ));
-    }
+    validate_overlay_image(path)?;
 
     let ssh_dir = debugfs(path, "ls -p /etc/ssh")?;
     if let Some(key) = baked_host_private_key(&ssh_dir) {
@@ -140,7 +156,7 @@ fn debugfs(path: &Path, request: &str) -> Result<String, String> {
         .map_err(|e| debugfs_spawn_error(&e))?;
     if !output.status.success() {
         return Err(format!(
-            "inspect snapshot base image {} ({request}): {}",
+            "inspect image {} ({request}): {}",
             path.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
@@ -150,9 +166,9 @@ fn debugfs(path: &Path, request: &str) -> Result<String, String> {
 
 fn debugfs_spawn_error(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
-        return "snapshot base admission requires debugfs; install e2fsprogs (for example: apt install e2fsprogs)".to_owned();
+        return "image admission requires debugfs; install e2fsprogs (for example: apt install e2fsprogs)".to_owned();
     }
-    format!("inspect snapshot base image with debugfs: {error}")
+    format!("inspect image with debugfs: {error}")
 }
 
 fn baked_host_private_key(listing: &str) -> Option<&str> {
