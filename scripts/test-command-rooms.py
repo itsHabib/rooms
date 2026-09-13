@@ -191,6 +191,9 @@ echo DISK_AND_REPO_OK
     assert (out / 'private/value').read_text().strip() == 'readable'
     assert (out / 'private/value').stat().st_mode & 0o600 == 0o600
     assert (out / 'private').stat().st_mode & 0o700 == 0o700
+    out, result = run_case(args, 'without-guest-sudo',
+                           'sudo mv /usr/bin/sudo /usr/bin/sudo.disabled; echo NO_SUDO_OK', 0)
+    assert 'NO_SUDO_OK' in (out / 'logs/stdout.log').read_text()
     partial = 'echo PARTIAL_STDOUT; echo PARTIAL_STDERR >&2; sleep 120'
     out, result = run_case(args, 'timeout', partial, 124, ['--max-wall', '30s'])
     assert result['status'] == 'timed_out'
