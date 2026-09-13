@@ -540,7 +540,7 @@ async fn drive_to_ready(
     let room_dir = config
         .room_dir(&intent.room_id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve room dir"))?;
-    let (fc_uid, fc_gid) = firecracker::lookup_firecracker_ids()?;
+    let (fc_uid, fc_gid) = firecracker::lookup_firecracker_ids_async().await?;
 
     let mut witness_capture = None;
     let mut resume_delivery = None;
