@@ -2650,7 +2650,7 @@ mod tests {
     #[test]
     #[ignore = "requires root plus ROOMS_TEST_TOOLSTORE, ROOMS_TEST_TOOLSTORE_IMAGE and ROOMS_TEST_OLD_IMAGE fixtures"]
     fn toolstore_staging_rechecks_rootfs_after_preflight_path_replacement() -> anyhow::Result<()> {
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{symlink, PermissionsExt};
         use std::path::PathBuf;
 
         let tools = crate::toolstore::Toolstore::open(&PathBuf::from(std::env::var(
@@ -2665,6 +2665,10 @@ mod tests {
         std::fs::write(
             tree.join("sbin/overlay-init"),
             b"#!/bin/sh\n# rooms-toolstore-v1\n",
+        )?;
+        std::fs::set_permissions(
+            tree.join("sbin/overlay-init"),
+            std::fs::Permissions::from_mode(0o755),
         )?;
         let no_scratch = fixture.path().join("no-scratch.ext4");
         std::fs::File::create_new(&no_scratch)?.set_len(16 * 1024 * 1024)?;
