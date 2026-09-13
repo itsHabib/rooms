@@ -46,3 +46,13 @@ while the already-completed guest's result.json remained succeeded/0. Both earli
 boot-cancellation probes and an ordinary completed command passed again. A fresh
 64 MiB ext4 fixture with no overlay-init was rejected before a slot claim in both
 --disk and --repo-without-disk modes. `make check` remained green.
+
+
+Cloud follow-up (2026-09-13): the pinned repository completed compilation on an
+x86_64 nested-KVM host, with 467/468 tests passing. The remaining test could not
+spawn `ssh`: the image included the server but omitted its client. Installing
+`openssh-client-default` in a fresh guest produced 468/468 passes. The builder
+now includes the client and checks `ssh -V` before publishing; the boot smoke
+also executes it. This changes a guest prerequisite, not SSH server policy.
+See PR #121 cloud validation comment 5651397602 for the original evidence and
+its resource/performance boundaries.
