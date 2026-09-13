@@ -857,9 +857,7 @@ async fn resolve_boot_dependencies(
     check_kvm()?;
     let firecracker_binary = resolve_firecracker_binary(config)?;
     let jailer_binary = resolve_jailer_binary(config)?;
-    let (fc_uid, fc_gid) = tokio::task::spawn_blocking(lookup_firecracker_ids)
-        .await
-        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))??;
+    let (fc_uid, fc_gid) = lookup_firecracker_ids_async().await?;
     Ok((firecracker_binary, jailer_binary, fc_uid, fc_gid))
 }
 
@@ -1356,6 +1354,33 @@ pub fn lookup_firecracker_ids() -> Result<(u32, u32), FirecrackerError> {
     Err(FirecrackerError::FirecrackerUserMissing {
         user: FIRECRACKER_USER.to_owned(),
     })
+}
+
+/// Query NSS without leaving an unabortable blocking worker behind on cancellation.
+#[cfg(unix)]
+pub async fn lookup_firecracker_ids_async() -> Result<(u32, u32), FirecrackerError> {
+    let output = Command::new("getent")
+        .args(["passwd", FIRECRACKER_USER])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(FirecrackerError::Io)?;
+    if !output.status.success() {
+        return Err(FirecrackerError::FirecrackerUserMissing {
+            user: FIRECRACKER_USER.to_owned(),
+        });
+    }
+    parse_getent_passwd(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        FirecrackerError::FirecrackerUserMissing {
+            user: FIRECRACKER_USER.to_owned(),
+        }
+    })
+}
+
+/// Non-Unix hosts cannot provision the Firecracker jailer user.
+#[cfg(not(unix))]
+pub async fn lookup_firecracker_ids_async() -> Result<(u32, u32), FirecrackerError> {
+    lookup_firecracker_ids()
 }
 
 /// Parse `getent passwd` output into `(uid, gid)`.
@@ -2288,11 +2313,8 @@ pub async fn spawn_restore(
     check_kvm()?;
     let firecracker_binary = resolve_firecracker_binary(config)?;
     let jailer_binary = resolve_jailer_binary(config)?;
-    // spawn_blocking to match boot(): getent is fast on a local passwd db but
-    // can stall on a slow NSS backend (LDAP), which must not block the runtime.
-    let (fc_uid, fc_gid) = tokio::task::spawn_blocking(lookup_firecracker_ids)
-        .await
-        .map_err(|e| FirecrackerError::Internal(format!("spawn_blocking panicked: {e}")))??;
+    // A slow NSS backend must stay cancellable along with the boot operation.
+    let (fc_uid, fc_gid) = lookup_firecracker_ids_async().await?;
 
     let per_room_dir = config
         .room_dir(req.room_id)

@@ -60,7 +60,7 @@ def cancellation_probe(args, program, witness=False, nested=False):
     tools.mkdir()
     marker = tools / 'started'
     formatter = tools / program.removesuffix('-stall')
-    finish = {'mkfs.ext4': 'exec sleep 120', 'chmod': 'exec sleep 120', 'curl': 'exec sleep 120',
+    finish = {'getent': 'exec sleep 120', 'mkfs.ext4': 'exec sleep 120', 'chmod': 'exec sleep 120', 'curl': 'exec sleep 120',
               'chown-stall': 'exec sleep 120', 'chown': 'sleep 2; exec /usr/bin/chown "$@"'}[program]
     if nested:
         first = shlex.quote(str(tools / 'first-call'))
@@ -322,6 +322,7 @@ echo DISK_AND_REPO_OK
     assert (partial_out / 'changeset.json').exists()
     for path in [partial_out, *partial_out.rglob('*')]:
         assert path.lstat().st_uid == int(os.environ.get('SUDO_UID', os.getuid())), path
+    cancellation_probe(args, 'getent')
     cancellation_probe(args, 'mkfs.ext4')
     cancellation_probe(args, 'curl')
     cancellation_probe(args, 'chown')
