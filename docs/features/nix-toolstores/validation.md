@@ -200,3 +200,33 @@ library test binary under sudo with those variables and
 `firecracker::tests::toolstore_staging_rechecks_rootfs_after_preflight_path_replacement
 --ignored --exact`. It reads the fixtures and mounts them only inside its own
 temporary jail; it never changes their bytes or seals.
+
+## Bounded cloud workload — 2026-09-13
+
+At `b6bf0ce062590f71b14fd34fe525bbe66002ae4e`, an Ubuntu 24.04 x86_64
+GCE n2-standard-8 host (8 vCPU, 32 GiB, nested KVM) passed all nine checked-in
+toolstore cases. One/two/four concurrent polyglot rooms completed in roughly
+21.5/22.1/27.1 seconds per room. Three fresh-cache Go builds had native/guest
+medians of 8.203/9.332 seconds; guest end-to-end median was 20.029 seconds.
+Native controls used two CPUs and a 1 GiB cgroup limit; guest memory also included
+its OS. These small samples do not establish maximum density or bare-metal cost.
+
+The pinned repository `5bf1d4cafbd2c58fc8c95cd0c895539d70097258` passed 468
+library tests natively in 161.515 seconds. The original guest compiled and ran
+in 190.226 seconds, with 467 tests passing and one failing because `ssh` was
+absent. A fresh guest with Alpine's SSH client installed passed all 468 tests
+in 189.599 seconds. The base-image fix in #120 now installs the client and
+checks it before publication; later-head rebuilt-image validation is recorded
+on the PR. The original failure and earlier Lima timeouts remain evidence.
+
+SIGTERM after guest readiness returned 143 and completed collection/cleanup in
+1.017 seconds. Source hashes stayed unchanged; no VMMs, scratch disks or binds
+remained. Paid cloud resources were deleted. These results qualify this bounded
+workload, not production multitenancy, G1/G2, snapshots with toolstores, or the
+cause of the laptop slowdown. Full receipts: PR #121 comment 5651397602.
+
+The optional review concern about synchronous admission hashing remains a
+recorded startup-performance limitation: this single-run CLI hashes before its
+first await, signal-task registration and resource claim. No concurrent room
+work exists in that process during preflight. Revisit blocking-task offload if
+admission is reused by a long-lived concurrent service.
