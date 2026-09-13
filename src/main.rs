@@ -4431,11 +4431,11 @@ async fn run_workload(
         exit_code: outcome.exit_code,
         status: workload_status(outcome.status),
     });
-    if let Some(push_error) = outcome.push_error {
+    if let Some(post_run_error) = outcome.post_run_error {
         lifecycle.emit(&Event::WorkloadFailed {
-            error: push_error.clone(),
+            error: post_run_error.clone(),
         });
-        return Err(RoomsError::Internal(push_error));
+        return Err(RoomsError::Internal(post_run_error));
     }
     Ok(u8::try_from(outcome.exit_code).unwrap_or(2))
 }

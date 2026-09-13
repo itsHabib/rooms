@@ -201,6 +201,10 @@ echo DISK_AND_REPO_OK
     out, result = run_case(args, 'patch-failed',
                            'touch .git/index.lock; echo PATCH_LOCKED; exit 7', 2, repo, guest_exit=7)
     assert result['status'] == 'failed' and 'patch_path' not in result
+    history = events(args.out / 'patch-failed.ndjson')
+    exited = next(e for e in history if e['event'] == 'workload_exited')
+    failed = next(e for e in history if e['event'] == 'workload_failed')
+    assert exited['exit_code'] == 7 and exited['seq'] < failed['seq']
     assert 'PATCH_LOCKED' in (out / 'logs/stdout.log').read_text()
     partial_out = args.out / 'unsafe-tar'
     rejected = subprocess.run([str(args.rooms), 'run', '--image', str(args.image),
