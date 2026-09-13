@@ -84,5 +84,46 @@ class PublicationTests(unittest.TestCase):
         self.assertIn('.dir/value', files)
 
 
+class ClosureLinkTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.stage = Path(self.temporary.name)
+        self.bin = self.stage / 'store/a/bin'
+        self.bin.mkdir(parents=True)
+        library = self.stage / 'store/b/lib'
+        library.mkdir(parents=True)
+        (library / 'value').write_text('packaged')
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_internal_absolute_and_relative_links_are_preserved(self):
+        (self.bin / 'absolute').symlink_to('/nix/store/b/lib/value')
+        (self.bin / 'relative').symlink_to('../../b/lib/value')
+        builder.validate_closure_links(self.stage)
+        self.assertEqual(os.readlink(self.bin / 'absolute'), '/nix/store/b/lib/value')
+        self.assertEqual(os.readlink(self.bin / 'relative'), '../../b/lib/value')
+
+    def test_external_and_unpackaged_targets_are_rejected(self):
+        for target in ['/bin', '/usr/bin/cc', '../../../../bin/sh', '/nix/store/missing/bin/tool']:
+            link = self.bin / 'tool'
+            link.symlink_to(target)
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, 'closure symlink'):
+                builder.validate_closure_links(self.stage)
+            link.unlink()
+
+    def test_parent_components_follow_symlink_resolution(self):
+        (self.bin / 'alias').symlink_to('/nix/store')
+        (self.bin / 'tool').symlink_to('alias/../bin/sh')
+        with self.assertRaisesRegex(ValueError, 'closure symlink escapes'):
+            builder.validate_closure_links(self.stage)
+
+    def test_cycles_are_rejected_without_hanging(self):
+        (self.bin / 'one').symlink_to('two')
+        (self.bin / 'two').symlink_to('one')
+        with self.assertRaisesRegex(ValueError, 'cyclic or excessive'):
+            builder.validate_closure_links(self.stage)
+
+
 if __name__ == '__main__':
     unittest.main()

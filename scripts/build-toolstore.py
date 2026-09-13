@@ -5,10 +5,11 @@ Run as a normal Linux user with Nix, squashfs-tools and sudo access for
 chattr. Authenticate before building and again immediately before sealing. Nix evaluation/builds never run as root. Existing outputs are refused.
 """
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import shutil
 import signal
@@ -43,6 +44,51 @@ def validate_locked_inputs(lock):
     for node in json.loads(lock.read_text())['nodes'].values():
         reject_local_input(node.get('locked', {}))
         reject_local_input(node.get('original', {}))
+
+
+def validate_closure_link(stage, link, objects):
+    # Resolve in the packaged /nix namespace, never through the host's /bin or store.
+    pending = deque(link.relative_to(stage).parts)
+    resolved = []
+    hops = 0
+    while pending:
+        part = pending.popleft()
+        if part in ('', '.'):
+            continue
+        if part == '..' and len(resolved) <= 1:
+            raise ValueError(f'closure symlink escapes /nix/store: {link}')
+        if part == '..':
+            resolved.pop()
+            continue
+        resolved.append(part)
+        if resolved[0] != 'store' or (len(resolved) > 1 and resolved[1] not in objects):
+            raise ValueError(f'closure symlink target is not packaged: {link}')
+        current = stage.joinpath(*resolved)
+        if not current.is_symlink():
+            continue
+        hops += 1
+        if hops > 40:
+            raise ValueError(f'cyclic or excessive closure symlink chain: {link}')
+        target = PurePosixPath(os.readlink(current))
+        if target.is_absolute() and target.parts[1:3] != ('nix', 'store'):
+            raise ValueError(f'closure symlink escapes /nix/store: {link} -> {target}')
+        if target.is_absolute():
+            resolved.clear()
+            pending.extendleft(reversed(target.parts[2:]))
+            continue
+        resolved.pop()
+        pending.extendleft(reversed(target.parts))
+
+
+def validate_closure_links(stage):
+    store = stage / 'store'
+    objects = {path.name for path in store.iterdir()}
+    entries = (Path(directory) / name
+               for directory, directories, files in os.walk(store, followlinks=False)
+               for name in directories + files)
+    for link in entries:
+        if link.is_symlink():
+            validate_closure_link(stage, link, objects)
 
 
 def write_manifest(path, manifest):
@@ -155,6 +201,7 @@ def build(args, flake):
             source = store_path(value)
             # Preserve internal absolute Nix symlinks. Never dereference them.
             run(['cp', '-a', '--reflink=auto', '--', str(source), str(stage / 'store')])
+        validate_closure_links(stage)
         (stage / 'var/rooms').mkdir(parents=True)
         (stage / 'var/rooms/env').symlink_to(environment)
         publish = work / 'publish'
