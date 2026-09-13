@@ -374,15 +374,28 @@ pub async fn collect_out_to_host(
     key_path: &Path,
     host_dir: &Path,
 ) -> Result<()> {
+    let mut created = Vec::new();
+    let result = collect_out_to_host_observed(target, key_path, host_dir, &mut created).await;
+    created.retain(|path| path != host_dir);
+    let ownership = return_artifact_ownership(&created, false).await;
+    result?;
+    ownership
+}
+
+/// Collect output while retaining created directories for the caller's finalizer.
+pub async fn collect_out_to_host_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    host_dir: &Path,
+    created: &mut Vec<PathBuf>,
+) -> Result<()> {
     // Fresh dir per collection; a missing dir is fine, any other remove failure is fatal.
     match tokio::fs::remove_dir_all(host_dir).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("clear --out dir {}", host_dir.display())),
     }
-    tokio::fs::create_dir_all(host_dir)
-        .await
-        .with_context(|| format!("create --out dir {}", host_dir.display()))?;
+    create_output_directory(host_dir, created).await?;
     // Empty stream (not a `cd` error) when /workspace/out is absent; `.output()` drains both pipes.
     let ssh_out = ssh_command(
         target,
@@ -458,9 +471,31 @@ find "$UP" \( -type f -o -type l -o -type b -o -type p -o -type s -o -type c \) 
   else printf "A\t%s\0" "$rel"; fi
 done'"#;
 
+/// Create an output path, retaining only directories this invocation created.
+/// Callers can repair ownership even when creation fails partway through.
+pub async fn create_output_directory(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    let ancestors: Vec<_> = path
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    for dir in ancestors.into_iter().rev() {
+        match tokio::fs::create_dir(dir).await {
+            Ok(()) => created.push(dir.to_path_buf()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("create output {}", dir.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Return finalized output to the invoking sudo user, without following links.
 /// Direct root invocations retain root ownership.
 pub async fn return_artifact_ownership(paths: &[PathBuf], recursive: bool) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
     let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) else {
         return Ok(());
     };
