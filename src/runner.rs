@@ -396,6 +396,7 @@ pub async fn collect_out_to_host(
     let modes = Command::new("chmod")
         .args(["-R", "u+rwX,a-s", "--"])
         .arg(host_dir)
+        .kill_on_drop(true)
         .output()
         .await?;
     if !modes.status.success() {

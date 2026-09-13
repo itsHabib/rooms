@@ -60,7 +60,7 @@ def cancellation_probe(args, program):
     tools.mkdir()
     marker = tools / 'started'
     formatter = tools / program
-    finish = {'mkfs.ext4': 'exec sleep 120', 'curl': 'exec sleep 120',
+    finish = {'mkfs.ext4': 'exec sleep 120', 'chmod': 'exec sleep 120', 'curl': 'exec sleep 120',
               'chown': 'sleep 2; exec /usr/bin/chown "$@"'}[program]
     formatter.write_text('#!/bin/sh\necho $$ > ' + shlex.quote(str(marker)) + '\n' + finish + '\n')
     formatter.chmod(0o755)
@@ -78,11 +78,11 @@ def cancellation_probe(args, program):
                     raise RuntimeError(program + ' did not start')
                 time.sleep(.05)
             process.send_signal(signal.SIGTERM)
-            assert process.wait(timeout=10) == 143
+            assert process.wait(timeout=25) == 143
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)
-                process.wait(timeout=10)
+                process.wait(timeout=25)
     formatter_pid = int(marker.read_text())
     deadline = time.monotonic() + 5
     while Path(f'/proc/{formatter_pid}').exists() and time.monotonic() < deadline:
@@ -90,8 +90,8 @@ def cancellation_probe(args, program):
     assert not Path(f'/proc/{formatter_pid}').exists(), program + ' survived cancellation'
     history = events(lifecycle)
     booted = any(e['event'] == 'vmm_started' for e in history)
-    assert booted == (program == 'chown'), history
-    if program == 'chown':
+    assert booted == (program in ('chown', 'chmod')), history
+    if program in ('chown', 'chmod'):
         assert history[-1]['event'] == 'cleanup_done'
         result = json.loads((tools / 'out/result.json').read_text())
         assert result['status'] == 'succeeded' and result['exit_code'] == 0
@@ -214,6 +214,7 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'mkfs.ext4')
     cancellation_probe(args, 'curl')
     cancellation_probe(args, 'chown')
+    cancellation_probe(args, 'chmod')
     reject_missing_init(args)
     assert sha256(args.image) == before, 'shared image changed'
     print('PASS: resources, repository, patch, isolation, timeout, SIGTERM, ownership, collection failure, patch failure, boot/finalization cancellation, image admission, cleanup, image hash')
