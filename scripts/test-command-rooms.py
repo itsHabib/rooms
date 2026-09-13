@@ -137,6 +137,19 @@ def reject_missing_init(args):
     print('missing init: scratch and repo modes rejected before claim', flush=True)
 
 
+def idle_output_untouched(args):
+    directory = args.out / 'idle-unused'
+    directory.mkdir()
+    sentinel = directory / 'sentinel'
+    sentinel.write_text('untouched')
+    before = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in [directory, sentinel]]
+    subprocess.run([str(args.rooms), 'run', '--image', str(args.image), '--readonly-rootfs',
+                    '--out', str(directory)], check=True, capture_output=True, timeout=30)
+    after = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in [directory, sentinel]]
+    assert before == after and sentinel.read_text() == 'untouched'
+    print('idle unused output preserves ownership and content', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rooms', type=Path, required=True)
@@ -220,6 +233,7 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'chown')
     cancellation_probe(args, 'chmod')
     reject_missing_init(args)
+    idle_output_untouched(args)
     assert sha256(args.image) == before, 'shared image changed'
     print('PASS: resources, repository, patch, isolation, timeout, SIGTERM, ownership, collection failure, patch failure, boot/finalization cancellation, image admission, cleanup, image hash')
 

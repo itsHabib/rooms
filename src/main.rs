@@ -3928,9 +3928,11 @@ async fn collect_run_artifacts(
         _ => Ok(()),
     };
     let ownership = match out_dir {
-        Some(dir) if dir.is_dir() => runner::return_artifact_ownership(dir)
-            .await
-            .map_err(|e| e.to_string()),
+        Some(dir) if dir.is_dir() && (matches!(action, Action::Exec(_)) || witnessed.is_some()) => {
+            runner::return_artifact_ownership(dir)
+                .await
+                .map_err(|e| e.to_string())
+        }
         _ => Ok(()),
     };
     let errors = [collection.err(), witness.err(), ownership.err()]
