@@ -55,8 +55,8 @@ def run_case(args, name, command, expected, extra=(), terminate=False, guest_exi
     return out, result
 
 
-def cancellation_probe(args, program):
-    tools = args.out / (program + '-tools')
+def cancellation_probe(args, program, witness=False):
+    tools = args.out / (program + ('-witness' if witness else '') + '-tools')
     tools.mkdir()
     marker = tools / 'started'
     formatter = tools / program.removesuffix('-stall')
@@ -69,7 +69,7 @@ def cancellation_probe(args, program):
     with (args.out / (program + '-cancel.host.log')).open('w') as log:
         process = subprocess.Popen([str(args.rooms), 'run', '--image', str(args.image),
                                     '--disk', '1', '--command', 'echo COMPLETED_COMMAND', '--out', str(tools / 'out'),
-                                    '--lifecycle', str(lifecycle)], env=environment,
+                                    '--lifecycle', str(lifecycle), *(['--witness'] if witness else [])], env=environment,
                                    stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 30
@@ -101,6 +101,52 @@ def cancellation_probe(args, program):
     assert not (state / 'jailer/firecracker' / claim['room_id']).exists()
     assert not (state / 'slots' / str(claim['slot'])).exists()
     print(program + '-cancel: 143, no child/slot/jail residue', flush=True)
+
+
+def interrupted_patch_export(args, timed_out=False):
+    directory = args.out / ('patch-timeout' if timed_out else 'patch-cancel')
+    directory.mkdir()
+    tools = directory / 'tools'
+    tools.mkdir()
+    marker = directory / 'export-started'
+    shim = tools / 'ssh'
+    shim.write_text('#!/bin/sh\ncase "$*" in *"git add -A"*) echo $$ > ' +
+                    shlex.quote(str(marker)) + '; exec sleep 120;; esac\nexec /usr/bin/ssh "$@"\n')
+    shim.chmod(0o755)
+    out = directory / 'out'
+    lifecycle = directory / 'lifecycle.ndjson'
+    expected = 124 if timed_out else 143
+    argv = [str(args.rooms), 'run', '--image', str(args.image), '--disk', '1',
+            '--repo', args.repo, '--command', 'echo FINISHED; exit 7',
+            '--out', str(out), '--lifecycle', str(lifecycle)]
+    if timed_out:
+        argv += ['--max-wall', '30s']
+    environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'])
+    with (directory / 'host.log').open('w') as log:
+        process = subprocess.Popen(argv, env=environment, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while not marker.exists():
+                assert process.poll() is None and time.monotonic() < deadline, 'patch export never started'
+                time.sleep(.05)
+            if not timed_out:
+                process.send_signal(signal.SIGTERM)
+            assert process.wait(timeout=50) == expected
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=25)
+    result = json.loads((out / 'result.json').read_text())
+    assert result['exit_code'] == 7 and result['status'] == 'failed', result
+    assert 'patch_path' not in result
+    history = events(lifecycle)
+    exits = [e for e in history if e['event'] == 'workload_exited']
+    assert len(exits) == 1 and exits[0]['exit_code'] == 7, history
+    failure = next(e for e in history if e['event'] == 'workload_failed')
+    assert exits[0]['seq'] < failure['seq'] and history[-1]['event'] == 'cleanup_done'
+    assert 'FINISHED' in (out / 'logs/stdout.log').read_text()
+    assert not Path('/proc/' + marker.read_text().strip()).exists(), 'export client survived'
+    print(directory.name + ': command exit7 retained, CLI' + str(expected) + ', cleanup complete', flush=True)
 
 
 def reject_missing_init(args):
@@ -255,6 +301,9 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'chown')
     cancellation_probe(args, 'chmod')
     cancellation_probe(args, 'chown-stall')
+    cancellation_probe(args, 'chown-stall', witness=True)
+    interrupted_patch_export(args)
+    interrupted_patch_export(args, timed_out=True)
     reject_missing_init(args)
     idle_output_untouched(args)
     witness_output_ownership(args)

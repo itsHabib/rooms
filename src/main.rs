@@ -3923,15 +3923,16 @@ async fn collect_run_artifacts(
         Some(capture) => Some(summarize_witness(capture, slot, env).await),
         None => None,
     };
+    let mut witness_paths = Vec::new();
     let witness = match (&witnessed, out_dir) {
-        (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut witness_paths).await,
         _ => Ok(()),
     };
     let ownership = match out_dir {
         Some(dir) if dir.is_dir() && matches!(action, Action::Exec(_)) => {
-            bounded_artifact_ownership(dir, true).await
+            bounded_artifact_ownership(&[dir.to_path_buf()], true).await
         }
-        _ => Ok(()),
+        _ => bounded_artifact_ownership(&witness_paths, false).await,
     };
     let errors = [collection.err(), witness.err(), ownership.err()]
         .into_iter()
@@ -3946,10 +3947,13 @@ async fn collect_run_artifacts(
     )))
 }
 
-async fn bounded_artifact_ownership(dir: &Path, recursive: bool) -> Result<(), String> {
+async fn bounded_artifact_ownership(paths: &[PathBuf], recursive: bool) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
     tokio::time::timeout(
         PRE_TEARDOWN_GRACE,
-        runner::return_artifact_ownership(dir, recursive),
+        runner::return_artifact_ownership(paths, recursive),
     )
     .await
     .map_err(|_| "artifact ownership repair timed out".to_owned())?
@@ -4037,7 +4041,11 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// gets its witness. Failures are returned after logging so matrix callers can
 /// treat missing evidence as terminal while legacy run/restore behavior stays
 /// best-effort at their call sites.
-async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
+async fn persist_witness(
+    w: &Witnessed,
+    out_dir: &Path,
+    written: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     // Only a directory created by this invocation belongs to its output set.
     if let Some(parent) = out_dir.parent() {
         tokio::fs::create_dir_all(parent)
@@ -4045,7 +4053,7 @@ async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     match tokio::fs::create_dir(out_dir).await {
-        Ok(()) => bounded_artifact_ownership(out_dir, false).await?,
+        Ok(()) => written.push(out_dir.to_path_buf()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
             return Err(format!(
@@ -4062,7 +4070,7 @@ async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
         write_out_atomic(out_dir, name, data)
             .await
             .map_err(|error| format!("write {name}: {error}"))?;
-        bounded_artifact_ownership(&out_dir.join(name), false).await?;
+        written.push(out_dir.join(name));
     }
     Ok(())
 }
@@ -4389,13 +4397,20 @@ async fn exec_workload(
     // `work` cascades through each child future — kill_on_drop fires on every
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
-    let work = run_workload(env, run, secrets, started_at);
+    let mut completed = None;
+    let work = run_workload(env, run, secrets, started_at, &mut completed);
     let raced = match clone_cancellation {
         Some(cancellation) => {
             race_workload_with_clone_cancellation(work, env.max_wall, Some(cancellation)).await
         }
         None => race_workload(work, env.max_wall).await,
     };
+    if let Some(outcome) = completed
+        .as_ref()
+        .filter(|_| !matches!(raced, ExecRace::Completed(_)))
+    {
+        return record_interrupted_finalization(env, run, outcome, raced).await;
+    }
     match raced {
         ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
@@ -4440,6 +4455,41 @@ async fn exec_workload(
     }
 }
 
+/// Cancellation after the command exited interrupts finalization, not the command.
+async fn record_interrupted_finalization(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    outcome: &runner::GuestExecOutcome,
+    raced: ExecRace,
+) -> Result<u8, RoomsError> {
+    let exit_code = match raced {
+        ExecRace::Cancelled(code) => code,
+        ExecRace::TimedOut => 124,
+        ExecRace::Completed(result) => return result,
+    };
+    env.lifecycle.emit(&Event::WorkloadExited {
+        exit_code: outcome.exit_code,
+        status: workload_status(outcome.status),
+    });
+    env.lifecycle.emit(&Event::WorkloadFailed {
+        error: format!("post-run finalization interrupted (CLI exit {exit_code})"),
+    });
+    let result = ResultJson::from_exec(
+        outcome.exit_code,
+        outcome.status,
+        outcome.started_at,
+        outcome.ended_at,
+        run.command_argv(),
+    );
+    let write = runner::write_guest_result_json(env.guest_target(), env.key, &result);
+    match tokio::time::timeout(PRE_TEARDOWN_GRACE, write).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "failed to retain completed-run result"),
+        Err(_) => warn!("completed-run result write timed out"),
+    }
+    Ok(exit_code)
+}
+
 /// Wait for the workload channel, pass the secrets gate when one is armed,
 /// then run the workload, recording each transition on the lifecycle stream.
 /// Returns the resolved exit code; a post-run push failure fails the run
@@ -4450,6 +4500,7 @@ async fn run_workload(
     run: &runner::Runner,
     secrets: Option<vsock::Delivery>,
     started_at: DateTime<Utc>,
+    completed: &mut Option<runner::GuestExecOutcome>,
 ) -> Result<u8, RoomsError> {
     let lifecycle = env.lifecycle;
     wait_for_channel(env).await?;
@@ -4459,9 +4510,23 @@ async fn run_workload(
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
     });
-    let outcome = match runner::exec(env.guest_target(), env.key, run, env.config).await {
+    let outcome = match runner::exec_observed(
+        env.guest_target(),
+        env.key,
+        run,
+        env.config,
+        completed,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => {
+            if let Some(outcome) = completed {
+                lifecycle.emit(&Event::WorkloadExited {
+                    exit_code: outcome.exit_code,
+                    status: workload_status(outcome.status),
+                });
+            }
             lifecycle.emit(&Event::WorkloadFailed {
                 error: e.to_string(),
             });
