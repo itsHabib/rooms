@@ -27,6 +27,14 @@ struct Cli {
     command: Command,
 }
 
+fn parse_cpus(value: &str) -> Result<u8, String> {
+    let cpus = value.parse::<u8>().map_err(|e| e.to_string())?;
+    if !(1..=32).contains(&cpus) || (cpus > 1 && !cpus.is_multiple_of(2)) {
+        return Err("CPUs must be 1 or an even number from 2 to 32".to_owned());
+    }
+    Ok(cpus)
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(
     clippy::large_enum_variant,
@@ -39,7 +47,7 @@ enum Command {
         #[arg(long)]
         image: PathBuf,
         /// Number of virtual CPUs for this cold room.
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=32))]
+        #[arg(long, default_value_t = 1, value_parser = parse_cpus)]
         cpus: u8,
         /// Guest RAM in MiB.
         #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(128..=65536))]
@@ -3895,8 +3903,8 @@ async fn collect_run_artifacts(
         (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
         _ => Ok(()),
     };
-    let ownership = match (out_dir, action) {
-        (Some(dir), Action::Exec(_)) if dir.is_dir() => runner::return_artifact_ownership(dir)
+    let ownership = match out_dir {
+        Some(dir) if dir.is_dir() => runner::return_artifact_ownership(dir)
             .await
             .map_err(|e| e.to_string()),
         _ => Ok(()),
@@ -6335,6 +6343,8 @@ mod tests {
         for (flag, value) in [
             ("--cpus", "0"),
             ("--cpus", "33"),
+            ("--cpus", "3"),
+            ("--cpus", "31"),
             ("--memory", "127"),
             ("--disk", "0"),
         ] {
