@@ -4373,13 +4373,20 @@ async fn exec_workload(
     // `work` cascades through each child future — kill_on_drop fires on every
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
-    let work = run_workload(env, run, secrets, started_at);
+    let mut completed = None;
+    let work = run_workload(env, run, secrets, started_at, &mut completed);
     let raced = match clone_cancellation {
         Some(cancellation) => {
             race_workload_with_clone_cancellation(work, env.max_wall, Some(cancellation)).await
         }
         None => race_workload(work, env.max_wall).await,
     };
+    if let Some(outcome) = completed
+        .as_ref()
+        .filter(|_| !matches!(raced, ExecRace::Completed(_)))
+    {
+        return record_interrupted_finalization(env, run, outcome, raced).await;
+    }
     match raced {
         ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
@@ -4424,6 +4431,41 @@ async fn exec_workload(
     }
 }
 
+/// Cancellation after the command exited interrupts finalization, not the command.
+async fn record_interrupted_finalization(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    outcome: &runner::GuestExecOutcome,
+    raced: ExecRace,
+) -> Result<u8, RoomsError> {
+    let exit_code = match raced {
+        ExecRace::Cancelled(code) => code,
+        ExecRace::TimedOut => 124,
+        ExecRace::Completed(result) => return result,
+    };
+    env.lifecycle.emit(&Event::WorkloadExited {
+        exit_code: outcome.exit_code,
+        status: workload_status(outcome.status),
+    });
+    env.lifecycle.emit(&Event::WorkloadFailed {
+        error: format!("post-run finalization interrupted (CLI exit {exit_code})"),
+    });
+    let result = ResultJson::from_exec(
+        outcome.exit_code,
+        outcome.status,
+        outcome.started_at,
+        outcome.ended_at,
+        run.command_argv(),
+    );
+    let write = runner::write_guest_result_json(env.guest_target(), env.key, &result);
+    match tokio::time::timeout(PRE_TEARDOWN_GRACE, write).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "failed to retain completed-run result"),
+        Err(_) => warn!("completed-run result write timed out"),
+    }
+    Ok(exit_code)
+}
+
 /// Wait for the workload channel, pass the secrets gate when one is armed,
 /// then run the workload, recording each transition on the lifecycle stream.
 /// Returns the resolved exit code; a post-run push failure fails the run
@@ -4434,6 +4476,7 @@ async fn run_workload(
     run: &runner::Runner,
     secrets: Option<vsock::Delivery>,
     started_at: DateTime<Utc>,
+    completed: &mut Option<runner::GuestExecOutcome>,
 ) -> Result<u8, RoomsError> {
     let lifecycle = env.lifecycle;
     wait_for_channel(env).await?;
@@ -4443,9 +4486,23 @@ async fn run_workload(
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
     });
-    let outcome = match runner::exec(env.guest_target(), env.key, run, env.config).await {
+    let outcome = match runner::exec_observed(
+        env.guest_target(),
+        env.key,
+        run,
+        env.config,
+        completed,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => {
+            if let Some(outcome) = completed {
+                lifecycle.emit(&Event::WorkloadExited {
+                    exit_code: outcome.exit_code,
+                    status: workload_status(outcome.status),
+                });
+            }
             lifecycle.emit(&Event::WorkloadFailed {
                 error: e.to_string(),
             });

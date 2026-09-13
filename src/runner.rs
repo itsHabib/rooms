@@ -330,14 +330,41 @@ pub async fn exec(
     runner: &Runner,
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
+    exec_observed(target, key_path, runner, config, &mut None).await
+}
+
+/// Like [`exec`], retaining the actual command exit before fallible post-run I/O.
+/// The caller keeps this value when cancellation drops patch export or result writing.
+pub async fn exec_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    runner: &Runner,
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
+    *completed = None;
     match runner {
-        Runner::Command(command) => exec_in_guest(target, key_path, command, config).await,
+        Runner::Command(command) => {
+            exec_in_guest_observed(target, key_path, command, config, completed).await
+        }
         Runner::RepositoryCommand {
             command,
             repo_url,
             base_sha,
-        } => exec_repository_command(target, key_path, command, repo_url, base_sha, config).await,
-        Runner::Cursor(request) => exec_cursor_in_guest(target, key_path, request, config).await,
+        } => {
+            exec_repository_command(
+                target,
+                key_path,
+                command,
+                (repo_url, base_sha),
+                config,
+                completed,
+            )
+            .await
+        }
+        Runner::Cursor(request) => {
+            exec_cursor_in_guest_observed(target, key_path, request, config, completed).await
+        }
     }
 }
 
@@ -589,8 +616,18 @@ pub async fn exec_in_guest(
     command: &str,
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
+    exec_in_guest_observed(target, key_path, command, config, &mut None).await
+}
+
+async fn exec_in_guest_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    command: &str,
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
     let connect_timeout = config.guest_reach_timeout;
-    let run = run_wrapped(target, key_path, command, connect_timeout).await?;
+    let run = run_wrapped(target, key_path, command, connect_timeout, completed).await?;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let result = ResultJson::from_exec(
         run.exit_code,
@@ -614,17 +651,18 @@ async fn exec_repository_command(
     target: GuestTarget<'_>,
     key: &Path,
     command: &str,
-    repo: &str,
-    base: &str,
+    source: (&str, &str),
     config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
 ) -> Result<GuestExecOutcome> {
+    let (repo, base) = source;
     let timeout = config.guest_reach_timeout;
     let pinned_base = clone_repo_in_guest(target, key, repo, base, timeout).await?;
     let inner = format!(
         "cd /workspace/repo && bash -c {}",
         shell_single_quote(command)
     );
-    let run = run_wrapped(target, key, &inner, timeout).await?;
+    let run = run_wrapped(target, key, &inner, timeout, completed).await?;
     let patch = generate_result_patch(target, key, &pinned_base, timeout).await;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let mut result = ResultJson::from_exec(
@@ -660,6 +698,16 @@ pub async fn exec_cursor_in_guest(
     request: &CursorRequest,
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
+    exec_cursor_in_guest_observed(target, key_path, request, config, &mut None).await
+}
+
+async fn exec_cursor_in_guest_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    request: &CursorRequest,
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
     let connect_timeout = config.guest_reach_timeout;
     let pinned_base = clone_repo_in_guest(
         target,
@@ -683,6 +731,7 @@ pub async fn exec_cursor_in_guest(
         key_path,
         &format!("node {CURSOR_RUNNER_JS} < /dev/null"),
         connect_timeout,
+        completed,
     )
     .await?;
 
@@ -791,6 +840,7 @@ async fn run_wrapped(
     key_path: &Path,
     inner: &str,
     connect_timeout: Duration,
+    completed: &mut Option<GuestExecOutcome>,
 ) -> Result<WrappedRun> {
     let started_at = Utc::now();
     let quoted_command = shell_single_quote(inner);
@@ -836,6 +886,13 @@ async fn run_wrapped(
     }
 
     let exit_code = parse_remote_exit_code(&output.stdout)?;
+    *completed = Some(GuestExecOutcome {
+        exit_code,
+        status: ResultJson::status_from_exit_code(exit_code),
+        started_at,
+        ended_at,
+        post_run_error: None,
+    });
     Ok(WrappedRun {
         exit_code,
         started_at,
