@@ -13,3 +13,4 @@ sudo systemctl enable --now nix-daemon.service
 # carry its pre-install supplementary groups until the next login.
 sudo -u "$(id -un)" nix --extra-experimental-features 'nix-command flakes' eval --expr 1
 echo 'Nix is ready. Open a fresh login (or run newgrp nix-users) before building toolstores.'
+echo 'The builder authenticates sudo before building and before sealing; interactive hosts may prompt twice.'

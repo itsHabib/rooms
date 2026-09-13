@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a pinned local flake output into a sealed, portable toolchain disk.
 
-Run as a normal Linux user with Nix, squashfs-tools and passwordless sudo for
-chattr. Nix evaluation/builds never run as root. Existing outputs are refused.
+Run as a normal Linux user with Nix, squashfs-tools and sudo access for
+chattr. Authenticate before building and again immediately before sealing. Nix evaluation/builds never run as root. Existing outputs are refused.
 """
 import argparse
 import hashlib
@@ -138,6 +138,8 @@ def build(args, flake):
             if path.is_symlink():
                 raise ValueError(f'symlinked local flake input is not supported: {path.relative_to(frozen)}')
         validate_locked_inputs(frozen / 'flake.lock')
+        # Fail early if sudo authentication is unavailable, before the Nix build.
+        run(['sudo', '-v'])
         nix = ['nix', '--extra-experimental-features', 'nix-command flakes']
         output = run(nix + ['build', '--no-update-lock-file', '--no-write-lock-file',
                            '--json', '--out-link', str(work / 'result'),
@@ -176,6 +178,8 @@ def build(args, flake):
                     os.fsync(artifact.fileno())
             sync_directory(Path(directory))
         try:
+            # A long Nix build can outlive the initial sudo timestamp.
+            run(['sudo', '-v'])
             run(['sudo', '-n', 'chattr', '+i', '--', str(image)])
             with image.open('rb') as sealed:
                 os.fsync(sealed.fileno())

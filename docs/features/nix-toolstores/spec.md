@@ -26,7 +26,11 @@ The output directory contains `toolstore.sqfs`, `meta.json`, and the exact flake
 tree under `flake/`, including imported local files and its lock. The manifest
 records architecture, closure, buildEnv, and hashes of every retained source file.
 The builder refuses manifests above the same 1 MiB limit enforced at admission.
-Only `chattr +i` runs through sudo. A sibling `.building` reservation excludes
+Nix runs as the normal user. The builder authenticates with `sudo -v` before
+building and again immediately before sealing, since long builds may outlive the
+sudo timestamp. Interactive hosts can prompt at both points; unattended hosts
+need existing noninteractive sudo authorization. Only inode sealing/unsealing
+uses privileged `chattr`; setup does not install a new sudoers rule. A sibling `.building` reservation excludes
 cooperative concurrent builders for the same output. Publication never replaces
 an existing output. Normal failure removes staging; after SIGKILL an abandoned
 reservation/staging directory may need operator inspection and removal.
