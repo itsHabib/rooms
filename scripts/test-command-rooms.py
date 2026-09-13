@@ -203,7 +203,7 @@ def witness_output_ownership(args):
     sentinel.write_text('untouched')
     unrelated = [existing, existing / 'nested', sentinel]
     before = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in unrelated]
-    fresh = args.out / 'witness-fresh'
+    fresh = args.out / 'witness-parent' / 'nested-parent' / 'witness-fresh'
     for directory in [existing, fresh]:
         subprocess.run([str(args.rooms), 'run', '--image', str(args.image), '--readonly-rootfs',
                         '--witness', '--out', str(directory)], check=True, capture_output=True, timeout=30)
@@ -211,7 +211,8 @@ def witness_output_ownership(args):
             assert (directory / name).stat().st_uid == int(os.environ.get('SUDO_UID', os.getuid()))
     after = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in unrelated]
     assert before == after and sentinel.read_text() == 'untouched'
-    assert fresh.stat().st_uid == int(os.environ.get('SUDO_UID', os.getuid()))
+    assert all(p.stat().st_uid == int(os.environ.get('SUDO_UID', os.getuid()))
+               for p in [fresh, fresh.parent, fresh.parent.parent])
     print('witness owns generated entries only; unrelated directory preserved', flush=True)
 
 
