@@ -56,3 +56,16 @@ now includes the client and checks `ssh -V` before publishing; the boot smoke
 also executes it. This changes a guest prerequisite, not SSH server policy.
 See PR #121 cloud validation comment 5651397602 for the original evidence and
 its resource/performance boundaries.
+
+### Follow-up review hardening — 2026-09-13
+
+Review of the SSH-client follow-up found additional admission and output-contract
+issues. CPU counts now reject odd values above one in both CLI and boot validation.
+Overlay admission requires a regular executable init, including scratch admission.
+The resolved repository base is retained in host memory before guest execution;
+export and optional push no longer trust a guest-mutable ref. Collected regular
+artifacts gain owner read/write/traverse permissions and lose set-ID bits; finalized
+idle witness output also returns to the sudo caller. The live command harness now
+covers moved base refs, mode-000 output, and non-executable/directory init rejection.
+Final-head checks and live results are recorded on the PR; historical cloud timings
+remain tied to the earlier heads and are not repeated as performance evidence here.

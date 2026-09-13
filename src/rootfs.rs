@@ -108,6 +108,7 @@ fn kernel_matches_host_arch(header: &[u8; 60]) -> bool {
 /// Older overlay-init scripts silently ignore a scratch drive. Reject them
 /// before claiming a room instead of giving the caller an unexpected RAM disk.
 pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
+    validate_overlay_image(path)?;
     let init = debugfs(path, "cat /sbin/overlay-init")?;
     if !init.contains("rooms.scratch=1") {
         return Err(
@@ -137,10 +138,23 @@ fn has_toolstore_hook(init: &str) -> bool {
 /// Check that an image has the entry point needed for a read-only overlay boot.
 pub fn validate_overlay_image(path: &Path) -> Result<(), String> {
     let overlay = debugfs(path, "stat /sbin/overlay-init")?;
-    if overlay.contains("File not found") || !overlay.contains("Inode:") {
-        return Err(format!("image {} lacks /sbin/overlay-init", path.display()));
+    if !executable_regular_inode(&overlay) {
+        return Err(format!(
+            "image {} lacks executable regular /sbin/overlay-init",
+            path.display()
+        ));
     }
     Ok(())
+}
+
+fn executable_regular_inode(stat: &str) -> bool {
+    if !stat.contains("Inode:") || !stat.contains("Type: regular") {
+        return false;
+    }
+    stat.split_once("Mode:")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+        .is_some_and(|mode| mode & 0o111 != 0)
 }
 
 /// Fail-closed admission for a snapshot-capable base image.
@@ -254,6 +268,22 @@ mod tests {
         ] {
             assert!(!super::has_toolstore_hook(decoy));
         }
+    }
+
+    #[test]
+    fn overlay_init_must_be_regular_and_executable() {
+        for mode in ["0000", "0644", "invalid"] {
+            assert!(!super::executable_regular_inode(&format!(
+                "Inode: 12 Type: regular Mode: {mode}"
+            )));
+        }
+        assert!(!super::executable_regular_inode(
+            "Inode: 12 Type: directory Mode: 0755"
+        ));
+        assert!(!super::executable_regular_inode("File not found"));
+        assert!(super::executable_regular_inode(
+            "Inode: 12 Type: regular Mode: 0755"
+        ));
     }
 
     fn write_kernel(bytes: &[u8]) -> tempfile::NamedTempFile {

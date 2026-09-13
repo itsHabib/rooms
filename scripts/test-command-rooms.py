@@ -119,6 +119,21 @@ def reject_missing_init(args):
         assert result.returncode == 2, result
         assert not events(lifecycle), 'invalid image claimed a room'
         assert json.loads(result.stdout)['error_kind'] == 'internal'
+    script = directory / 'overlay-init'
+    script.write_text('#!/bin/sh\n# rooms.scratch=1\n')
+    for command in ['mkdir /sbin', f'write {script} /sbin/overlay-init',
+                    'set_inode_field /sbin/overlay-init mode 0100644']:
+        subprocess.run(['debugfs', '-w', '-R', command, str(image)], check=True,
+                       capture_output=True)
+    for mode in ['0100644', '040755']:
+        subprocess.run(['debugfs', '-w', '-R',
+                        f'set_inode_field /sbin/overlay-init mode {mode}', str(image)],
+                       check=True, capture_output=True)
+        lifecycle = directory / (mode + '.ndjson')
+        result = subprocess.run([str(args.rooms), 'run', '--image', str(image),
+                                 '--disk', '1', '--command', 'true', '--lifecycle', str(lifecycle)],
+                                capture_output=True, timeout=15)
+        assert result.returncode == 2 and not events(lifecycle), result
     print('missing init: scratch and repo modes rejected before claim', flush=True)
 
 
@@ -152,6 +167,17 @@ echo DISK_AND_REPO_OK
                            'echo failed-edit > rooms-proof.txt; exit 7', 7, repo)
     assert result['status'] == 'failed'
     assert '+failed-edit' in (out / result['patch_path']).read_text()
+    out, result = run_case(args, 'moved-base-ref',
+                           'echo retained-base > rooms-proof.txt; git add -A; '
+                           'git -c user.name=probe -c user.email=probe@rooms.local commit -qm edit; '
+                           'git update-ref refs/rooms/base HEAD', 0, repo)
+    assert '+retained-base' in (out / result['patch_path']).read_text()
+    out, result = run_case(args, 'unreadable-artifacts',
+                           'mkdir -p /workspace/out/private; echo readable > /workspace/out/private/value; '
+                           'chmod 000 /workspace/out/private/value /workspace/out/private', 0)
+    assert (out / 'private/value').read_text().strip() == 'readable'
+    assert (out / 'private/value').stat().st_mode & 0o600 == 0o600
+    assert (out / 'private').stat().st_mode & 0o700 == 0o700
     partial = 'echo PARTIAL_STDOUT; echo PARTIAL_STDERR >&2; sleep 120'
     out, result = run_case(args, 'timeout', partial, 124, ['--max-wall', '30s'])
     assert result['status'] == 'timed_out'

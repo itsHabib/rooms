@@ -528,6 +528,7 @@ impl Resources {
     // Keep these limits aligned with the cold-run clap value parsers.
     fn validate(self, readonly: bool, base: bool) -> Result<(), FirecrackerError> {
         if !(1..=32).contains(&self.cpus)
+            || (self.cpus > 1 && !self.cpus.is_multiple_of(2))
             || !(128..=65536).contains(&self.memory_mib)
             || self.disk_gib.is_some_and(|gib| !(1..=1024).contains(&gib))
         {
@@ -2712,6 +2713,20 @@ mod tests {
             assert!(!jail.exists(), "staging left mounted jail resources");
         }
         Ok(())
+    }
+
+    #[test]
+    fn resources_reject_unsupported_cpu_topologies() {
+        for cpus in 0..=33 {
+            let resources = super::Resources {
+                cpus,
+                ..Default::default()
+            };
+            assert_eq!(
+                resources.validate(false, false).is_ok(),
+                cpus == 1 || ((2..=32).contains(&cpus) && cpus.is_multiple_of(2))
+            );
+        }
     }
 
     #[test]

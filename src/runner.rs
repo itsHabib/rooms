@@ -360,7 +360,7 @@ pub async fn collect_out_to_host(
     let ssh_out = ssh_command(
         target,
         key_path,
-        "if [ -d /workspace/out ]; then tar cf - -C /workspace/out .; else exit 0; fi",
+        "if [ -d /workspace/out ]; then sudo -n tar cf - -C /workspace/out .; else exit 0; fi",
         false,
         SSH_AUXILIARY_CONNECT_TIMEOUT,
     )?
@@ -382,7 +382,7 @@ pub async fn collect_out_to_host(
     ensure_tar_regular_only(&ssh_out.stdout).await?;
     let extract = run_host_tar(
         &ssh_out.stdout,
-        &["--no-same-owner", "-xf", "-", "-C"],
+        &["--no-same-owner", "--no-same-permissions", "-xf", "-", "-C"],
         Some(host_dir),
     )
     .await?;
@@ -392,6 +392,14 @@ pub async fn collect_out_to_host(
             "host tar extract failed (exit {}): {stderr}",
             extract.status
         );
+    }
+    let modes = Command::new("chmod")
+        .args(["-R", "u+rwX,a-s", "--"])
+        .arg(host_dir)
+        .output()
+        .await?;
+    if !modes.status.success() {
+        anyhow::bail!("normalize collected artifact permissions failed");
     }
     Ok(())
 }
@@ -607,13 +615,13 @@ async fn exec_repository_command(
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
     let timeout = config.guest_reach_timeout;
-    clone_repo_in_guest(target, key, repo, base, timeout).await?;
+    let pinned_base = clone_repo_in_guest(target, key, repo, base, timeout).await?;
     let inner = format!(
         "cd /workspace/repo && bash -c {}",
         shell_single_quote(command)
     );
     let run = run_wrapped(target, key, &inner, timeout).await?;
-    let patch = generate_result_patch(target, key, timeout).await;
+    let patch = generate_result_patch(target, key, &pinned_base, timeout).await;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let mut result = ResultJson::from_exec(
         run.exit_code,
@@ -650,7 +658,7 @@ pub async fn exec_cursor_in_guest(
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
     let connect_timeout = config.guest_reach_timeout;
-    clone_repo_in_guest(
+    let pinned_base = clone_repo_in_guest(
         target,
         key_path,
         &request.repo_url,
@@ -675,13 +683,14 @@ pub async fn exec_cursor_in_guest(
     )
     .await?;
 
-    let patch_written = match generate_result_patch(target, key_path, connect_timeout).await {
-        Ok(()) => true,
-        Err(err) => {
-            warn!(error = %err, "failed to generate result.patch; omitting patch_path");
-            false
-        }
-    };
+    let patch_written =
+        match generate_result_patch(target, key_path, &pinned_base, connect_timeout).await {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(error = %err, "failed to generate result.patch; omitting patch_path");
+                false
+            }
+        };
 
     // Self-persist: if a push branch was requested AND the agent succeeded,
     // commit the agent's changes and push them (mirrors cursor cloud). A failed
@@ -691,8 +700,15 @@ pub async fn exec_cursor_in_guest(
     let mut push_err: Option<anyhow::Error> = None;
     let pushed_branch = match (&request.push_branch, run.exit_code) {
         (Some(branch), 0) => {
-            match push_branch_in_guest(target, key_path, &request.repo_url, branch, connect_timeout)
-                .await
+            match push_branch_in_guest(
+                target,
+                key_path,
+                &request.repo_url,
+                branch,
+                &pinned_base,
+                connect_timeout,
+            )
+            .await
             {
                 Ok(true) => Some(branch.clone()),
                 Ok(false) => None,
@@ -824,38 +840,41 @@ async fn run_wrapped(
     })
 }
 
-/// Clone `repo_url` into `/workspace/repo`, check out `base_sha`, and pin the
-/// resolved base commit as `refs/rooms/base`.
-///
-/// Pinning a ref (rather than re-resolving `base_sha` later) keeps the patch and
-/// push steps comparing against a concrete commit even when `base_sha` is
-/// symbolic (e.g. `HEAD`) — otherwise it would re-resolve to the agent's tip and
-/// look like "no changes". A hard error: the cursor runner can't run without a
-/// populated repo. The URL and sha are single-quoted into the remote shell so
-/// neither can inject.
+/// Clone and resolve the requested base before running guest code. Keep the
+/// resolved object ID in host memory so guest ref edits cannot change the diff base.
 async fn clone_repo_in_guest(
     target: GuestTarget<'_>,
     key_path: &Path,
     repo_url: &str,
     base_sha: &str,
     connect_timeout: Duration,
-) -> Result<()> {
+) -> Result<String> {
     let url = shell_single_quote(repo_url);
     let sha = shell_single_quote(base_sha);
     let remote = format!(
         "rm -rf /workspace/repo && git clone -- {url} /workspace/repo && \
          base=$(git -C /workspace/repo rev-parse --verify --end-of-options {sha}^{{commit}}) && \
          git -C /workspace/repo checkout --detach \"$base\" && \
-         git -C /workspace/repo update-ref refs/rooms/base HEAD"
+         git -C /workspace/repo rev-parse HEAD"
     );
-    run_setup_ssh(
-        target,
-        key_path,
-        &remote,
-        "clone repo in guest",
-        connect_timeout,
-    )
-    .await
+    let output = ssh_command(target, key_path, &remote, false, connect_timeout)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "clone repo in guest failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let base = String::from_utf8(output.stdout)?.trim().to_owned();
+    if !matches!(base.len(), 40 | 64) || !base.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid resolved repository base");
+    }
+    Ok(base)
 }
 
 /// Resolve the optional repository entirely on the host and build the
@@ -993,7 +1012,7 @@ async fn stage_cursor_input(
 }
 
 /// Generate `/workspace/out/result.patch` from `git diff` against the pinned
-/// `refs/rooms/base`, capturing both committed and working-tree changes.
+/// host-retained base object ID, capturing committed and working-tree changes.
 ///
 /// Best effort: a git error still leaves an (empty) patch file via the `>`
 /// redirect, but a transport failure propagates so the caller can omit
@@ -1001,14 +1020,18 @@ async fn stage_cursor_input(
 async fn generate_result_patch(
     target: GuestTarget<'_>,
     key_path: &Path,
+    pinned_base: &str,
     connect_timeout: Duration,
 ) -> Result<()> {
-    let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A && \
-         git diff --binary --cached refs/rooms/base > /workspace/out/result.patch";
+    let base = shell_single_quote(pinned_base);
+    let remote = format!(
+        "mkdir -p /workspace/out && cd /workspace/repo && git add -A && \
+         git diff --binary --cached {base} > /workspace/out/result.patch"
+    );
     run_setup_ssh(
         target,
         key_path,
-        remote,
+        &remote,
         "generate result.patch",
         connect_timeout,
     )
@@ -1026,25 +1049,20 @@ async fn push_branch_in_guest(
     key_path: &Path,
     repo_url: &str,
     branch: &str,
+    pinned_base: &str,
     connect_timeout: Duration,
 ) -> Result<bool> {
     let url = shell_single_quote(repo_url);
     let branch_q = shell_single_quote(branch);
-    // Commit any working-tree changes the agent left, then push iff HEAD has
-    // moved past the pinned base (`refs/rooms/base`, set at clone). Comparing the
-    // pinned ref — not a re-resolved base_sha — covers BOTH a working-tree edit
-    // committed just now AND the cursor SDK committing internally (clean tree,
-    // HEAD already ahead), and stays correct when base_sha was symbolic. `exit 3`
-    // marks "nothing to push"; `set -e` maps real git failures to Err. The
-    // credential helper echoes `$GH_TOKEN` at git-invoke time; the single quotes
-    // keep the guest shell from expanding it into argv.
+    let base = shell_single_quote(pinned_base);
+    // Compare against the object ID retained by the host before guest execution.
     let remote = format!(
         "set -e; cd /workspace/repo; git checkout -B {branch_q}; git add -A; \
          if ! git diff --cached --quiet; then \
              git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
              commit -q -m 'rooms cursor agent run' -m 'Co-authored-by: Cursor <cursoragent@cursor.com>'; \
          fi; \
-         if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse refs/rooms/base)\" ]; then exit 3; fi; \
+         if [ \"$(git rev-parse HEAD)\" = {base} ]; then exit 3; fi; \
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );
