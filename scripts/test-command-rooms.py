@@ -55,20 +55,24 @@ def run_case(args, name, command, expected, extra=(), terminate=False, guest_exi
     return out, result
 
 
-def cancellation_probe(args, program, witness=False):
-    tools = args.out / (program + ('-witness' if witness else '') + '-tools')
+def cancellation_probe(args, program, witness=False, nested=False):
+    tools = args.out / (program + ('-witness' if witness else '') + ('-parents' if nested else '') + '-tools')
     tools.mkdir()
     marker = tools / 'started'
     formatter = tools / program.removesuffix('-stall')
     finish = {'mkfs.ext4': 'exec sleep 120', 'chmod': 'exec sleep 120', 'curl': 'exec sleep 120',
               'chown-stall': 'exec sleep 120', 'chown': 'sleep 2; exec /usr/bin/chown "$@"'}[program]
+    if nested:
+        first = shlex.quote(str(tools / 'first-call'))
+        finish = f'if test ! -e {first}; then touch {first}; sleep 8; exec /usr/bin/chown "$@"; fi; exec sleep 120'
     formatter.write_text('#!/bin/sh\necho $$ > ' + shlex.quote(str(marker)) + '\n' + finish + '\n')
     formatter.chmod(0o755)
-    lifecycle = args.out / (program + '-cancel.ndjson')
+    out = tools / ('parent/nested/out' if nested else 'out')
+    lifecycle = tools / 'cancel.ndjson'
     environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'])
-    with (args.out / (program + '-cancel.host.log')).open('w') as log:
+    with (tools / 'host.log').open('w') as log:
         process = subprocess.Popen([str(args.rooms), 'run', '--image', str(args.image),
-                                    '--disk', '1', '--command', 'echo COMPLETED_COMMAND', '--out', str(tools / 'out'),
+                                    '--disk', '1', '--command', 'echo COMPLETED_COMMAND', '--out', str(out),
                                     '--lifecycle', str(lifecycle), *(['--witness'] if witness else [])], env=environment,
                                    stdout=log, stderr=subprocess.STDOUT)
         try:
@@ -77,8 +81,11 @@ def cancellation_probe(args, program, witness=False):
                 if process.poll() is not None or time.monotonic() > deadline:
                     raise RuntimeError(program + ' did not start')
                 time.sleep(.05)
+            cancelled_at = time.monotonic()
             process.send_signal(signal.SIGTERM)
             assert process.wait(timeout=25) == 143
+            if nested:
+                assert time.monotonic() - cancelled_at < 20, 'ownership grace stacked'
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)
@@ -93,14 +100,14 @@ def cancellation_probe(args, program, witness=False):
     assert booted == (program in ('chown', 'chown-stall', 'chmod')), history
     if program in ('chown', 'chown-stall', 'chmod'):
         assert history[-1]['event'] == 'cleanup_done'
-        result = json.loads((tools / 'out/result.json').read_text())
+        result = json.loads((out / 'result.json').read_text())
         assert result['status'] == 'succeeded' and result['exit_code'] == 0
     claim = next(e for e in history if e['event'] == 'slot_allocated')
     state = Path.home() / '.local/state/rooms'
     assert not (state / claim['room_id']).exists()
     assert not (state / 'jailer/firecracker' / claim['room_id']).exists()
     assert not (state / 'slots' / str(claim['slot'])).exists()
-    print(program + '-cancel: 143, no child/slot/jail residue', flush=True)
+    print(tools.name + ': 143, no child/slot/jail residue', flush=True)
 
 
 def interrupted_patch_export(args, timed_out=False):
@@ -194,6 +201,24 @@ def idle_output_untouched(args):
     after = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in [directory, sentinel]]
     assert before == after and sentinel.read_text() == 'untouched'
     print('idle unused output preserves ownership and content', flush=True)
+
+
+def command_output_parents(args):
+    out = args.out / 'command-parent' / 'nested-parent' / 'run'
+    lifecycle = args.out / 'command-parents.ndjson'
+    before = (args.out.stat().st_uid, args.out.stat().st_gid, args.out.stat().st_mode)
+    subprocess.run([str(args.rooms), 'run', '--image', str(args.image), '--disk', '1',
+                    '--command', 'echo PARENTS_OK', '--out', str(out),
+                    '--lifecycle', str(lifecycle)], check=True, capture_output=True, timeout=60)
+    uid = int(os.environ.get('SUDO_UID', os.getuid()))
+    assert all(p.stat().st_uid == uid for p in [out, out.parent, out.parent.parent, *out.rglob('*')])
+    assert before == (args.out.stat().st_uid, args.out.stat().st_gid, args.out.stat().st_mode)
+    moved = out.with_name('renamed-by-caller')
+    subprocess.run(['sudo', '-u', '#' + str(uid), 'mv', str(out), str(moved)], check=True)
+    subprocess.run(['sudo', '-u', '#' + str(uid), 'mv', str(moved), str(out)], check=True)
+    assert json.loads((out / 'result.json').read_text())['exit_code'] == 0
+    assert events(lifecycle)[-1]['event'] == 'cleanup_done'
+    print('nested command output is owned and renameable by caller', flush=True)
 
 
 def witness_output_ownership(args):
@@ -303,11 +328,13 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'chmod')
     cancellation_probe(args, 'chown-stall')
     cancellation_probe(args, 'chown-stall', witness=True)
+    cancellation_probe(args, 'chown-stall', witness=True, nested=True)
     interrupted_patch_export(args)
     interrupted_patch_export(args, timed_out=True)
     reject_missing_init(args)
     idle_output_untouched(args)
     witness_output_ownership(args)
+    command_output_parents(args)
     assert sha256(args.image) == before, 'shared image changed'
     print('PASS: resources, repository, patch, isolation, timeout, SIGTERM, ownership, collection failure, patch failure, boot/finalization cancellation, image admission, cleanup, image hash')
 

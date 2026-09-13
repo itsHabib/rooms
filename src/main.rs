@@ -3913,9 +3913,18 @@ async fn collect_run_artifacts(
     out_dir: Option<&Path>,
     vm: &mut firecracker::BootedVm,
 ) -> Result<(), RoomsError> {
+    let mut created = Vec::new();
     let collection = match out_dir {
         Some(out_dir) => {
-            collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await
+            collect_and_record(
+                env.guest_target(),
+                env.key,
+                action,
+                out_dir,
+                env.lifecycle,
+                &mut created,
+            )
+            .await
         }
         None => Ok(()),
     };
@@ -3923,17 +3932,12 @@ async fn collect_run_artifacts(
         Some(capture) => Some(summarize_witness(capture, slot, env).await),
         None => None,
     };
-    let mut witness_paths = Vec::new();
     let witness = match (&witnessed, out_dir) {
-        (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut witness_paths).await,
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut created).await,
         _ => Ok(()),
     };
-    let ownership = match out_dir {
-        Some(dir) if dir.is_dir() && matches!(action, Action::Exec(_)) => {
-            bounded_artifact_ownership(&[dir.to_path_buf()], true).await
-        }
-        _ => bounded_artifact_ownership(&witness_paths, false).await,
-    };
+    let recursive_root = out_dir.filter(|dir| dir.is_dir() && matches!(action, Action::Exec(_)));
+    let ownership = bounded_artifact_ownership(recursive_root, &created).await;
     let errors = [collection.err(), witness.err(), ownership.err()]
         .into_iter()
         .flatten()
@@ -3947,17 +3951,27 @@ async fn collect_run_artifacts(
     )))
 }
 
-async fn bounded_artifact_ownership(paths: &[PathBuf], recursive: bool) -> Result<(), String> {
-    if paths.is_empty() {
-        return Ok(());
-    }
-    tokio::time::timeout(
-        PRE_TEARDOWN_GRACE,
-        runner::return_artifact_ownership(paths, recursive),
-    )
-    .await
-    .map_err(|_| "artifact ownership repair timed out".to_owned())?
-    .map_err(|error| error.to_string())
+async fn bounded_artifact_ownership(
+    root: Option<&Path>,
+    created: &[PathBuf],
+) -> Result<(), String> {
+    // Parents are repaired without recursion. Command output has its own tree;
+    // both operations share one deadline, so a stalled child cannot stack grace windows.
+    let remaining: Vec<_> = created
+        .iter()
+        .filter(|path| !root.is_some_and(|root| path.starts_with(root)))
+        .cloned()
+        .collect();
+    let repair = async {
+        if let Some(root) = root {
+            runner::return_artifact_ownership(&[root.to_path_buf()], true).await?;
+        }
+        runner::return_artifact_ownership(&remaining, false).await
+    };
+    tokio::time::timeout(PRE_TEARDOWN_GRACE, repair)
+        .await
+        .map_err(|_| "artifact ownership repair timed out".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
@@ -4046,18 +4060,9 @@ async fn persist_witness(
     out_dir: &Path,
     written: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    // Only directories actually created by this invocation belong to its output set.
-    let ancestors: Vec<_> = out_dir
-        .ancestors()
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect();
-    for dir in ancestors.into_iter().rev() {
-        match tokio::fs::create_dir(dir).await {
-            Ok(()) => written.push(dir.to_path_buf()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("create witness output {}: {error}", dir.display())),
-        }
-    }
+    runner::create_output_directory(out_dir, written)
+        .await
+        .map_err(|error| error.to_string())?;
     let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| error.to_string())?;
     for (name, data) in [
         (artifacts::WITNESS_JSON, bytes.as_slice()),
@@ -4093,6 +4098,7 @@ async fn collect_and_record(
     action: &Action,
     out_dir: &Path,
     lifecycle: &Lifecycle,
+    created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
@@ -4100,7 +4106,7 @@ async fn collect_and_record(
         return Ok(());
     }
     lifecycle.emit(&Event::CollectionStarted);
-    let collect = collect_to_host(target, key, out_dir);
+    let collect = collect_to_host(target, key, out_dir, created);
     match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
         Ok(Ok(())) => {
             lifecycle.emit(&Event::CollectionDone);
@@ -4131,8 +4137,9 @@ async fn collect_to_host(
     target: runner::GuestTarget<'_>,
     key: &Path,
     out_dir: &Path,
+    created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    let primary = runner::collect_out_to_host(target, key, out_dir).await;
+    let primary = runner::collect_out_to_host_observed(target, key, out_dir, created).await;
     match runner::collect_changeset_to_host(target, key, out_dir).await {
         Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
         Err(e) => warn!(error = %e, "collect overlay changeset failed"),
