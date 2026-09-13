@@ -4046,20 +4046,16 @@ async fn persist_witness(
     out_dir: &Path,
     written: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    // Only a directory created by this invocation belongs to its output set.
-    if let Some(parent) = out_dir.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    match tokio::fs::create_dir(out_dir).await {
-        Ok(()) => written.push(out_dir.to_path_buf()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(format!(
-                "create witness output {}: {error}",
-                out_dir.display()
-            ))
+    // Only directories actually created by this invocation belong to its output set.
+    let ancestors: Vec<_> = out_dir
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    for dir in ancestors.into_iter().rev() {
+        match tokio::fs::create_dir(dir).await {
+            Ok(()) => written.push(dir.to_path_buf()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("create witness output {}: {error}", dir.display())),
         }
     }
     let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| error.to_string())?;
