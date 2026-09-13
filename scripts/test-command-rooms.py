@@ -150,6 +150,25 @@ def idle_output_untouched(args):
     print('idle unused output preserves ownership and content', flush=True)
 
 
+def witness_output_ownership(args):
+    existing = args.out / 'witness-existing'
+    (existing / 'nested').mkdir(parents=True)
+    sentinel = existing / 'nested/sentinel'
+    sentinel.write_text('untouched')
+    unrelated = [existing, existing / 'nested', sentinel]
+    before = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in unrelated]
+    fresh = args.out / 'witness-fresh'
+    for directory in [existing, fresh]:
+        subprocess.run([str(args.rooms), 'run', '--image', str(args.image), '--readonly-rootfs',
+                        '--witness', '--out', str(directory)], check=True, capture_output=True, timeout=30)
+        for name in ['witness.json', 'witness.pcap']:
+            assert (directory / name).stat().st_uid == int(os.environ.get('SUDO_UID', os.getuid()))
+    after = [(p.stat().st_uid, p.stat().st_gid, p.stat().st_mode) for p in unrelated]
+    assert before == after and sentinel.read_text() == 'untouched'
+    assert fresh.stat().st_uid == int(os.environ.get('SUDO_UID', os.getuid()))
+    print('witness owns generated entries only; unrelated directory preserved', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rooms', type=Path, required=True)
@@ -191,6 +210,9 @@ echo DISK_AND_REPO_OK
     assert (out / 'private/value').read_text().strip() == 'readable'
     assert (out / 'private/value').stat().st_mode & 0o600 == 0o600
     assert (out / 'private').stat().st_mode & 0o700 == 0o700
+    out, result = run_case(args, 'without-guest-sudo',
+                           'sudo mv /usr/bin/sudo /usr/bin/sudo.disabled; echo NO_SUDO_OK', 0)
+    assert 'NO_SUDO_OK' in (out / 'logs/stdout.log').read_text()
     partial = 'echo PARTIAL_STDOUT; echo PARTIAL_STDERR >&2; sleep 120'
     out, result = run_case(args, 'timeout', partial, 124, ['--max-wall', '30s'])
     assert result['status'] == 'timed_out'
@@ -235,6 +257,7 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'chown-stall')
     reject_missing_init(args)
     idle_output_untouched(args)
+    witness_output_ownership(args)
     assert sha256(args.image) == before, 'shared image changed'
     print('PASS: resources, repository, patch, isolation, timeout, SIGTERM, ownership, collection failure, patch failure, boot/finalization cancellation, image admission, cleanup, image hash')
 

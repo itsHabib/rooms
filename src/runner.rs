@@ -360,7 +360,10 @@ pub async fn collect_out_to_host(
     let ssh_out = ssh_command(
         target,
         key_path,
-        "if [ -d /workspace/out ]; then sudo -n tar cf - -C /workspace/out .; else exit 0; fi",
+        "if [ ! -d /workspace/out ]; then exit 0; fi; \
+         if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then \
+             exec sudo -n tar cf - -C /workspace/out .; fi; \
+         exec tar cf - -C /workspace/out .",
         false,
         SSH_AUXILIARY_CONNECT_TIMEOUT,
     )?
@@ -430,13 +433,13 @@ done'"#;
 
 /// Return finalized output to the invoking sudo user, without following links.
 /// Direct root invocations retain root ownership.
-pub async fn return_artifact_ownership(dir: &Path) -> Result<()> {
+pub async fn return_artifact_ownership(dir: &Path, recursive: bool) -> Result<()> {
     let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) else {
         return Ok(());
     };
     let owner = format!("{}:{}", uid.parse::<u32>()?, gid.parse::<u32>()?);
     let output = Command::new("chown")
-        .args(["-hR", "--", &owner])
+        .args([if recursive { "-hR" } else { "-h" }, "--", &owner])
         .arg(dir)
         .kill_on_drop(true)
         .output()
@@ -840,6 +843,16 @@ async fn run_wrapped(
     })
 }
 
+fn resolve_base_command(repo: &str, revision: &str) -> String {
+    let repo = shell_single_quote(repo);
+    let direct = shell_single_quote(&format!("{revision}^{{commit}}"));
+    let remote = shell_single_quote(&format!("refs/remotes/origin/{revision}^{{commit}}"));
+    format!(
+        "git -C {repo} rev-parse --verify --end-of-options {direct} 2>/dev/null || \
+         git -C {repo} rev-parse --verify --end-of-options {remote}"
+    )
+}
+
 /// Clone and resolve the requested base before running guest code. Keep the
 /// resolved object ID in host memory so guest ref edits cannot change the diff base.
 async fn clone_repo_in_guest(
@@ -850,10 +863,10 @@ async fn clone_repo_in_guest(
     connect_timeout: Duration,
 ) -> Result<String> {
     let url = shell_single_quote(repo_url);
-    let sha = shell_single_quote(base_sha);
+    let resolve = resolve_base_command("/workspace/repo", base_sha);
     let remote = format!(
         "rm -rf /workspace/repo && git clone -- {url} /workspace/repo && \
-         base=$(git -C /workspace/repo rev-parse --verify --end-of-options {sha}^{{commit}}) && \
+         base=$({resolve}) && \
          git -C /workspace/repo checkout --detach \"$base\" && \
          git -C /workspace/repo rev-parse HEAD"
     );
@@ -1344,6 +1357,78 @@ mod tests {
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
+
+    #[cfg(unix)]
+    #[test]
+    fn base_revision_resolves_a_nondefault_remote_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let remote = temp.path().join("remote.git");
+        let clone = temp.path().join("clone");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            super::run_git(cwd, args, "fixture git").unwrap();
+        };
+        git(
+            temp.path(),
+            &["init", "-b", "main", source.to_str().unwrap()],
+        );
+        let commit = [
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@rooms.local",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ];
+        git(&source, &commit);
+        git(&source, &["checkout", "-b", "feature"]);
+        git(&source, &commit);
+        let feature = std::process::Command::new("git")
+            .current_dir(&source)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
+        git(&source, &["checkout", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            temp.path(),
+            &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(super::resolve_base_command(
+                clone.to_str().unwrap(),
+                "feature",
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, feature);
+        let missing = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(super::resolve_base_command(
+                clone.to_str().unwrap(),
+                "does-not-exist",
+            ))
+            .output()
+            .unwrap();
+        assert!(!missing.status.success());
+    }
 
     #[test]
     fn shell_single_quote_handles_meta_and_embedded_quotes() {
