@@ -3923,10 +3923,10 @@ async fn collect_run_artifacts(
 }
 
 async fn bounded_artifact_ownership(dir: &Path) -> Result<(), String> {
-    match tokio::time::timeout(PRE_TEARDOWN_GRACE, runner::return_artifact_ownership(dir)).await {
-        Ok(result) => result.map_err(|error| error.to_string()),
-        Err(_) => Err("artifact ownership repair timed out".to_owned()),
-    }
+    tokio::time::timeout(PRE_TEARDOWN_GRACE, runner::return_artifact_ownership(dir))
+        .await
+        .map_err(|_| "artifact ownership repair timed out".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
