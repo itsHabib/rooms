@@ -3905,9 +3905,7 @@ async fn collect_run_artifacts(
     };
     let ownership = match out_dir {
         Some(dir) if dir.is_dir() && (matches!(action, Action::Exec(_)) || witnessed.is_some()) => {
-            runner::return_artifact_ownership(dir)
-                .await
-                .map_err(|e| e.to_string())
+            bounded_artifact_ownership(dir).await
         }
         _ => Ok(()),
     };
@@ -3922,6 +3920,13 @@ async fn collect_run_artifacts(
         "artifact finalization failed: {}",
         errors.join("; ")
     )))
+}
+
+async fn bounded_artifact_ownership(dir: &Path) -> Result<(), String> {
+    match tokio::time::timeout(PRE_TEARDOWN_GRACE, runner::return_artifact_ownership(dir)).await {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(_) => Err("artifact ownership repair timed out".to_owned()),
+    }
 }
 
 fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {

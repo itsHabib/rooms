@@ -59,9 +59,9 @@ def cancellation_probe(args, program):
     tools = args.out / (program + '-tools')
     tools.mkdir()
     marker = tools / 'started'
-    formatter = tools / program
+    formatter = tools / program.removesuffix('-stall')
     finish = {'mkfs.ext4': 'exec sleep 120', 'chmod': 'exec sleep 120', 'curl': 'exec sleep 120',
-              'chown': 'sleep 2; exec /usr/bin/chown "$@"'}[program]
+              'chown-stall': 'exec sleep 120', 'chown': 'sleep 2; exec /usr/bin/chown "$@"'}[program]
     formatter.write_text('#!/bin/sh\necho $$ > ' + shlex.quote(str(marker)) + '\n' + finish + '\n')
     formatter.chmod(0o755)
     lifecycle = args.out / (program + '-cancel.ndjson')
@@ -90,8 +90,8 @@ def cancellation_probe(args, program):
     assert not Path(f'/proc/{formatter_pid}').exists(), program + ' survived cancellation'
     history = events(lifecycle)
     booted = any(e['event'] == 'vmm_started' for e in history)
-    assert booted == (program in ('chown', 'chmod')), history
-    if program in ('chown', 'chmod'):
+    assert booted == (program in ('chown', 'chown-stall', 'chmod')), history
+    if program in ('chown', 'chown-stall', 'chmod'):
         assert history[-1]['event'] == 'cleanup_done'
         result = json.loads((tools / 'out/result.json').read_text())
         assert result['status'] == 'succeeded' and result['exit_code'] == 0
@@ -232,6 +232,7 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'curl')
     cancellation_probe(args, 'chown')
     cancellation_probe(args, 'chmod')
+    cancellation_probe(args, 'chown-stall')
     reject_missing_init(args)
     idle_output_untouched(args)
     assert sha256(args.image) == before, 'shared image changed'
