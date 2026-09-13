@@ -230,3 +230,17 @@ recorded startup-performance limitation: this single-run CLI hashes before its
 first await, signal-task registration and resource claim. No concurrent room
 work exists in that process during preflight. Revisit blocking-task offload if
 admission is reused by a long-lived concurrent service.
+
+### Final review follow-up — 2026-09-13
+
+Toolstore-only admission now requires a regular executable overlay init before
+reading its capability marker. The live malformed-init probe covers a marker-
+bearing non-executable file and directory, both refused before slot admission.
+
+Publication defers SIGINT/SIGTERM through the no-clobber rename and parent fsync;
+a signal after commit exits successfully, so an already-published toolstore is
+not reported as a failed build. A killed `mv` is reconciled against the original
+publication directory inode. Run `python3 scripts/test-build-toolstore.py` on Linux
+for five no-Nix regressions covering signal timing, preserved existing output,
+and hidden-source handling. Python 3.12 pathlib includes dotfiles in `rglob('*')`;
+a hidden symlink is rejected before Nix and hidden nested files are hashed.

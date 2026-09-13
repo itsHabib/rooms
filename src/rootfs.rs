@@ -121,6 +121,7 @@ pub fn validate_scratch_image(path: &Path) -> Result<(), String> {
 
 /// Refuse older boot images that would silently ignore a toolchain disk.
 pub fn validate_toolstore_image(path: &Path) -> Result<(), String> {
+    validate_overlay_image(path)?;
     let init = debugfs(path, "cat /sbin/overlay-init")?;
     if !has_toolstore_hook(&init) {
         return Err(

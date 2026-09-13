@@ -149,6 +149,31 @@ def invalid_inputs(args):
     return cases
 
 
+def invalid_boot_init(args):
+    directory = args.out / 'invalid-init'
+    directory.mkdir()
+    image = directory / 'rootfs.ext4'
+    with image.open('wb') as disk:
+        disk.truncate(32 * 1024 * 1024)
+    subprocess.run(['mkfs.ext4', '-q', '-F', str(image)], check=True)
+    (directory / 'vmlinux.bin').symlink_to(args.image.parent / 'vmlinux.bin')
+    script = directory / 'overlay-init'
+    script.write_text('#!/bin/sh\n# rooms-toolstore-v1\n')
+    for command in ['mkdir /sbin', f'write {script} /sbin/overlay-init']:
+        subprocess.run(['debugfs', '-w', '-R', command, str(image)], check=True, capture_output=True)
+    for mode in ['0100644', '040755']:
+        subprocess.run(['debugfs', '-w', '-R', f'set_inode_field /sbin/overlay-init mode {mode}', str(image)],
+                       check=True, capture_output=True)
+        lifecycle = directory / (mode + '.ndjson')
+        result = subprocess.run([str(args.rooms), 'run', '--image', str(image),
+                                 '--toolstore', str(args.toolstore), '--command', 'true',
+                                 '--lifecycle', str(lifecycle)], capture_output=True, text=True, timeout=15)
+        assert result.returncode == 2, result
+        assert 'executable regular' in result.stderr, result
+        assert not lifecycle.exists() or not lifecycle.read_text().strip(), 'claimed invalid image'
+    print('toolstore-only invalid init rejected before claim', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rooms', type=Path, required=True)
@@ -159,6 +184,7 @@ def main():
     args.out.mkdir(parents=True)
     before = {str(p):digest(p) for p in [args.image, args.toolstore / 'toolstore.sqfs']}
     evidence = []
+    invalid_boot_init(args)
     try:
         evidence.append(run(args, 'polyglot-disk', POLYGLOT, extra=['--disk','2']))
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:

@@ -60,6 +60,37 @@ def sync_directory(path):
         os.close(descriptor)
 
 
+def published_termination(_signum, _frame):
+    # Publication is committed; interruption must not report a failed build.
+    raise SystemExit(0)
+
+
+def publish_directory(source, destination):
+    # This short transaction decides whether output exists. Defer termination
+    # through rename + parent fsync; after commit, a signal exits successfully.
+    identity = source.stat()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    for sig in previous:
+        signal.signal(sig, lambda _signum, _frame: None)
+    try:
+        try:
+            run(['mv', '--no-clobber', '-T', '--', str(source), str(destination)])
+        except subprocess.CalledProcessError:
+            # A process-group signal may kill mv after the rename completed.
+            published = destination.stat() if destination.exists() else None
+            if published is None or (published.st_dev, published.st_ino) != (identity.st_dev, identity.st_ino):
+                raise
+        if source.exists():
+            raise FileExistsError(destination)
+        sync_directory(destination.parent)
+    except BaseException:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        raise
+    for sig in previous:
+        signal.signal(sig, published_termination)
+
+
 def store_path(value):
     path = Path(value)
     if path.parent != Path('/nix/store') or not (path.exists() or path.is_symlink()):
@@ -153,14 +184,11 @@ def build(args, flake):
             # replace even an empty output directory created by another caller.
             if args.out.exists() or args.out.is_symlink():
                 raise FileExistsError(args.out)
-            run(['mv', '--no-clobber', '-T', '--', str(publish), str(args.out)])
-            if publish.exists():
-                raise FileExistsError(args.out)
+            publish_directory(publish, args.out)
         except BaseException:
             if image.exists():
                 run(['sudo', '-n', 'chattr', '-i', '--', str(image)])
             raise
-        sync_directory(args.out.parent)
         print(json.dumps(dict(directory=str(args.out), **manifest)))
 
 
