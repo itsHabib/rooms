@@ -312,10 +312,10 @@ pub struct GuestExecOutcome {
     pub status: RunStatus,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
-    /// A post-run branch-push failure (cursor + `--push-branch` only). The
+    /// A post-run patch-export or branch-push failure. The
     /// workload finished and `exit_code`/`result.json` are real; the caller
     /// decides whether the persist failure fails the run.
-    pub push_error: Option<String>,
+    pub post_run_error: Option<String>,
 }
 
 /// Drive `runner` in the guest, writing `result.json` per the runner contract.
@@ -603,7 +603,7 @@ pub async fn exec_in_guest(
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
-        push_error: None,
+        post_run_error: None,
     })
 }
 
@@ -633,14 +633,13 @@ async fn exec_repository_command(
     );
     result.patch_path = patch.as_ref().ok().map(|()| "result.patch".to_owned());
     write_guest_result_json_with_timeout(target, key, &result, timeout).await?;
-    // Preserve the command outcome before reporting an incomplete patch export.
-    patch?;
+    // Return the real exit alongside export failure so lifecycle records both.
     Ok(GuestExecOutcome {
         exit_code: run.exit_code,
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
-        push_error: None,
+        post_run_error: patch.err().map(|error| error.to_string()),
     })
 }
 
@@ -761,7 +760,7 @@ pub async fn exec_cursor_in_guest(
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
-        push_error: push_err.map(|e| e.to_string()),
+        post_run_error: push_err.map(|e| e.to_string()),
     })
 }
 
