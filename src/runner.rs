@@ -376,8 +376,14 @@ pub async fn collect_out_to_host(
 ) -> Result<()> {
     let mut created = Vec::new();
     let result = collect_out_to_host_observed(target, key_path, host_dir, &mut created).await;
-    created.retain(|path| path != host_dir);
-    let ownership = return_artifact_ownership(&created, false).await;
+    let ownership = async {
+        if created.iter().any(|path| path == host_dir) {
+            return_artifact_ownership(&[host_dir.to_path_buf()], true).await?;
+        }
+        created.retain(|path| path != host_dir);
+        return_artifact_ownership(&created, false).await
+    }
+    .await;
     result?;
     ownership
 }
@@ -1438,6 +1444,53 @@ mod tests {
         clippy::panic,
         reason = "test module: panicky lints are noise in tests"
     )]
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires sudo and ROOMS_TEST_COLLECT_FIXTURE ssh tar fixture on PATH"]
+    async fn direct_collection_returns_restrictive_output_to_caller() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        assert_eq!(
+            std::env::var("ROOMS_TEST_COLLECT_FIXTURE").as_deref(),
+            Ok("1")
+        );
+        let uid: u32 = std::env::var("SUDO_UID").unwrap().parse().unwrap();
+        assert_ne!(uid, 0, "requires a non-root invoking user");
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            directory.path().metadata().unwrap().uid(),
+            0,
+            "requires root"
+        );
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = directory.path().join("created-parent/run");
+        super::collect_out_to_host(
+            GuestTarget::flat("127.0.0.1"),
+            std::path::Path::new("/unused-test-key"),
+            &out,
+        )
+        .await
+        .unwrap();
+        for path in [
+            out.parent().unwrap().to_path_buf(),
+            out.clone(),
+            out.join("private"),
+        ] {
+            assert_eq!(path.metadata().unwrap().uid(), uid, "{}", path.display());
+        }
+        assert_eq!(directory.path().metadata().unwrap().uid(), 0);
+        assert_eq!(
+            out.join("private").metadata().unwrap().mode() & 0o777,
+            0o600
+        );
+        let read = std::process::Command::new("sudo")
+            .args(["-n", "-u", &format!("#{uid}"), "cat"])
+            .arg(out.join("private"))
+            .output()
+            .unwrap();
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(read.stdout, b"private artifact\n");
+    }
 
     use std::time::Duration;
 

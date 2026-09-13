@@ -3936,7 +3936,9 @@ async fn collect_run_artifacts(
         (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut created).await,
         _ => Ok(()),
     };
-    let recursive_root = out_dir.filter(|dir| dir.is_dir() && matches!(action, Action::Exec(_)));
+    let recursive_root = out_dir.filter(|dir| {
+        dir.is_dir() && matches!(action, Action::Exec(_)) && created.iter().any(|path| path == *dir)
+    });
     let ownership = bounded_artifact_ownership(recursive_root, &created).await;
     let errors = [collection.err(), witness.err(), ownership.err()]
         .into_iter()
