@@ -433,14 +433,14 @@ done'"#;
 
 /// Return finalized output to the invoking sudo user, without following links.
 /// Direct root invocations retain root ownership.
-pub async fn return_artifact_ownership(dir: &Path, recursive: bool) -> Result<()> {
+pub async fn return_artifact_ownership(paths: &[PathBuf], recursive: bool) -> Result<()> {
     let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) else {
         return Ok(());
     };
     let owner = format!("{}:{}", uid.parse::<u32>()?, gid.parse::<u32>()?);
     let output = Command::new("chown")
         .args([if recursive { "-hR" } else { "-h" }, "--", &owner])
-        .arg(dir)
+        .args(paths)
         .kill_on_drop(true)
         .output()
         .await?;

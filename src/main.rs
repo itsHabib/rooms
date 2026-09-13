@@ -3899,15 +3899,16 @@ async fn collect_run_artifacts(
         Some(capture) => Some(summarize_witness(capture, slot, env).await),
         None => None,
     };
+    let mut witness_paths = Vec::new();
     let witness = match (&witnessed, out_dir) {
-        (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut witness_paths).await,
         _ => Ok(()),
     };
     let ownership = match out_dir {
         Some(dir) if dir.is_dir() && matches!(action, Action::Exec(_)) => {
-            bounded_artifact_ownership(dir, true).await
+            bounded_artifact_ownership(&[dir.to_path_buf()], true).await
         }
-        _ => Ok(()),
+        _ => bounded_artifact_ownership(&witness_paths, false).await,
     };
     let errors = [collection.err(), witness.err(), ownership.err()]
         .into_iter()
@@ -3922,10 +3923,13 @@ async fn collect_run_artifacts(
     )))
 }
 
-async fn bounded_artifact_ownership(dir: &Path, recursive: bool) -> Result<(), String> {
+async fn bounded_artifact_ownership(paths: &[PathBuf], recursive: bool) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
     tokio::time::timeout(
         PRE_TEARDOWN_GRACE,
-        runner::return_artifact_ownership(dir, recursive),
+        runner::return_artifact_ownership(paths, recursive),
     )
     .await
     .map_err(|_| "artifact ownership repair timed out".to_owned())?
@@ -4013,7 +4017,11 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// gets its witness. Failures are returned after logging so matrix callers can
 /// treat missing evidence as terminal while legacy run/restore behavior stays
 /// best-effort at their call sites.
-async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
+async fn persist_witness(
+    w: &Witnessed,
+    out_dir: &Path,
+    written: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     // Only a directory created by this invocation belongs to its output set.
     if let Some(parent) = out_dir.parent() {
         tokio::fs::create_dir_all(parent)
@@ -4021,7 +4029,7 @@ async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     match tokio::fs::create_dir(out_dir).await {
-        Ok(()) => bounded_artifact_ownership(out_dir, false).await?,
+        Ok(()) => written.push(out_dir.to_path_buf()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
             return Err(format!(
@@ -4038,7 +4046,7 @@ async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
         write_out_atomic(out_dir, name, data)
             .await
             .map_err(|error| format!("write {name}: {error}"))?;
-        bounded_artifact_ownership(&out_dir.join(name), false).await?;
+        written.push(out_dir.join(name));
     }
     Ok(())
 }

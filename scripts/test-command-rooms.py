@@ -55,8 +55,8 @@ def run_case(args, name, command, expected, extra=(), terminate=False, guest_exi
     return out, result
 
 
-def cancellation_probe(args, program):
-    tools = args.out / (program + '-tools')
+def cancellation_probe(args, program, witness=False):
+    tools = args.out / (program + ('-witness' if witness else '') + '-tools')
     tools.mkdir()
     marker = tools / 'started'
     formatter = tools / program.removesuffix('-stall')
@@ -69,7 +69,7 @@ def cancellation_probe(args, program):
     with (args.out / (program + '-cancel.host.log')).open('w') as log:
         process = subprocess.Popen([str(args.rooms), 'run', '--image', str(args.image),
                                     '--disk', '1', '--command', 'echo COMPLETED_COMMAND', '--out', str(tools / 'out'),
-                                    '--lifecycle', str(lifecycle)], env=environment,
+                                    '--lifecycle', str(lifecycle), *(['--witness'] if witness else [])], env=environment,
                                    stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 30
@@ -255,6 +255,7 @@ echo DISK_AND_REPO_OK
     cancellation_probe(args, 'chown')
     cancellation_probe(args, 'chmod')
     cancellation_probe(args, 'chown-stall')
+    cancellation_probe(args, 'chown-stall', witness=True)
     reject_missing_init(args)
     idle_output_untouched(args)
     witness_output_ownership(args)
