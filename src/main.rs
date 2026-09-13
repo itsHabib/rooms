@@ -3904,8 +3904,8 @@ async fn collect_run_artifacts(
         _ => Ok(()),
     };
     let ownership = match out_dir {
-        Some(dir) if dir.is_dir() && (matches!(action, Action::Exec(_)) || witnessed.is_some()) => {
-            bounded_artifact_ownership(dir).await
+        Some(dir) if dir.is_dir() && matches!(action, Action::Exec(_)) => {
+            bounded_artifact_ownership(dir, true).await
         }
         _ => Ok(()),
     };
@@ -3922,11 +3922,14 @@ async fn collect_run_artifacts(
     )))
 }
 
-async fn bounded_artifact_ownership(dir: &Path) -> Result<(), String> {
-    tokio::time::timeout(PRE_TEARDOWN_GRACE, runner::return_artifact_ownership(dir))
-        .await
-        .map_err(|_| "artifact ownership repair timed out".to_owned())?
-        .map_err(|error| error.to_string())
+async fn bounded_artifact_ownership(dir: &Path, recursive: bool) -> Result<(), String> {
+    tokio::time::timeout(
+        PRE_TEARDOWN_GRACE,
+        runner::return_artifact_ownership(dir, recursive),
+    )
+    .await
+    .map_err(|_| "artifact ownership repair timed out".to_owned())?
+    .map_err(|error| error.to_string())
 }
 
 fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
@@ -4011,26 +4014,33 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// treat missing evidence as terminal while legacy run/restore behavior stays
 /// best-effort at their call sites.
 async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
-    tokio::fs::create_dir_all(out_dir).await.map_err(|error| {
-        warn!(out = %out_dir.display(), %error, "failed to create --out for the witness");
-        format!("create witness output {}: {error}", out_dir.display())
-    })?;
-    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| {
-        warn!(%error, "failed to serialize witness.json");
-        format!("serialize witness.json: {error}")
-    })?;
-    write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes)
-        .await
-        .map_err(|error| {
-            warn!(%error, "failed to write witness.json");
-            format!("write witness.json: {error}")
-        })?;
-    write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw)
-        .await
-        .map_err(|error| {
-            warn!(%error, "failed to write witness.pcap into --out");
-            format!("write witness.pcap: {error}")
-        })
+    // Only a directory created by this invocation belongs to its output set.
+    if let Some(parent) = out_dir.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    match tokio::fs::create_dir(out_dir).await {
+        Ok(()) => bounded_artifact_ownership(out_dir, false).await?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(format!(
+                "create witness output {}: {error}",
+                out_dir.display()
+            ))
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| error.to_string())?;
+    for (name, data) in [
+        (artifacts::WITNESS_JSON, bytes.as_slice()),
+        (artifacts::WITNESS_PCAP, w.raw.as_slice()),
+    ] {
+        write_out_atomic(out_dir, name, data)
+            .await
+            .map_err(|error| format!("write {name}: {error}"))?;
+        bounded_artifact_ownership(&out_dir.join(name), false).await?;
+    }
+    Ok(())
 }
 
 /// Atomic artifact write into `--out`: temp file in the same dir, then rename,
