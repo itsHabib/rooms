@@ -1485,8 +1485,8 @@ mod tests {
     use super::{
         canonical_clone_net, create_intent_exclusive, finish_index, pending_all,
         prepare_unsealed_restore_fixture, read_intents, rootfs_compat_hash,
-        validate_output_disjoint, write_intent_atomic, Boundary, RestoreIntent,
-        INTENT_SCHEMA_VERSION,
+        validate_output_disjoint, validate_prepared_request_paths, write_intent_atomic, Boundary,
+        RestoreIntent, RestoreRequest, INTENT_SCHEMA_VERSION,
     };
     use crate::clonenet::{CloneNet, CLONENETS_DIR};
     use crate::config::RoomsConfig;
@@ -1590,6 +1590,38 @@ mod tests {
         assert_eq!(prepared.snapshot_meta().snapshot_id, SNAP_ID);
         assert_eq!(prepared.snapshot_meta().created_at, created_at);
         prepared.identity.revalidate().expect("unchanged source");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_must_name_the_prepared_toolstore() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let prepared =
+            prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
+        let tools = root.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let egress = crate::egress::Plan::Observe;
+        let request = |toolstore| RestoreRequest {
+            room_id: ROOM_ID,
+            snapshot_dir: &snapshot_dir,
+            image: &image,
+            toolstore,
+            target_slot: None,
+            label: None,
+            keep: false,
+            witness: false,
+            egress: &egress,
+            secrets: None,
+            out_dir: None,
+            ack_timeout: std::time::Duration::from_secs(1),
+            clone_net: None,
+        };
+        validate_prepared_request_paths(&config, &request(None), &prepared)
+            .expect("the prepared source had no toolstore");
+        let error = validate_prepared_request_paths(&config, &request(Some(&tools)), &prepared)
+            .expect_err("a batch member cannot swap in another toolstore");
+        assert!(error.to_string().contains("toolstore differs"), "{error}");
     }
 
     #[cfg(unix)]

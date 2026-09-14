@@ -1770,6 +1770,35 @@ mod tests {
         assert!(attached_toolstore(jail.path(), Some(&digest)).is_err());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires root with immutable-inode support; run explicitly on the Rooms host"]
+    fn attached_toolstore_hashes_the_sealed_inode_against_the_record() -> anyhow::Result<()> {
+        use rustix::fs::{ioctl_getflags, ioctl_setflags, IFlags};
+        use sha2::{Digest, Sha256};
+        let jail = tempfile::tempdir()?;
+        let path = jail.path().join("toolstore.sqfs");
+        std::fs::write(&path, b"hsqs-attached-bytes")?;
+        let digest = format!("{:x}", Sha256::digest(b"hsqs-attached-bytes"));
+        let file = std::fs::File::open(&path)?;
+        let baseline = ioctl_getflags(&file)?;
+        ioctl_setflags(&file, baseline | IFlags::IMMUTABLE)?;
+        // Clear the test's seal even if an assertion returns an error.
+        let result = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                attached_toolstore(jail.path(), Some(&digest))? == Some(digest.clone())
+            );
+            let other = "0".repeat(64);
+            let error = attached_toolstore(jail.path(), Some(&other))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("a different admitted digest must be refused"))?;
+            anyhow::ensure!(error.to_string().contains("differs from the digest"));
+            Ok(())
+        })();
+        ioctl_setflags(&file, baseline)?;
+        result
+    }
+
     #[test]
     fn overlap_is_symmetric() {
         assert!(overlaps(Path::new("/a"), Path::new("/a/b")));

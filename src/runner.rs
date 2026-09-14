@@ -1064,7 +1064,7 @@ fn create_repo_bundle(
         let mirror = temp.join("repo.git");
         run_git(
             Path::new("."),
-            &["clone", "--mirror", repo, &mirror.to_string_lossy()],
+            &["clone", "--mirror", "--", repo, &mirror.to_string_lossy()],
             "resolve base repository on host",
         )?;
         mirror
@@ -1114,6 +1114,7 @@ fn bundle_pinned_head(
             "--quiet",
             "--bare",
             "--shared",
+            "--",
             &repo_dir.to_string_lossy(),
             &staging.to_string_lossy(),
         ],

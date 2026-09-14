@@ -152,7 +152,9 @@ pub struct SnapshotMeta {
     pub slot_index: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_ip: Option<Ipv4Addr>,
-    /// Full commit the base's repository was provisioned at, when pinned.
+    /// Full commit the base's repository bundle was pinned to on the host,
+    /// when pinned. The warm command runs afterwards and could move the guest
+    /// checkout, so a consumer that depends on it verifies `HEAD` itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_repo_sha: Option<String>,
     /// SHA-256 of the sealed toolstore attached read-only as the base's second

@@ -91,10 +91,17 @@ code. The implementation closes them as follows.
   attachment without a record, or a record without an attachment, is refused.
 - **Schema.** A snapshot with a toolstore is written as schema v2 with
   `toolstore_sha256`; a snapshot without one stays the exact v1 shape. A
-  pre-toolstore build refuses v2 as an unsupported schema before claiming any
-  restore resource. This build accepts only v1 without a toolstore and v2 with
-  one, and refuses a missing, extra or different toolstore (and any other
-  schema/field combination) in the pure policy, before any restore operation.
+  pre-toolstore build refuses v2 as an unsupported schema during preparation.
+  This build accepts only v1 without a toolstore and v2 with one, and refuses a
+  missing, extra or different toolstore (and any other schema/field
+  combination) in the pure policy. Both refusals come before any restore
+  intent, process or lease; `clone`/`matrix` allocate their host networks
+  concurrently with preparation and drop them on refusal.
+- **Mixed binaries.** `room.json` has no version gate older builds enforce, so a
+  toolstore base must be snapshotted by a toolstore-aware build. A
+  pre-toolstore `rooms snapshot` ignores the recorded digest and publishes a v1
+  snapshot whose restore fails inside Firecracker's load, after the restore
+  claims its lease (cleanup still runs).
 - **Device identity.** Bases are always read-only and never have scratch, so a
   toolstore is always the second drive at the fixed jail path
   `/toolstore.sqfs`. Metadata records only the digest; it never names a path.
