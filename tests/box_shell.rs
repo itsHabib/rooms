@@ -8,7 +8,8 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 // `BOX_TEST_LIMA_INSTANCES` holds "<name> <token>" lines, as `limactl list` prints them.
 const FAKE_LIMACTL: &str = r#"#!/bin/sh
@@ -24,19 +25,20 @@ exit 0
 
 const FAKE_GCLOUD: &str = r#"#!/bin/sh
 echo "gcloud $*" >>"$BOX_TEST_LOG"
+barrier() {
+    [ -n "$1" ] || return 0
+    touch "$1.ready"
+    tries=0
+    while [ ! -f "$1.release" ]; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 1000 ] || exit 1
+        sleep 0.01
+    done
+}
 case "$*" in
     *"instances describe"*) echo 203.0.113.7 ;;
     *"instances list"*)
         [ -n "${BOX_TEST_GCP_LIST_FAILS:-}" ] && exit 1
-        if [ -n "${BOX_TEST_LIST_BARRIER:-}" ]; then
-            touch "$BOX_TEST_LIST_BARRIER/$$"
-            tries=0
-            while [ "$(find "$BOX_TEST_LIST_BARRIER" -type f | wc -l)" -lt 2 ]; do
-                tries=$((tries + 1))
-                [ "$tries" -lt 500 ] || exit 1
-                sleep 0.01
-            done
-        fi
         filter=""
         for arg in "$@"; do
             case "$arg" in --filter=*) filter=${arg#--filter=} ;; esac
@@ -45,9 +47,11 @@ case "$*" in
         name=${name%% *}
         token=""
         case "$filter" in *"labels.rooms_box_token="*) token=${filter##*labels.rooms_box_token=} ;; esac
+        [ -z "$token" ] || barrier "${BOX_TEST_DOWN_BARRIER:-}"
+        if [ -n "${BOX_TEST_CREATED_FILE:-}" ] && [ ! -f "$BOX_TEST_CREATED_FILE" ]; then exit 0; fi
         printf '%s\n' "${BOX_TEST_GCP_LISTED:-}" |
             awk -v n="$name" -v t="$token" '$1 == n && (t == "" || $2 == t) { print $1 }' ;;
-    *"instances create"*) [ -n "${BOX_TEST_CREATE_FAILS:-}" ] && exit 1 ;;
+    *"instances create"*) barrier "${BOX_TEST_CREATE_BARRIER:-}"; [ -n "${BOX_TEST_CREATE_FAILS:-}" ] && exit 1 ;;
 
 esac
 exit 0
@@ -103,12 +107,17 @@ impl Harness {
     }
 
     fn run(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
+        self.command(args, env).output().expect("box.sh runs")
+    }
+
+    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         let path = format!(
             "{}:{}",
             self.path("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        Command::new("bash")
+        let mut command = Command::new("bash");
+        command
             .arg(repo_root().join("scripts/box.sh"))
             .args(args)
             .env("PATH", path)
@@ -121,8 +130,9 @@ impl Harness {
             .env("BOX_TEST_TAR", self.path("shipped.tar"))
             .env_remove("ROOMS_BOX_GCP_PROJECT")
             .envs(env.iter().copied())
-            .output()
-            .expect("box.sh runs")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
     }
 
     fn calls(&self) -> String {
@@ -654,13 +664,55 @@ fn failed_creation_keeps_complete_ownership_for_cleanup() {
     )));
 }
 
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "barrier not reached: {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn concurrent_up_has_one_owner_and_one_creation() {
     let h = Harness::new();
-    fs::create_dir(h.path("barrier")).expect("barrier");
-    let barrier = h.path("barrier").to_string_lossy().into_owned();
-    let run = || {
-        h.run(
+    let barrier = h.path("create").to_string_lossy().into_owned();
+    let args = [
+        "up",
+        "cloudbox",
+        "--backend",
+        "gcp",
+        "--project",
+        "sandbox-1",
+    ];
+    let first = h
+        .command(&args, &[("BOX_TEST_CREATE_BARRIER", &barrier)])
+        .spawn()
+        .expect("first up");
+    wait_for_file(&h.path("create.ready"));
+    let second = h.command(&args, &[]).spawn().expect("second up");
+    fs::write(h.path("create.release"), "").expect("release creation");
+    let a = first.wait_with_output().expect("first up finishes");
+    let b = second.wait_with_output().expect("second up finishes");
+    assert!(a.status.success(), "{}", stderr(&a));
+    assert!(!b.status.success(), "{}", stderr(&b));
+    let calls = h.calls();
+    assert_eq!(calls.matches("instances create").count(), 1, "{calls}");
+    assert!(
+        calls.contains(&format!("rooms_box_token={}", h.token("cloudbox"))),
+        "{calls}"
+    );
+}
+
+#[test]
+fn down_waits_for_inflight_creation_before_removing_ownership() {
+    let h = Harness::new();
+    let barrier = h.path("create").to_string_lossy().into_owned();
+    let up = h
+        .command(
             &[
                 "up",
                 "cloudbox",
@@ -669,29 +721,75 @@ fn concurrent_up_has_one_owner_and_one_creation() {
                 "--project",
                 "sandbox-1",
             ],
-            &[("BOX_TEST_LIST_BARRIER", &barrier)],
+            &[("BOX_TEST_CREATE_BARRIER", &barrier)],
         )
-    };
-    let (a, b) = std::thread::scope(|scope| {
-        let a = scope.spawn(run);
-        let b = scope.spawn(run);
-        (a.join().expect("first up"), b.join().expect("second up"))
-    });
-    assert_ne!(
-        a.status.success(),
-        b.status.success(),
-        "first: {} second: {}",
-        stderr(&a),
-        stderr(&b)
-    );
-    let calls = h.calls();
-    assert_eq!(calls.matches("instances create").count(), 1, "{calls}");
+        .spawn()
+        .expect("up");
+    wait_for_file(&h.path("create.ready"));
+    let instance = h.instance("cloudbox");
+    let listed = format!("{instance} {}", h.token("cloudbox"));
+    let created = h.path("create.release").to_string_lossy().into_owned();
+    let mut down = h
+        .command(
+            &["down", "cloudbox"],
+            &[
+                ("BOX_TEST_GCP_LISTED", &listed),
+                ("BOX_TEST_CREATED_FILE", &created),
+            ],
+        )
+        .spawn()
+        .expect("down");
+    std::thread::sleep(Duration::from_millis(250));
+    let waited = down.try_wait().expect("probe down").is_none();
+    fs::write(h.path("create.release"), "").expect("release");
+    let up = up.wait_with_output().expect("up finishes");
+    let down = down.wait_with_output().expect("down finishes");
+    assert!(waited, "down removed ownership during creation");
+    assert!(up.status.success(), "{}", stderr(&up));
+    assert!(down.status.success(), "{}", stderr(&down));
+    assert!(h.calls().contains(&format!("instances delete {instance}")));
+    assert!(!h.path("state/cloudbox").exists());
+    assert!(h.path("state/.locks/cloudbox").is_file());
+}
+
+#[test]
+fn overlapping_down_cannot_carry_stale_state_across_alias_reuse() {
+    let h = Harness::new();
+    h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    let old = h.instance("cloudbox");
+    let barrier = h.path("down").to_string_lossy().into_owned();
+    let slow = h
+        .command(
+            &["down", "cloudbox"],
+            &[("BOX_TEST_DOWN_BARRIER", &barrier)],
+        )
+        .spawn()
+        .expect("slow down");
+    wait_for_file(&h.path("down.ready"));
+    let mut second = h
+        .command(&["down", "cloudbox"], &[])
+        .spawn()
+        .expect("second down");
+    std::thread::sleep(Duration::from_millis(250));
+    let waited = second.try_wait().expect("probe second down").is_none();
+    fs::write(h.path("down.release"), "").expect("release");
+    assert!(slow
+        .wait_with_output()
+        .expect("slow down finishes")
+        .status
+        .success());
+    assert!(!second
+        .wait_with_output()
+        .expect("second down finishes")
+        .status
+        .success());
     assert!(
-        calls.contains(&format!("rooms_box_token={}", h.token("cloudbox"))),
-        "{calls}"
+        waited,
+        "second down read stale generation while first was active"
     );
-    let record = fs::read_to_string(h.path("state/cloudbox/box.env")).expect("ownership record");
-    assert_eq!(record.matches("BOX_TOKEN=").count(), 1, "{record}");
+    h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    assert_ne!(h.instance("cloudbox"), old);
+    assert!(h.path("state/cloudbox/box.env").is_file());
 }
 
 #[test]

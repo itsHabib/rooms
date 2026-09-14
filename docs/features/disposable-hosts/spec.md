@@ -67,6 +67,13 @@ without such a rule `up` stops when SSH does not answer in time.
   name, so stale cleanup cannot delete that replacement generation.
   Old experimental records without a generation are refused for explicit
   backend cleanup; the script does not guess their ownership.
+- `up` and `down` take an OS advisory lock on `.locks/<alias>` for their
+  entire lifecycle. Lock files are outside the removable alias directory and
+  are never unlinked. Python 3's standard-library `fcntl.flock` provides the
+  same mechanism on macOS and Linux; no stale PID file or lock daemon is used.
+  The descriptor is inherited by the execution and provider processes. A down
+  waits for an in-flight creation or earlier down before loading its generation.
+  Python 3 is therefore a local prerequisite for these two commands.
 - A complete private manifest (backend, token, project and zone) is prepared
   first, then published with an exclusive hard link as `box.env`. Only the
   winning `up` can create a VM; a competing `up` cannot overwrite its token.

@@ -353,10 +353,40 @@ cmd_down() {
     rm -rf "$BOX_DIR"
 }
 
+# Kernel-held locks outlive removal of the alias directory and release on
+# process exit. Keep the fd inheritable so a provider CLI still completing after
+# its parent is interrupted retains the lock. Never unlink these lock files.
+lock_lifecycle() {
+    local name="${2:-}"
+    [[ -n "$name" ]] || usage
+    validate_name "$name"
+    require_cmd python3
+    mkdir -p "$STATE_ROOT/.locks"
+    exec python3 - "$STATE_ROOT/.locks/$name" "$REPO_ROOT/scripts/box.sh" "$@" <<'PYLOCK'
+import fcntl
+import os
+import sys
+
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+os.set_inheritable(fd, True)
+os.execvp("bash", ["bash", sys.argv[2], "--lifecycle-locked", *sys.argv[3:]])
+PYLOCK
+}
+
 main() {
     local cmd="${1:-}"
     [[ -n "$cmd" ]] || usage
     shift
+    # Internal re-entry after the Python launcher transfers its locked fd.
+    if [[ "$cmd" == --lifecycle-locked ]]; then
+        cmd="${1:-}"
+        shift
+        case "$cmd" in up|down) ;; *) usage ;; esac
+        case "$cmd" in up) cmd_up "$@" ;; down) cmd_down "$@" ;; esac
+        return
+    fi
+    case "$cmd" in up|down) lock_lifecycle "$cmd" "$@" ;; esac
     case "$cmd" in
         up) cmd_up "$@" ;;
         provision) cmd_provision "$@" ;;
