@@ -1,4 +1,5 @@
 #!/bin/sh
+# rooms-toolstore-v1
 # /sbin/overlay-init — PID 1 under a read-only rootfs. Build a tmpfs-backed
 # overlay (RO root = lowerdir) and pivot into BusyBox /sbin/init.
 set -e
@@ -18,6 +19,26 @@ mkdir -p /mnt/upper /mnt/work /mnt/newroot
 mount -t overlay overlay \
   -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work \
   /mnt/newroot
+
+# Toolchains carry their own dynamic loaders and libc under /nix/store.
+# Mount the complete closure outside the writable overlay. Any failure aborts
+# before SSH starts; no fallback to an incomplete PATH is allowed.
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    rooms.toolstore=vdb|rooms.toolstore=vdc)
+      mkdir -p /mnt/newroot/nix
+      mount -t squashfs -o ro "/dev/${arg#rooms.toolstore=}" /mnt/newroot/nix
+      # Resolve the buildEnv's absolute /nix/store links inside the new root.
+      if ! chroot /mnt/newroot /bin/sh -c 'test -d /nix/var/rooms/env/bin'; then
+        echo "rooms: toolstore is missing its buildEnv bin directory" >/dev/console
+        exit 1
+      fi
+      # SSH sessions inherit toolchains without rewriting command receipts.
+      sed -i '1iSetEnv PATH=/nix/var/rooms/env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+        /mnt/newroot/etc/ssh/sshd_config
+      ;;
+  esac
+done
 
 # A base boots without an interactive surface. These changes live only in the
 # tmpfs upper layer; ordinary rooms run boots retain the image's sshd/getty.

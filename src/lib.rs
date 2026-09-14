@@ -23,6 +23,7 @@ pub mod runner;
 pub mod slot;
 pub mod snapshot;
 pub mod snapshot_exec;
+pub mod toolstore;
 pub mod transport;
 pub mod veth_isolation;
 pub mod vsock;

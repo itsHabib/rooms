@@ -56,6 +56,10 @@ enum Command {
         /// implies --readonly-rootfs. Removed after output collection.
         #[arg(long, conflicts_with = "keep", value_parser = clap::value_parser!(u32).range(1..=1024))]
         disk: Option<u32>,
+        /// Sealed Nix toolstore directory built by scripts/build-toolstore.py.
+        /// Cold command runs only; mounted read-only and added to PATH.
+        #[arg(long, requires = "command", conflicts_with_all = ["keep", "task"])]
+        toolstore: Option<PathBuf>,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
         /// Mutually exclusive with the exec paths. Suppresses cleanup for debugging.
         #[arg(long, conflicts_with_all = ["command", "task"])]
@@ -401,6 +405,7 @@ enum RunnerKind {
 struct RunArgs {
     resources: firecracker::Resources,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     keep: bool,
     command: Option<String>,
     runner: RunnerKind,
@@ -778,6 +783,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             cpus,
             memory,
             disk,
+            toolstore,
             image,
             keep,
             command,
@@ -805,6 +811,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                         disk_gib: disk,
                     },
                     image,
+                    toolstore,
                     keep,
                     command,
                     runner,
@@ -1178,6 +1185,15 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     if args.repo.is_some() && args.resources.disk_gib.is_none() {
         rootfs::validate_overlay_image(&args.image).map_err(RoomsError::Internal)?;
     }
+    let toolstore = args
+        .toolstore
+        .as_deref()
+        .map(rooms::toolstore::Toolstore::open)
+        .transpose()
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    if toolstore.is_some() {
+        rootfs::validate_toolstore_image(&args.image).map_err(RoomsError::Internal)?;
+    }
     // `--secret` admission, part two (values were harvested pre-runtime in
     // `main`): prove the guest kernel can even open a vsock, before any slot
     // is claimed or VM booted.
@@ -1218,6 +1234,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     let readonly_rootfs = args.readonly_rootfs
         || args.resources.disk_gib.is_some()
         || args.repo.is_some()
+        || toolstore.is_some()
         || matches!(args.runner, RunnerKind::Cursor);
 
     // Mint the room id before the claim so it stays the canonical identity; then
@@ -1251,6 +1268,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     };
     let boot_req = firecracker::BootRequest {
         resources: args.resources,
+        toolstore: toolstore.as_ref(),
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -1285,6 +1303,11 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             return Err(e.into());
         }
     };
+    if let Some(toolstore) = &toolstore {
+        lifecycle.emit(&Event::ToolstoreAttached {
+            sha256: toolstore.digest().to_owned(),
+        });
+    }
     emit_started(
         &lifecycle,
         vm.pid(),
@@ -1405,6 +1428,7 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     let egress_plan = egress::resolve(&egress::Policy::None).map_err(RoomsError::Internal)?;
     let boot_req = firecracker::BootRequest {
         resources: firecracker::Resources::default(),
+        toolstore: None,
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -6288,6 +6312,7 @@ mod tests {
         // default-command case: `rooms run --image x --push-branch foo`).
         let args = RunArgs {
             resources: rooms::firecracker::Resources::default(),
+            toolstore: None,
             image: PathBuf::from("x"),
             keep: false,
             command: None,
@@ -6314,6 +6339,41 @@ mod tests {
             ),
             Ok(_) => panic!("--push-branch with the default command runner should be rejected"),
             Err(other) => panic!("expected an Internal error; got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn toolstore_preserves_literal_command_in_plain_and_repository_action_metadata() {
+        let command = "# caller comment\nprintf 'literal command\\n'";
+        let mut args = RunArgs {
+            resources: rooms::firecracker::Resources::default(),
+            toolstore: Some(PathBuf::from("store")),
+            image: PathBuf::from("image"),
+            keep: false,
+            command: Some(command.to_owned()),
+            runner: RunnerKind::Command,
+            repo: None,
+            task: None,
+            model: None,
+            base_sha: None,
+            push_branch: None,
+            out_dir: None,
+            readonly_rootfs: false,
+            max_wall: None,
+            max_pool: None,
+            json: false,
+            lifecycle: None,
+            witness: false,
+            secrets: None,
+            egress: crate::egress::Policy::Observe,
+        };
+        for repo in [None, Some("https://example.com/repo.git".to_owned())] {
+            args.repo = repo;
+            let super::Action::Exec(run) = resolve_action(&args).await.expect("command action")
+            else {
+                panic!("expected executable command");
+            };
+            assert_eq!(run.command_argv(), vec!["sh", "-c", command]);
         }
     }
 
@@ -6453,5 +6513,21 @@ mod tests {
         assert!(
             Cli::try_parse_from(["rooms", "run", "--image", "x", "--disk", "8", "--keep"]).is_err()
         );
+    }
+
+    #[test]
+    fn toolstores_require_a_disposable_command() {
+        let base = [
+            "rooms",
+            "run",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--keep"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--task", "do work"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--command", "cargo test"])).is_ok());
     }
 }

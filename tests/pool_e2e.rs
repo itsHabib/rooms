@@ -252,6 +252,7 @@ async fn room_boots_on_slot_1_and_reaps_byte_identically() {
     let descriptor = rooms::room::RoomDescriptor::default();
     let req = BootRequest {
         resources: firecracker::Resources::default(),
+        toolstore: None,
         kernel: &kernel,
         rootfs: &rootfs,
         network: Some(&network),
@@ -373,6 +374,7 @@ async fn claim_and_boot(
         let descriptor = rooms::room::RoomDescriptor::default();
         let req = BootRequest {
             resources: firecracker::Resources::default(),
+            toolstore: None,
             kernel,
             rootfs,
             network: Some(&network),

@@ -43,6 +43,8 @@ pub enum Event {
     /// reaped child as `None`; on the emit path the process was just spawned,
     /// so consumers can expect it present.
     VmmStarted { pid: Option<u32> },
+    /// A hash-checked, kernel-immutable toolchain disk was attached read-only.
+    ToolstoreAttached { sha256: String },
     /// Boot never reached a started VMM (jail prep, tap create, API timeout).
     BootFailed { error: String },
     /// The guest kernel is up: the guest answered on its network.
