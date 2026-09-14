@@ -137,6 +137,10 @@ impl Harness {
         out
     }
 
+    fn instance(&self, name: &str) -> String {
+        format!("{name}-{}", self.token(name))
+    }
+
     fn token(&self, name: &str) -> String {
         let env = fs::read_to_string(self.path(&format!("state/{name}/box.env"))).expect("box.env");
         env.lines()
@@ -231,7 +235,7 @@ fn gcp_up_creates_an_auto_deleting_nested_spot_vm() {
     assert!(config.contains("User rooms"), "{config}");
     let line = stdout(&out);
     assert!(line.contains(r#""backend":"gcp""#), "{line}");
-    assert!(line.contains(r#""host":"box-cloudbox""#), "{line}");
+    assert!(line.contains(r#""host":"box-cloudbox-"#), "{line}");
 }
 
 #[test]
@@ -262,14 +266,17 @@ fn lima_up_uses_the_repo_definition_without_mounts() {
     let out = h.up("localbox", "lima", &[]);
     let calls = h.calls();
     assert!(
-        calls.contains("limactl create --tty=false --name localbox --set .mounts = []"),
+        calls.contains(&format!(
+            "limactl create --tty=false --name {} --set .mounts = []",
+            h.instance("localbox")
+        )),
         "{calls}"
     );
     assert!(calls.contains("scripts/lima-rooms-host.yaml"), "{calls}");
     let param = format!(r#".param.roomsBoxToken = "{}""#, h.token("localbox"));
     assert!(calls.contains(&param), "missing {param} in:\n{calls}");
     let line = stdout(&out);
-    assert!(line.contains(r#""host":"lima-localbox""#), "{line}");
+    assert!(line.contains(r#""host":"lima-localbox-"#), "{line}");
     let expected = h.path("lima-instance/ssh.config");
     assert!(line.contains(&*expected.to_string_lossy()), "{line}");
 }
@@ -352,18 +359,20 @@ fn down_deletes_the_recorded_gcp_instance() {
     let h = Harness::new();
     h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
     let token = h.token("cloudbox");
-    let instances = format!("cloudbox {token}");
+    let instance = h.instance("cloudbox");
+    let instances = format!("{} {token}", h.instance("cloudbox"));
     let out = h.run(
         &["down", "cloudbox"],
         &[("BOX_TEST_GCP_LISTED", &instances)],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = h.calls();
-    let filter = format!("--filter=name=cloudbox AND labels.rooms_box_token={token}");
+    let filter = format!("--filter=name={instance} AND labels.rooms_box_token={token}");
     assert!(calls.contains(&filter), "missing {filter} in:\n{calls}");
     assert!(
-        calls
-            .contains("instances delete cloudbox --project=sandbox-1 --zone=us-central1-a --quiet"),
+        calls.contains(&format!(
+            "instances delete {instance} --project=sandbox-1 --zone=us-central1-a --quiet"
+        )),
         "{calls}"
     );
     assert!(
@@ -404,14 +413,16 @@ fn down_keeps_state_when_the_gcp_lookup_fails() {
 fn down_deletes_a_lima_box_and_its_state() {
     let h = Harness::new();
     h.up("localbox", "lima", &[]);
-    let instances = format!("rooms-host \nlocalbox {}", h.token("localbox"));
+    let instance = h.instance("localbox");
+    let instances = format!("rooms-host \n{instance} {}", h.token("localbox"));
     let out = h.run(
         &["down", "localbox"],
         &[("BOX_TEST_LIMA_INSTANCES", instances.as_str())],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        h.calls().contains("limactl delete --force localbox"),
+        h.calls()
+            .contains(&format!("limactl delete --force {instance}")),
         "{}",
         h.calls()
     );
@@ -453,9 +464,10 @@ fn down_keeps_state_when_the_lima_lookup_fails() {
 fn down_never_deletes_a_same_named_lima_instance_without_the_token() {
     let h = Harness::new();
     h.up("localbox", "lima", &[]);
+    let foreign = format!("{} foreign-token", h.instance("localbox"));
     let out = h.run(
         &["down", "localbox"],
-        &[("BOX_TEST_LIMA_INSTANCES", "localbox 00000000deadbeef")],
+        &[("BOX_TEST_LIMA_INSTANCES", &foreign)],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
@@ -473,8 +485,9 @@ fn ssh_forwards_the_recorded_host_and_command() {
     let out = h.run(&["ssh", "localbox", "rooms", "ls"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     let expected = format!(
-        "ssh -F {} lima-localbox rooms ls",
-        h.path("lima-instance/ssh.config").display()
+        "ssh -F {} lima-{} rooms ls",
+        h.path("lima-instance/ssh.config").display(),
+        h.instance("localbox")
     );
     assert!(
         h.calls().contains(&expected),
@@ -600,10 +613,8 @@ fn git_head(repo: &Path) -> String {
 fn down_never_deletes_a_same_named_gcp_instance_without_the_token() {
     let h = Harness::new();
     h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
-    let out = h.run(
-        &["down", "cloudbox"],
-        &[("BOX_TEST_GCP_LISTED", "cloudbox foreign-token")],
-    );
+    let foreign = format!("{} foreign-token", h.instance("cloudbox"));
+    let out = h.run(&["down", "cloudbox"], &[("BOX_TEST_GCP_LISTED", &foreign)]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!h.calls().contains("instances delete"), "{}", h.calls());
 }
@@ -631,15 +642,16 @@ fn failed_creation_keeps_complete_ownership_for_cleanup() {
         &[("BOX_TEST_CREATE_FAILS", "1")],
     );
     assert!(!out.status.success());
-    let instances = format!("cloudbox {}", h.token("cloudbox"));
+    let instance = h.instance("cloudbox");
+    let instances = format!("{instance} {}", h.token("cloudbox"));
     let out = h.run(
         &["down", "cloudbox"],
         &[("BOX_TEST_GCP_LISTED", &instances)],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(h
-        .calls()
-        .contains("instances delete cloudbox --project=sandbox-1 --zone=us-central1-a"));
+    assert!(h.calls().contains(&format!(
+        "instances delete {instance} --project=sandbox-1 --zone=us-central1-a"
+    )));
 }
 
 #[test]
@@ -680,4 +692,65 @@ fn concurrent_up_has_one_owner_and_one_creation() {
     );
     let record = fs::read_to_string(h.path("state/cloudbox/box.env")).expect("ownership record");
     assert_eq!(record.matches("BOX_TOKEN=").count(), 1, "{record}");
+}
+
+#[test]
+fn reused_friendly_name_gets_a_new_backend_generation() {
+    let h = Harness::new();
+    h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    let old = h.instance("cloudbox");
+    assert!(h.run(&["down", "cloudbox"], &[]).status.success());
+    h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    let new = h.instance("cloudbox");
+    assert_ne!(old, new);
+    let foreign_generation = format!("{old} {}", h.token("cloudbox"));
+    let out = h.run(
+        &["down", "cloudbox"],
+        &[("BOX_TEST_GCP_LISTED", &foreign_generation)],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!h.calls().contains("instances delete"), "{}", h.calls());
+}
+
+#[test]
+fn gcp_ssh_paths_with_spaces_are_understood_by_openssh() {
+    let h = Harness::new();
+    let state = h.path("state with spaces");
+    let out = h.run(
+        &[
+            "up",
+            "cloudbox",
+            "--backend",
+            "gcp",
+            "--project",
+            "sandbox-1",
+        ],
+        &[("ROOMS_BOX_STATE", &state.to_string_lossy())],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("up result");
+    let config = state.join("cloudbox/ssh.config");
+    let out = Command::new("ssh")
+        .arg("-G")
+        .arg("-F")
+        .arg(&config)
+        .arg(
+            parsed
+                .get("host")
+                .and_then(serde_json::Value::as_str)
+                .expect("host"),
+        )
+        .output()
+        .expect("OpenSSH config parser");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains(&format!(
+        "identityfile {}",
+        state.join("cloudbox/id_ed25519").display()
+    )));
+    assert!(stdout(&out).contains(
+        &state
+            .join("cloudbox/known_hosts")
+            .to_string_lossy()
+            .into_owned()
+    ));
 }

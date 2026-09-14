@@ -60,13 +60,13 @@ without such a rule `up` stops when SSH does not answer in time.
 
 - State lives under `${ROOMS_BOX_STATE:-~/.rooms-box}/<name>/`; `down` refuses
   any name without state there.
-- Ownership is proven, not assumed. `up` refuses a name the backend already
-  has, then stamps a random token on the VM it creates: a `roomsBoxToken`
-  param on a Lima instance (also written to `/etc/rooms-box-token` in the
-  guest, since Lima rejects an unused param) or a `rooms_box_token` label on a
-  GCP instance. `down` deletes only a VM that carries its box's token, so a
-  failed `up` can never lead `down` to a same-named VM it did not create, such
-  as the long-lived `rooms-host`.
+- The CLI name is a friendly local alias. Each creation records a distinct
+  backend name `<alias>-<random-token>` and stamps the same token as a Lima
+  param or GCP label. `down` checks and deletes that recorded generation,
+  never the reusable alias. Recreating a friendly alias gets a different VM
+  name, so stale cleanup cannot delete that replacement generation.
+  Old experimental records without a generation are refused for explicit
+  backend cleanup; the script does not guess their ownership.
 - A complete private manifest (backend, token, project and zone) is prepared
   first, then published with an exclusive hard link as `box.env`. Only the
   winning `up` can create a VM; a competing `up` cannot overwrite its token.
@@ -77,9 +77,12 @@ without such a rule `up` stops when SSH does not answer in time.
   resource claim and no cloud creation happens before manifest publication.
 - No VM carrying the token means the box is already gone (Spot preemption or
   maximum run time); a failed lookup keeps the state for a retry.
-- Residual race, recorded in `docs/follow-ups.md`: the ownership lookup and the
-  delete are two calls, because neither backend can condition a delete on a
-  param or label. A same-named VM created in that window would be deleted.
+- Backend APIs still look up then delete by name. They do not expose a
+  token-conditional delete. Generation names are never reused by this tool;
+  a privileged external actor deliberately recreating that exact random name
+  during deletion is outside this manager's exclusivity boundary. Do not
+  repurpose its generated names through raw provider commands. This limitation
+  is not a claim of an atomic provider compare-and-delete operation.
 - `check` requires `schema_version` 1 and a boolean `ok`, string `name`, and
   string `message` on every check; anything else fails closed.
 - Box names must be valid for both Lima and Compute Engine.

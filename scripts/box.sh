@@ -173,6 +173,17 @@ gcp_check_free() {
     [[ -z "$found" ]] || fatal "gcp project $2 already has an instance named '$1' in $GCP_ZONE; pick another name"
 }
 
+# OpenSSH paths are quoted; percent tokens are escaped separately because SSH
+# expands them even inside quotes. Newlines cannot be represented in a config.
+ssh_path() {
+    local value="$1"
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fatal "newline in SSH path"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//%/%%}"
+    printf '"%s"' "$value"
+}
+
 gcp_up() {
     local name="$1" dir="$2" project="$3" token="$4" ip
     local zone="$GCP_ZONE"
@@ -197,9 +208,9 @@ gcp_up() {
 Host box-$name
   HostName $ip
   User rooms
-  IdentityFile $dir/id_ed25519
+  IdentityFile $(ssh_path "$dir/id_ed25519")
   IdentitiesOnly yes
-  UserKnownHostsFile $dir/known_hosts
+  UserKnownHostsFile $(ssh_path "$dir/known_hosts")
   StrictHostKeyChecking accept-new
   ServerAliveInterval 30
   LogLevel ERROR
@@ -224,7 +235,7 @@ gcp_down() {
 # --- commands ---
 
 cmd_up() {
-    local name="${1:-}" backend="" project="${ROOMS_BOX_GCP_PROJECT:-}" dir token pending
+    local name="${1:-}" backend="" project="${ROOMS_BOX_GCP_PROJECT:-}" dir token pending instance
     [[ -n "$name" ]] || usage
     shift
     while [[ $# -gt 0 ]]; do
@@ -245,25 +256,27 @@ cmd_up() {
         *) fatal "--backend must be lima or gcp" ;;
     esac
     dir="$(box_dir "$name")"
+    ssh_path "$dir" >/dev/null
     [[ ! -e "$dir/box.env" ]] || fatal "box '$name' already exists ($dir); run 'box.sh down $name' first"
     "${backend}_check_free" "$name" "$project"
     token="$(new_token)"
     [[ "$token" =~ ^[0-9a-f]{16}$ ]] || fatal "could not generate a box token"
+    instance="$name-$token"
     mkdir -p "$dir"
     chmod 700 "$dir"
     # Empty directories are harmless interrupted reservations. The complete
     # manifest's exclusive hard link, not mkdir -p, arbitrates concurrent up.
     # Both files are on the same filesystem; ln refuses an existing box.env.
     pending="$(mktemp "$STATE_ROOT/.claim.XXXXXX")"
-    printf 'BOX_BACKEND=%q\nBOX_TOKEN=%q\nBOX_PROJECT=%q\nBOX_ZONE=%q\n' \
-        "$backend" "$token" "$project" "$GCP_ZONE" >"$pending"
+    printf 'BOX_BACKEND=%q\nBOX_TOKEN=%q\nBOX_PROJECT=%q\nBOX_ZONE=%q\nBOX_INSTANCE=%q\n' \
+        "$backend" "$token" "$project" "$GCP_ZONE" "$instance" >"$pending"
     if ! ln "$pending" "$dir/box.env" 2>/dev/null; then
         rm -f "$pending"
         fatal "box '$name' already exists ($dir); run 'box.sh down $name' first"
     fi
     rm -f "$pending"
     log "creating $backend box $name"
-    "${backend}_up" "$name" "$dir" "$project" "$token"
+    "${backend}_up" "$instance" "$dir" "$project" "$token"
     load_box "$name"
     wait_for_ssh "$name"
     jq -cn --arg name "$name" --arg backend "$BOX_BACKEND" \
@@ -333,8 +346,10 @@ cmd_down() {
     local name="${1:-}"
     [[ -n "$name" ]] || usage
     load_box "$name"
-    log "deleting $BOX_BACKEND box $name"
-    "${BOX_BACKEND}_down" "$name"
+    [[ "${BOX_INSTANCE:-}" == "$name-$BOX_TOKEN" ]] \
+        || fatal "legacy or invalid box generation; state kept for explicit backend cleanup"
+    log "deleting $BOX_BACKEND box $name ($BOX_INSTANCE)"
+    "${BOX_BACKEND}_down" "$BOX_INSTANCE"
     rm -rf "$BOX_DIR"
 }
 
