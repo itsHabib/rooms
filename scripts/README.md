@@ -19,6 +19,25 @@ Note the aarch64 guest kernel is a Linux ARM64 boot `Image`, not an ELF
 vmlinux — the validation in `setup-rooms-host.sh`, `test-rootfs-alpine.sh`,
 and `rooms doctor` accepts both formats.
 
+## Disposable hosts (`box.sh`)
+
+`box.sh` runs on your workstation and builds throwaway rooms hosts, either a
+local Lima VM or an auto-deleting GCP Spot VM. Provisioning and the readiness
+check run over SSH and are the same on both:
+
+```sh
+scripts/box.sh up trial --backend lima                            # or: --backend gcp --project <p>
+scripts/box.sh provision trial          # ships HEAD, runs setup-rooms-host.sh + setup-tap.sh, builds rooms
+scripts/box.sh check trial              # passes only when every `rooms doctor` check is ok
+scripts/box.sh ssh trial rooms ls
+scripts/box.sh down trial
+```
+
+Needs `ssh`, `jq`, and `git` locally, plus `limactl` or `gcloud` for the
+backend. GCP requires an explicit project and never uses gcloud's active one.
+See [`docs/features/disposable-hosts/spec.md`](../docs/features/disposable-hosts/spec.md)
+for the backend settings and safety rules.
+
 ## Agent rootfs (Alpine) — current
 
 Build the agent guest image on Alpine (musl/busybox/openrc) with the claude-code native musl binary, paired with a Firecracker-tuned virtio-rng kernel. Boots to sshd in ~2 s; ~276 MB. The script is the source of truth; built images are **not** committed (see `images/.gitignore`).
