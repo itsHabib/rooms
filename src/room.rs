@@ -158,6 +158,16 @@ pub struct RoomMeta {
     /// not serialized when unset, so legacy files keep their exact shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_lineage: Option<String>,
+    /// SHA-256 of the sealed toolstore verified and attached as this room's
+    /// read-only Nix drive. Snapshot creation refuses a base whose jail
+    /// attachment disagrees with this admission record. Not serialized when
+    /// unset, so legacy files keep their exact shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolstore_sha256: Option<String>,
+    /// Full commit a base's repository bundle was pinned to on the host
+    /// (`rooms base-create --base-sha`). Not serialized when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_repo_sha: Option<String>,
 }
 
 impl RoomMeta {
@@ -184,6 +194,8 @@ impl RoomMeta {
             clone_net_index: None,
             provenance: None,
             snapshot_lineage: None,
+            toolstore_sha256: None,
+            base_repo_sha: None,
         }
     }
 
@@ -497,6 +509,22 @@ mod tests {
     }
 
     #[test]
+    fn base_lineage_round_trips_through_seal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut meta = base(Some(42));
+        meta.toolstore_sha256 = Some("a".repeat(64));
+        meta.base_repo_sha = Some("92a706a7982a527ade967e43b68afd4bc1e5d667".to_owned());
+        write_atomic(dir.path(), &meta).expect("write");
+        // Sealing rewrites the record it read, so the admission record survives.
+        let mut back = read(dir.path()).expect("read").expect("present");
+        back.seal().expect("seal");
+        write_atomic(dir.path(), &back).expect("rewrite");
+        let sealed = read(dir.path()).expect("read").expect("present");
+        assert_eq!(sealed.toolstore_sha256, meta.toolstore_sha256);
+        assert_eq!(sealed.base_repo_sha, meta.base_repo_sha);
+    }
+
+    #[test]
     fn slotless_meta_serializes_without_a_slot_key() {
         // Legacy rooms must keep their exact file shape: no `"slot": null`.
         let json = serde_json::to_string(&sample(None)).expect("serialize");
@@ -504,6 +532,11 @@ mod tests {
         assert!(
             !json.contains("clone_net_index"),
             "flat room must not serialize a clone-network key"
+        );
+        assert!(!json.contains("toolstore"), "no toolstore key when unset");
+        assert!(
+            !json.contains("base_repo_sha"),
+            "no revision key when unset"
         );
     }
 
