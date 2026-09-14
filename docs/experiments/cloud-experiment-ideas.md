@@ -1,13 +1,13 @@
 # Cloud experiment ideas
 
-**Status: a backlog of ideas, not results.** Captured 2026-09-14 from the operator's brainstorm about what to test on a real KVM host now that sealed Nix toolstores (#121) and snapshot restore (#123) exist. Nothing here is scheduled. Each run needs an explicit spend OK, a cap, and the usual leak and cleanup audit. Costs below are rough; check current pricing before booking a host.
+**Status: original experiment proposals.** This preserves the questions that motivated the cloud lab. Measurements, remaining work and three subsequent additions are tracked in [PR #125](https://github.com/itsHabib/rooms/pull/125). The starting-point observations below predate that lab and are not current capacity claims. Costs are hypotheses until measured; cloud runs use the operator's existing spend authorization and explicit cleanup.
 
-## Where we are
+## Starting point before the cloud lab
 
 - **Cold rooms with Nix.** #121 attaches a sealed, digest-checked Nix closure (squashfs) read-only at `/nix`, with private writable scratch. A real Fleet-authored Workbench patch passed its 16 Python tests in a cold room in 18.3 s on local Lima. The headless run in workbench#344 repeated it at 14.7–17.3 s.
 - **Snapshots and clones.** #123 prepares once and restores many. On nested aarch64 Lima: the cold run took 18.2 s and a restore took 15.8 s. Readiness fell from 11.4 s to 1.9 s, but the tests slowed from 3.0 s to 10 s because of nested copy-on-write page faults. Running 2 or 4 clones at once gave no throughput gain. Writing the snapshot took 15.4 s to disk or 5.8 s to tmpfs, for a 1 GiB memory file. Memory per room (PSS) was not measured.
 - **Earlier cloud run.** On a GCP N2-standard-8 (8 vCPU / 32 GiB, nested KVM), 1, 2 and 4 polyglot rooms took about 21.5, 22.1 and 27.1 s each, and all passed. Four rooms together used about 2.5 GiB (summed PSS, excluding host cache). The whole run cost well under a dollar.
-- **Never measured:** bare-metal KVM, density beyond 4 rooms, per-room memory at scale, and lazy memory restore.
+- **Not yet measured at that starting point:** bare-metal KVM, density beyond 4 rooms, per-room memory at scale, and lazy memory restore.
 
 Nested virtualization on a Mac hides the numbers that matter. Every idea below needs a real KVM host.
 
