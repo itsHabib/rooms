@@ -1,8 +1,8 @@
 # Rooms experiment tracker: original ten plus three additions
 
-Michael assigned all ten experiments to this coordinator, then reaffirmed that scope on September14. The first pilot is partial evidence, not completion of the backlog. Existing authorization: USD50 total GCP; actual bill pending; finite cloud hosts bound spend below the authorization. Only this coordinator and the separately requested Relay/Workbench design task may consume model usage. The in-Room agent-process question remains open. No standing monitors or extra project sessions are needed.
+Michael assigned all ten experiments to this coordinator, then reaffirmed that scope. The first pilot is partial evidence, not completion of the backlog. Existing authorization: USD50 total GCP; actual bill pending; finite cloud hosts bound spend below the authorization. Only this coordinator and the separately requested Relay/Workbench design task may consume model usage. The in-Room agent-process question remains open. No standing monitors or extra project sessions are needed.
 
-On September 14 Michael added three further experiments: NVMe/LVM storage and cache behavior, eBPF tracing, and telemetry/UI for deployments. Their prototype plans are [here](storage-observability-deployments.md); all three are planned, not yet built. The original ten retain their numbering and unfinished scope.
+Michael added three further experiments: NVMe/LVM storage and cache behavior, eBPF tracing, and telemetry/UI for deployments. Their prototype plans are [here](storage-observability-deployments.md); all three are planned, not yet built. The original ten retain their numbering and unfinished scope.
 
 Source for experiments 1–10: PR124 at `f74955eb0a048e1230f573ac60b7644e12a893af`. Each numbered item keeps the original question; a narrower surrogate does not count as its completion. Negative measurements are valid outcomes; missing hardware, quota or implementation remains incomplete.
 
@@ -31,8 +31,8 @@ Quota observations are capacity checks, not an excuse to omit experiments. Work 
 ## Share and reuse
 
 See [the cloud lab guide](cloud-lab.md), the Rust `examples/cloud-lab.rs` runner,
-and retained recipes in `scripts/cloud-experiments/recipes-20260914`. Michael
+and retained recipes in `scripts/cloud-experiments/recipes`. Michael
 explicitly requested that the code, failures, receipts and lessons be reusable by
 colleagues. Keep README links and per-experiment limits current as evidence lands.
 
-Final lab inventory is clear; see [results, raw receipts and cleanup](2026-09-14-cloud/README.md). No paid test hosts remain.
+Final lab inventory is clear; see [results, raw receipts and cleanup](cloud-results/README.md). No paid test hosts remain.

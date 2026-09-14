@@ -1,4 +1,4 @@
-# Rooms on GCP: September 14, 2026
+# Rooms cloud experiment results
 
 We ran real nested Firecracker workloads, including 128 simultaneous clones,
 portable snapshots, an injected Spot loss and a real Workbench test suite. This
@@ -87,7 +87,7 @@ It was compiled, tested and run on the cloud host at1and2clones (3/3 passed).
 claims its frozen slot on a fresh host. Both are examples rather than a new service.
 
 The original provider and experiment recipes are retained under
-`scripts/cloud-experiments/recipes-20260914`; they name historical lab paths and
+`scripts/cloud-experiments/recipes`; they name historical lab paths and
 must be adapted. Density and UFFD changes are explicit research patches; production
 clone limits remain8. UFFD code derives from Firecracker's Apache-2.0 example;
 its source and license are retained. The checked-in handler lockfile was generated

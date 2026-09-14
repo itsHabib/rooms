@@ -1,4 +1,4 @@
-# Retained September 14 lab recipes
+# Retained cloud lab recipes
 
 These are the exact first-run Python/shell recipes, including failed versions.
 They preserve the implementation and test setup behind the receipts. The supported

@@ -1,6 +1,6 @@
 # Experiments 11–13: storage, tracing and deployment visibility
 
-Added at Michael's request on September 14, 2026. These extend the original ten
+Added at Michael's request. These extend the original ten
 experiments; they are planned, not implemented or measured. Each should produce a
 working prototype, a reproducible comparison, receipts and a short lesson that
 can inform a useful Rooms feature. The longer-term direction is a hosted Rooms

@@ -76,7 +76,7 @@ checks are not an independent semantic verdict or a security qualification.
 Use an explicitly selected lab project, a subnet you own and an SSH firewall
 limited to your source address. Every command should name `--project` and
 `--zone`; do not rely on whichever project happens to be globally selected.
-The September 14 lab used Ubuntu 24.04, nested KVM and Intel Cascade Lake. Pin a
+The measured lab used Ubuntu 24.04, nested KVM and Intel Cascade Lake. Pin a
 compatible CPU platform on both hosts for the snapshot travel experiment.
 
 The relevant lifecycle options on the measured hosts were:

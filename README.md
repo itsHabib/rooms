@@ -38,8 +38,8 @@ snapshot transfer through object storage to a second host. These are experiments
 not production capacity or multi-tenant security guarantees. The 128-clone runs
 use retained lab patches; the normal CLI still caps clone batches at eight.
 
-See the [cloud results, charts and receipts](docs/experiments/2026-09-14-cloud/README.md)
-and the [first cold/restore pilot](docs/experiments/2026-09-14-gcp/README.md).
+See the [cloud results, charts and receipts](docs/experiments/cloud-results/README.md)
+and the [first cold/restore pilot](docs/experiments/snapshot-pilot/README.md).
 The guide covers the source and evidence needed to reproduce them,
 and the failures that changed the implementation. Cloud provisioning remains an
 explicit operator step; the harness does not silently rent machines.

@@ -1,6 +1,6 @@
 # Rooms experiments: implementation
 
-Owner: Michael's coordinator session, September14. Other agent/model workers and monitors remain paused. Michael subsequently authorized up to USD50 GCP for this batch; other model sessions remain paused.
+Owner: Michael's coordinator session. Other agent/model workers and monitors remain paused. Michael subsequently authorized up to USD50 GCP for this batch; other model sessions remain paused.
 
 The first implementation is `scripts/experiment-report.py`: an offline reader for the existing cold-run artifact layout. It does not launch commands or infer semantic correctness from tests. It counts execution completion only when CLI, guest result, collection and cleanup agree. Incomplete attempts stay in the denominator. Raw evidence hashes make each reported attempt inspectable.
 
@@ -25,7 +25,7 @@ Cost is optional, `estimated_total_cost_usd`, and remains explicitly estimated. 
 ## Delivery order
 
 1. **Evidence reader (implemented):** test against the retained real cold baseline, then use the same collector format for cold/restored batches.
-2. **Density/cold/restore pilot (run):** See [September14 GCP results](2026-09-14-gcp/README.md). The fixed host harness and raw evidence are retained locally. A generalized launcher is not implemented. Further work: reuse existing Rooms commands and #123 toolstore snapshot support. Pin one workload; preserve exact argv, full CLI interval, exit and lifecycle for each attempt. Start1/2/4/8 within actual memory/pool capacity. Report warm/cold separately and include snapshot preparation. Do not exceed63network slots without changing the allocator.
+2. **Density/cold/restore pilot (run):** See [GCP snapshot pilot results](snapshot-pilot/README.md). The fixed host harness and raw evidence are retained locally. A generalized launcher is not implemented. Further work: reuse existing Rooms commands and #123 toolstore snapshot support. Pin one workload; preserve exact argv, full CLI interval, exit and lifecycle for each attempt. Start1/2/4/8 within actual memory/pool capacity. Report warm/cold separately and include snapshot preparation. Do not exceed63network slots without changing the allocator.
 3. **Branch and verify:** fixed candidate patches for one real task, sequential/worktree/cold/restore comparison, independent verifier consuming the exact published patch digest and base. Exercise partial publication, duplicate delivery and restart. Same total model budget when comparing candidate quality.
 4. **Agents inside Rooms / sharded CI:** start with one verifier, then useful independent test shards. Scope provider credentials and keep them out of captured snapshots/artifacts.
 5. **Remote migration / spot recovery:** compatible hosts, complete snapshot artifact set, cold reconstruction comparison, late old-host result rejection. Remote cleanup must distinguish unreachable old processes from reconciled cloud resources.

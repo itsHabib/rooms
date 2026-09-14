@@ -1,6 +1,6 @@
 # Snapshot fan-out on GCP: measured pilot
 
-September 14, 2026. Rooms source `4c62611661f377b9c725c3d2e59e65b6e9bdc4bb` (PR123), built on Ubuntu24.04, nested KVM on one GCP `n2-standard-16` (16 vCPU,64GiB), `us-east1-b`. Guests:2vCPU,1024MiB, sealed Python Nix store. No model sessions or model API calls were run.
+Rooms source `4c62611661f377b9c725c3d2e59e65b6e9bdc4bb` (PR123), built on Ubuntu24.04, nested KVM on one GCP `n2-standard-16` (16 vCPU,64GiB), `us-east1-b`. Guests:2vCPU,1024MiB, sealed Python Nix store. No model sessions or model API calls were run.
 
 **Outcome:** snapshots roughly halved end-to-end time for this small real patch-and-test workload at matched concurrency1/2/4. Eight clones finished together in about7.46seconds. Candidate failure and guest timeout both preserved a successful sibling's result and cleaned up runtime resources.
 
@@ -43,7 +43,7 @@ Adjacent JSON files contain measured comparisons, frozen hashes and post-run aud
 
 `c8ee2e3f2aa73b975ffe92849ae4847b4e3b32fc0b568cebbf09ff6fc4114901`
 
-Mac packet: `/Users/mh/dev/rooms-cloud-experiments-20260914/evidence.tar.gz`; unpacked under `evidence/`. It contains no cloud credentials or guest private keys. The original local artifact is now also published, recompressed without changing its tar contents, as [first-pilot-evidence.tar.xz](../2026-09-14-cloud/first-pilot-evidence.tar.xz). See the adjacent SHA256SUMS for the recompressed archive. `bootstrap.sh` and provider readbacks live alongside the packet. The historical harness is fixed to `/home/rooms`, requires root on a disposable Linux host and the frozen patch, and refuses existing run directories. It is not a general cloud launcher.
+Mac packet: `/Users/mh/dev/rooms-cloud-experiments-20260914/evidence.tar.gz`; unpacked under `evidence/`. It contains no cloud credentials or guest private keys. The original local artifact is now also published, recompressed without changing its tar contents, as [first-pilot-evidence.tar.xz](../cloud-results/first-pilot-evidence.tar.xz). See the adjacent SHA256SUMS for the recompressed archive. `bootstrap.sh` and provider readbacks live alongside the packet. The historical harness is fixed to `/home/rooms`, requires root on a disposable Linux host and the frozen patch, and refuses existing run directories. It is not a general cloud launcher.
 
 The `$50` project alert budget is not a Compute spending cap. This batch used one host with a3h automatic DELETE deadline, auto-delete disk, ephemeral IP, no service account and operator-IP-only SSH. The host and temporary subnet were deleted after about15minutes. At17:36:53UTC, project inventory contained zero instances, disks, reserved addresses or cloud snapshots. Estimated fixed cost aboutUSD0.20; actual billing, transfer and tax are not reconciled. The local `cleanup.json` records this observation. No other agents/reviewers/monitors were resumed.
 
