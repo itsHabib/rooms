@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::room::Provenance;
 use crate::snapshot::{
     SnapshotMeta, SNAPSHOT_MEM_FILE, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_VMSTATE_FILE,
+    TOOLSTORE_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Which pinned field made a snapshot incompatible with the host.
@@ -43,8 +44,24 @@ pub enum RestoreError {
     /// `snapshot.json` is versioned for forward-compat, so a newer/foreign file
     /// may still deserialize by retaining the shared fields — refuse before
     /// interpreting its semantics as v-current.
-    #[error("unsupported snapshot schema version {found}; this build supports v{supported}")]
-    UnsupportedSchema { found: u32, supported: u32 },
+    #[error("unsupported snapshot schema version {found}; this build supports v1 and v2")]
+    UnsupportedSchema { found: u32 },
+    /// A v1 file carrying a toolstore, or a v2 file without one. Neither shape
+    /// is ever written, so the metadata is foreign or corrupt.
+    #[error(
+        "snapshot schema v{found} disagrees with its toolstore field; refusing malformed metadata"
+    )]
+    ToolstoreSchemaMismatch { found: u32 },
+    /// The snapshot's machine has a toolstore drive but none was supplied, so
+    /// its frozen `/nix` mount would have no backing device.
+    #[error("snapshot was frozen with a toolstore; pass --toolstore with the same sealed store")]
+    ToolstoreRequired,
+    /// A toolstore was supplied for a snapshot whose machine never had one.
+    #[error("snapshot was frozen without a toolstore; --toolstore would add a device its machine never had")]
+    ToolstoreUnexpected,
+    /// The supplied toolstore's verified digest differs from the frozen one.
+    #[error("supplied toolstore differs from the one frozen into the snapshot")]
+    ToolstoreMismatch,
     /// The snapshot's pinned `field` does not match the host, so loading it would
     /// fault or silently corrupt. Refuse; the remedy is to re-snapshot on this host.
     #[error("snapshot incompatible with host: {} mismatch; re-snapshot on this host", .field.as_str())]
@@ -114,21 +131,25 @@ impl RestorePlan {
 ///
 /// Fail closed: any mismatch is a hard refusal, never a best-effort load.
 ///
+/// `host_toolstore_sha256` is the digest of the toolstore the caller admitted
+/// (full content hash of a sealed inode), or `None` when none was supplied.
+///
 /// # Errors
-/// - [`RestoreError::UnsupportedSchema`] if the metadata schema is not v-current.
+/// - [`RestoreError::UnsupportedSchema`] if the metadata schema is neither v1
+///   nor v2, and [`RestoreError::ToolstoreSchemaMismatch`] if the schema and
+///   toolstore field disagree.
 /// - [`RestoreError::SnapshotIncompatible`] naming the first field that differs
 ///   (`fc_version` before `rootfs_hash`).
+/// - [`RestoreError::ToolstoreRequired`], [`RestoreError::ToolstoreUnexpected`],
+///   or [`RestoreError::ToolstoreMismatch`] if the supplied toolstore is not
+///   exactly the frozen one.
 pub fn check_compat(
     snap: &SnapshotMeta,
     host_fc_version: &str,
     host_rootfs_hash: &str,
+    host_toolstore_sha256: Option<&str>,
 ) -> Result<(), RestoreError> {
-    if snap.schema_version != SNAPSHOT_SCHEMA_VERSION {
-        return Err(RestoreError::UnsupportedSchema {
-            found: snap.schema_version,
-            supported: SNAPSHOT_SCHEMA_VERSION,
-        });
-    }
+    check_schema(snap)?;
     if snap.fc_version != host_fc_version {
         return Err(RestoreError::SnapshotIncompatible {
             field: CompatField::FcVersion,
@@ -139,7 +160,29 @@ pub fn check_compat(
             field: CompatField::RootfsHash,
         });
     }
-    Ok(())
+    check_toolstore(snap.toolstore_sha256.as_deref(), host_toolstore_sha256)
+}
+
+const fn check_schema(snap: &SnapshotMeta) -> Result<(), RestoreError> {
+    let has_toolstore = snap.toolstore_sha256.is_some();
+    match snap.schema_version {
+        SNAPSHOT_SCHEMA_VERSION if !has_toolstore => Ok(()),
+        TOOLSTORE_SNAPSHOT_SCHEMA_VERSION if has_toolstore => Ok(()),
+        found @ (SNAPSHOT_SCHEMA_VERSION | TOOLSTORE_SNAPSHOT_SCHEMA_VERSION) => {
+            Err(RestoreError::ToolstoreSchemaMismatch { found })
+        }
+        found => Err(RestoreError::UnsupportedSchema { found }),
+    }
+}
+
+fn check_toolstore(frozen: Option<&str>, supplied: Option<&str>) -> Result<(), RestoreError> {
+    match (frozen, supplied) {
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(RestoreError::ToolstoreRequired),
+        (None, Some(_)) => Err(RestoreError::ToolstoreUnexpected),
+        (Some(frozen), Some(supplied)) if frozen == supplied => Ok(()),
+        (Some(_), Some(_)) => Err(RestoreError::ToolstoreMismatch),
+    }
 }
 
 /// Decide the restore for `snap`: run the compat guard, then emit the ordered
@@ -150,8 +193,7 @@ pub fn check_compat(
 /// configuration operation.
 ///
 /// # Errors
-/// - [`RestoreError::UnsupportedSchema`] / [`RestoreError::SnapshotIncompatible`]
-///   if the compat guard fails.
+/// - Any [`check_compat`] refusal.
 /// - [`RestoreError::NotNeutralSnapshot`] if the metadata isn't `Neutral`.
 ///
 /// On any error no ops are emitted — nothing is loaded.
@@ -159,8 +201,14 @@ pub fn plan_restore(
     snap: &SnapshotMeta,
     host_fc_version: &str,
     host_rootfs_hash: &str,
+    host_toolstore_sha256: Option<&str>,
 ) -> Result<RestorePlan, RestoreError> {
-    check_compat(snap, host_fc_version, host_rootfs_hash)?;
+    check_compat(
+        snap,
+        host_fc_version,
+        host_rootfs_hash,
+        host_toolstore_sha256,
+    )?;
     if snap.provenance != Provenance::Neutral {
         return Err(RestoreError::NotNeutralSnapshot {
             found: snap.provenance,
@@ -184,10 +232,14 @@ mod tests {
 
     use super::{check_compat, plan_restore, CompatField, RestoreError, RestoreOp};
     use crate::room::Provenance;
-    use crate::snapshot::{SnapshotMeta, SNAPSHOT_SCHEMA_VERSION};
+    use crate::snapshot::{
+        SnapshotMeta, SNAPSHOT_SCHEMA_VERSION, TOOLSTORE_SNAPSHOT_SCHEMA_VERSION,
+    };
     use chrono::Utc;
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
+
+    const TOOLSTORE: &str = "85074bedee9b2c34014488b422c0869c01571dbb121da5191b2e719863e760d3";
 
     fn snap_meta() -> SnapshotMeta {
         SnapshotMeta {
@@ -200,36 +252,99 @@ mod tests {
             slot_index: Some(3),
             guest_ip: Some(Ipv4Addr::new(172, 16, 0, 14)),
             base_repo_sha: Some("deadbeef".to_owned()),
+            toolstore_sha256: None,
             provenance: Provenance::Neutral,
         }
     }
 
+    fn toolstore_meta() -> SnapshotMeta {
+        let mut meta = snap_meta();
+        meta.schema_version = TOOLSTORE_SNAPSHOT_SCHEMA_VERSION;
+        meta.toolstore_sha256 = Some(TOOLSTORE.to_owned());
+        meta
+    }
+
     #[test]
     fn compat_guard_passes_on_an_exact_match() {
-        assert_eq!(check_compat(&snap_meta(), "1.9.0", "sha256:abc"), Ok(()));
+        assert_eq!(
+            check_compat(&snap_meta(), "1.9.0", "sha256:abc", None),
+            Ok(())
+        );
     }
 
     #[test]
     fn compat_guard_rejects_an_unsupported_schema_version() {
         // A newer/foreign snapshot.json that still deserializes must be refused
-        // before its semantics are interpreted as v-current.
-        let mut future = snap_meta();
-        future.schema_version = SNAPSHOT_SCHEMA_VERSION + 1;
+        // before its semantics are interpreted as a supported shape.
+        let mut future = toolstore_meta();
+        future.schema_version = TOOLSTORE_SNAPSHOT_SCHEMA_VERSION + 1;
         assert_eq!(
-            check_compat(&future, "1.9.0", "sha256:abc"),
+            check_compat(&future, "1.9.0", "sha256:abc", Some(TOOLSTORE)),
             Err(RestoreError::UnsupportedSchema {
-                found: SNAPSHOT_SCHEMA_VERSION + 1,
-                supported: SNAPSHOT_SCHEMA_VERSION,
+                found: TOOLSTORE_SNAPSHOT_SCHEMA_VERSION + 1,
             }),
         );
         // And plan_restore emits no ops for it.
-        assert!(plan_restore(&future, "1.9.0", "sha256:abc").is_err());
+        assert!(plan_restore(&future, "1.9.0", "sha256:abc", Some(TOOLSTORE)).is_err());
+    }
+
+    #[test]
+    fn toolstore_snapshot_restores_only_with_the_same_verified_digest() {
+        let meta = toolstore_meta();
+        assert_eq!(
+            check_compat(&meta, "1.9.0", "sha256:abc", Some(TOOLSTORE)),
+            Ok(())
+        );
+        assert_eq!(
+            check_compat(&meta, "1.9.0", "sha256:abc", None),
+            Err(RestoreError::ToolstoreRequired),
+        );
+        assert_eq!(
+            check_compat(&meta, "1.9.0", "sha256:abc", Some(&"b".repeat(64))),
+            Err(RestoreError::ToolstoreMismatch),
+        );
+        assert_eq!(
+            check_compat(&snap_meta(), "1.9.0", "sha256:abc", Some(TOOLSTORE)),
+            Err(RestoreError::ToolstoreUnexpected),
+        );
+    }
+
+    #[test]
+    fn schema_and_toolstore_field_must_agree() {
+        // Neither shape is ever written: a v1 file carrying a toolstore is what a
+        // pre-toolstore build would silently accept, and a v2 file without one
+        // has no device to stage.
+        let mut v1_with_toolstore = toolstore_meta();
+        v1_with_toolstore.schema_version = SNAPSHOT_SCHEMA_VERSION;
+        assert_eq!(
+            check_compat(&v1_with_toolstore, "1.9.0", "sha256:abc", Some(TOOLSTORE)),
+            Err(RestoreError::ToolstoreSchemaMismatch {
+                found: SNAPSHOT_SCHEMA_VERSION
+            }),
+        );
+        let mut v2_without_toolstore = snap_meta();
+        v2_without_toolstore.schema_version = TOOLSTORE_SNAPSHOT_SCHEMA_VERSION;
+        assert_eq!(
+            check_compat(&v2_without_toolstore, "1.9.0", "sha256:abc", None),
+            Err(RestoreError::ToolstoreSchemaMismatch {
+                found: TOOLSTORE_SNAPSHOT_SCHEMA_VERSION
+            }),
+        );
+    }
+
+    #[test]
+    fn toolstore_refusals_emit_no_ops() {
+        assert!(plan_restore(&toolstore_meta(), "1.9.0", "sha256:abc", None).is_err());
+        assert!(plan_restore(&snap_meta(), "1.9.0", "sha256:abc", Some(TOOLSTORE)).is_err());
+        let plan = plan_restore(&toolstore_meta(), "1.9.0", "sha256:abc", Some(TOOLSTORE))
+            .expect("matching toolstore restores");
+        assert_eq!(plan.load_index(), Some(1));
     }
 
     #[test]
     fn compat_guard_fails_closed_on_fc_version_mismatch() {
         assert_eq!(
-            check_compat(&snap_meta(), "1.10.0", "sha256:abc"),
+            check_compat(&snap_meta(), "1.10.0", "sha256:abc", None),
             Err(RestoreError::SnapshotIncompatible {
                 field: CompatField::FcVersion
             }),
@@ -239,7 +354,7 @@ mod tests {
     #[test]
     fn compat_guard_fails_closed_on_rootfs_hash_mismatch() {
         assert_eq!(
-            check_compat(&snap_meta(), "1.9.0", "sha256:DIFFERENT"),
+            check_compat(&snap_meta(), "1.9.0", "sha256:DIFFERENT", None),
             Err(RestoreError::SnapshotIncompatible {
                 field: CompatField::RootfsHash
             }),
@@ -255,7 +370,7 @@ mod tests {
             let mut m = snap_meta();
             m.provenance = bad;
             assert_eq!(
-                plan_restore(&m, "1.9.0", "sha256:abc"),
+                plan_restore(&m, "1.9.0", "sha256:abc", None),
                 Err(RestoreError::NotNeutralSnapshot { found: bad }),
                 "a {bad:?} snapshot must not restore"
             );
@@ -265,12 +380,12 @@ mod tests {
     #[test]
     fn incompatible_snapshot_emits_no_ops() {
         // Fail closed: a mismatch loads nothing.
-        assert!(plan_restore(&snap_meta(), "9.9.9", "sha256:abc").is_err());
+        assert!(plan_restore(&snap_meta(), "9.9.9", "sha256:abc", None).is_err());
     }
 
     #[test]
     fn restore_installs_custody_and_loads_before_resume() {
-        let plan = plan_restore(&snap_meta(), "1.9.0", "sha256:abc").expect("compatible");
+        let plan = plan_restore(&snap_meta(), "1.9.0", "sha256:abc", None).expect("compatible");
         let custody = plan.custody_index().expect("custody op present");
         let load = plan.load_index().expect("load op present");
         let resume = plan.resume_index().expect("resume op present");
@@ -291,7 +406,7 @@ mod tests {
 
     #[test]
     fn restore_emits_the_full_ordered_sequence_with_jail_paths() {
-        let plan = plan_restore(&snap_meta(), "1.9.0", "sha256:abc").expect("compatible");
+        let plan = plan_restore(&snap_meta(), "1.9.0", "sha256:abc", None).expect("compatible");
         assert_eq!(
             plan.ops,
             vec![
@@ -308,7 +423,7 @@ mod tests {
 
     #[test]
     fn incompatible_error_names_the_offending_field() {
-        let err = plan_restore(&snap_meta(), "1.10.0", "sha256:abc").unwrap_err();
+        let err = plan_restore(&snap_meta(), "1.10.0", "sha256:abc", None).unwrap_err();
         assert!(err.to_string().contains("fc_version"));
     }
 }

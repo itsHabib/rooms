@@ -17,8 +17,16 @@ use thiserror::Error;
 
 use crate::room::{Provenance, RoomMeta};
 
-/// Schema version for `snapshot.json` (forward-compat, mirrors `room.json`).
+/// Schema version for a `snapshot.json` whose machine has no toolstore drive
+/// (forward-compat, mirrors `room.json`).
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+/// Schema version for a snapshot frozen with a read-only toolstore drive.
+///
+/// A separate version, not an optional field on v1: a build that predates
+/// toolstores ignores unknown fields, so it would accept a v1 file carrying one
+/// and only fail inside Firecracker's load after claiming restore resources.
+pub const TOOLSTORE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Metadata file name written beside the snapshot pair in the room state dir.
 pub const SNAPSHOT_META_FILE: &str = "snapshot.json";
@@ -144,8 +152,15 @@ pub struct SnapshotMeta {
     pub slot_index: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_ip: Option<Ipv4Addr>,
+    /// Full commit the base's repository was provisioned at, when pinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_repo_sha: Option<String>,
+    /// SHA-256 of the sealed toolstore attached read-only as the base's second
+    /// drive. Present exactly when `schema_version` is
+    /// [`TOOLSTORE_SNAPSHOT_SCHEMA_VERSION`]; a restore must stage the same
+    /// bytes at the frozen drive path before loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolstore_sha256: Option<String>,
     /// Always `Neutral` (the refusal guard guarantees it) — recorded so a reader
     /// can confirm the snapshot's lineage without re-deriving it.
     pub provenance: Provenance,
@@ -165,6 +180,8 @@ pub struct SnapshotRequest {
     pub fc_version: String,
     pub rootfs_hash: String,
     pub base_repo_sha: Option<String>,
+    /// Digest of the toolstore verified as the base's attached drive, if any.
+    pub toolstore_sha256: Option<String>,
     /// Whether any vsock connection is currently open on the base (the no-active-
     /// vsock precondition).
     pub active_vsock: bool,
@@ -227,8 +244,12 @@ pub fn plan(
         },
     ];
 
+    let schema_version = match req.toolstore_sha256 {
+        Some(_) => TOOLSTORE_SNAPSHOT_SCHEMA_VERSION,
+        None => SNAPSHOT_SCHEMA_VERSION,
+    };
     let meta = SnapshotMeta {
-        schema_version: SNAPSHOT_SCHEMA_VERSION,
+        schema_version,
         snapshot_id: req.snapshot_id,
         created_at: now,
         fc_version: req.fc_version,
@@ -237,6 +258,7 @@ pub fn plan(
         slot_index: Some(slot.index),
         guest_ip: Some(slot.guest),
         base_repo_sha: req.base_repo_sha,
+        toolstore_sha256: req.toolstore_sha256,
         provenance: Provenance::Neutral,
     };
     Ok(SnapshotPlan {
@@ -311,7 +333,7 @@ mod tests {
 
     use super::{
         plan, write_meta_atomic, FcOp, SnapshotError, SnapshotMeta, SnapshotRequest,
-        SNAPSHOT_SCHEMA_VERSION,
+        SNAPSHOT_SCHEMA_VERSION, TOOLSTORE_SNAPSHOT_SCHEMA_VERSION,
     };
     use crate::room::{Provenance, RoomMeta, Slot};
     use chrono::Utc;
@@ -350,8 +372,31 @@ mod tests {
             fc_version: "1.9.0".to_owned(),
             rootfs_hash: "sha256:abc".to_owned(),
             base_repo_sha: Some("deadbeef".to_owned()),
+            toolstore_sha256: None,
             active_vsock: false,
         }
+    }
+
+    #[test]
+    fn toolstore_snapshot_is_a_distinct_schema_carrying_its_digest() {
+        let base = neutral_base(2);
+        let mut request = req("/x");
+        request.toolstore_sha256 = Some("a".repeat(64));
+        let meta = plan(&base, request, Utc::now()).expect("plans").meta;
+        assert_eq!(meta.schema_version, TOOLSTORE_SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(meta.toolstore_sha256, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn snapshot_without_toolstore_keeps_the_exact_legacy_shape() {
+        let meta = plan(&neutral_base(2), req("/x"), Utc::now())
+            .expect("plans")
+            .meta;
+        assert_eq!(meta.schema_version, SNAPSHOT_SCHEMA_VERSION);
+        let json = serde_json::to_string(&meta).expect("serialize");
+        assert!(!json.contains("toolstore"), "legacy shape changed: {json}");
+        let legacy: SnapshotMeta = serde_json::from_str(&json).expect("legacy parses");
+        assert_eq!(legacy.toolstore_sha256, None);
     }
 
     #[test]

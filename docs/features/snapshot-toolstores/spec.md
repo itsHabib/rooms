@@ -71,6 +71,58 @@ patch, runs unittest discovery, and writes its patch under `/workspace/out`.
 Keep task exit distinct from export/collection/cleanup failures. Do not silently
 promise cold-run flags or artifact behavior on restore where they are absent.
 
+## As implemented
+
+The contract review on #123 found gaps between this contract and the landed
+code. The implementation closes them as follows.
+
+- **Surface.** `base-create` gains `--toolstore DIR`, `--cpus`, `--memory` (same
+  limits and defaults as `run`; `--disk` stays refused for bases) and
+  `--base-sha REV` (requires `--repo`). `restore`, `clone` and `matrix` gain
+  `--toolstore DIR`. A snapshot fixes its machine shape, so a restored room has
+  the vCPU/RAM its base booted with.
+- **Admission record.** `base-create` opens the toolstore with the cold-run
+  validator and records its digest in the base's `room.json`
+  (`toolstore_sha256`). Snapshot creation opens the base jail's
+  `toolstore.sqfs` bind, requires the immutable seal, and hashes the whole held
+  inode with the same before/after identity check used for the rootfs. It
+  refuses before pausing unless that hash equals the recorded digest. An
+  attachment without a record, or a record without an attachment, is refused.
+- **Schema.** A snapshot with a toolstore is written as schema v2 with
+  `toolstore_sha256`; a snapshot without one stays the exact v1 shape. A
+  pre-toolstore build refuses v2 as an unsupported schema before claiming any
+  restore resource. This build accepts only v1 without a toolstore and v2 with
+  one, and refuses a missing, extra or different toolstore (and any other
+  schema/field combination) in the pure policy, before any restore operation.
+- **Device identity.** Bases are always read-only and never have scratch, so a
+  toolstore is always the second drive at the fixed jail path
+  `/toolstore.sqfs`. Metadata records only the digest; it never names a path.
+- **Restore staging.** `prepare_restore` opens the supplied toolstore once
+  (full hash) and holds the descriptor; `clone`/`matrix` share it across the
+  batch. The restore jail binds that descriptor at `/toolstore.sqfs` after the
+  memory bind; staging rollback and teardown unmount it. The staged bind is
+  checked for device/inode identity before load, and the seal is rechecked at
+  each existing revalidation boundary. The restored `room.json` and the
+  restore/clone records carry the digest.
+- **Revision pinning.** With `--base-sha`, the host resolves the revision to a
+  full commit and builds a bundle holding only that commit's history behind a
+  detached `HEAD` (via a shared bare clone, so the caller's repository is never
+  modified). The guest's plain clone therefore checks out exactly that commit.
+  The commit is recorded in `room.json` (`base_repo_sha`), then in the snapshot
+  and the restore records. The restored task still checks `git rev-parse HEAD`
+  before applying its patch.
+- **PATH.** Restored SSH sessions start sshd from the canonical resume config,
+  which has no `SetEnv PATH`, and the neutral warm command runs with a scrubbed
+  `PATH`. Warm and restored commands therefore name `/nix/var/rooms/env/bin`
+  explicitly, which also puts the toolchain path in the command receipt.
+  Adding it to the resume config is an image change and is out of scope here.
+- **Phase timings.** `restore` and `clone` have no lifecycle stream, so restored
+  readiness, execution, collection and cleanup come from host log timestamps
+  plus `result.json`.
+- **Writable-state asymmetry.** A cold room with `--disk` writes to a private
+  ext4 disk; a restored room writes to the tmpfs overlay frozen in snapshot
+  memory (half of guest RAM).
+
 ## Verification that decides usefulness
 
 1. Cold Nix control: the exact frozen base/patch runs its meaningful tests and

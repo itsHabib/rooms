@@ -171,9 +171,28 @@ enum Command {
         /// Path to the rootfs image (ext4).
         #[arg(long)]
         image: PathBuf,
+        /// Number of virtual CPUs. Fixed for every room restored from this
+        /// base's snapshot.
+        #[arg(long, default_value_t = 1, value_parser = parse_cpus)]
+        cpus: u8,
+        /// Guest RAM in MiB; also bounds the tmpfs overlay (half of RAM).
+        /// Fixed for every room restored from this base's snapshot.
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(128..=65536))]
+        memory: u32,
+        /// Sealed Nix toolstore directory built by scripts/build-toolstore.py,
+        /// attached read-only at `/nix`. The warm command and restored commands
+        /// must name `/nix/var/rooms/env/bin` explicitly: neither the scrubbed
+        /// warm environment nor restored SSH sessions put it on PATH.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Git URL cloned into `/workspace/repo` to warm the base (at `HEAD`).
         #[arg(long)]
         repo: Option<String>,
+        /// Pin `--repo` to this revision: the host resolves it to a full commit,
+        /// the guest checks out exactly that commit (detached), and the commit is
+        /// recorded in the base and its snapshot.
+        #[arg(long = "base-sha", requires = "repo")]
+        base_sha: Option<String>,
         /// A credential-free warm-up command run by the base agent after clone.
         /// It receives a fixed scrubbed environment and has no network access.
         #[arg(long, value_parser = non_empty_command)]
@@ -215,6 +234,11 @@ enum Command {
         /// The backing rootfs image; its hash must match the snapshot's pin.
         #[arg(long)]
         image: PathBuf,
+        /// Sealed toolstore the snapshot was frozen with; required exactly when
+        /// the snapshot has one. Restored SSH sessions do not add it to PATH, so
+        /// commands name `/nix/var/rooms/env/bin` explicitly.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Keep the restored room alive; hands ownership to the persisted room.
         #[arg(long, conflicts_with = "command")]
         keep: bool,
@@ -258,6 +282,10 @@ enum Command {
         /// The backing rootfs image; its hash must match the snapshot's pin.
         #[arg(long)]
         image: PathBuf,
+        /// Sealed toolstore the snapshot was frozen with; verified once and
+        /// attached read-only to every clone.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Number of clones to fork (bounded by the host's eight-room cap).
         #[arg(short = 'n', long = "count", value_parser = parse_clone_count)]
         count: u8,
@@ -299,6 +327,10 @@ enum Command {
         /// The backing rootfs image; its hash must match the snapshot's pin.
         #[arg(long)]
         image: PathBuf,
+        /// Sealed toolstore the snapshot was frozen with; verified once and
+        /// attached read-only to every case.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Strict `rooms.matrix.v1` case manifest.
         #[arg(long)]
         cases: PathBuf,
@@ -836,7 +868,11 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         }
         Command::BaseCreate {
             image,
+            cpus,
+            memory,
+            toolstore,
             repo,
+            base_sha,
             warm,
             readonly_rootfs: _,
             max_pool,
@@ -845,7 +881,14 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             base_create(
                 BaseCreateArgs {
                     image,
+                    resources: firecracker::Resources {
+                        cpus,
+                        memory_mib: memory,
+                        disk_gib: None,
+                    },
+                    toolstore,
                     repo,
+                    base_sha,
                     warm,
                     max_pool,
                     json,
@@ -860,6 +903,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Restore {
             snapshot_dir,
             image,
+            toolstore,
             keep,
             command,
             slot,
@@ -874,6 +918,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                 RestoreArgs {
                     snapshot_dir,
                     image,
+                    toolstore,
                     keep,
                     command,
                     slot,
@@ -891,6 +936,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Clone {
             snapshot_dir,
             image,
+            toolstore,
             count,
             command,
             out_dir,
@@ -905,6 +951,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                 CloneArgs {
                     snapshot_dir,
                     image,
+                    toolstore,
                     count,
                     command,
                     workloads: None,
@@ -924,6 +971,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Matrix {
             snapshot_dir,
             image,
+            toolstore,
             cases,
             out_dir,
             witness,
@@ -937,6 +985,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                 MatrixArgs {
                     snapshot_dir,
                     image,
+                    toolstore,
                     cases,
                     out_dir,
                     witness,
@@ -984,6 +1033,7 @@ async fn matrix_rooms(args: MatrixArgs, config: &RoomsConfig) -> Result<u8, Room
         CloneArgs {
             snapshot_dir: args.snapshot_dir,
             image: args.image,
+            toolstore: args.toolstore,
             count,
             command: None,
             workloads: Some(workloads),
@@ -1362,7 +1412,10 @@ fn ensure_witness_available(requested: bool) -> Result<(), RoomsError> {
 /// Flags for `rooms base-create` (a flat mirror of the CLI variant).
 struct BaseCreateArgs {
     image: PathBuf,
+    resources: firecracker::Resources,
+    toolstore: Option<PathBuf>,
     repo: Option<String>,
+    base_sha: Option<String>,
     warm: Option<String>,
     max_pool: Option<u8>,
     json: bool,
@@ -1382,10 +1435,13 @@ async fn base_create(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, R
     result
 }
 
-async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
-    info!(image = ?args.image, repo = ?args.repo, "rooms base-create");
-    let json = args.json;
-
+/// Validate every host-side base input before a slot is claimed: the kernel
+/// beside `--image`, the sealed base image, and the admitted toolstore (whose
+/// held inode boot binds and `room.json` records).
+fn admit_base_inputs(
+    args: &BaseCreateArgs,
+    config: &RoomsConfig,
+) -> Result<(PathBuf, Option<rooms::toolstore::Toolstore>), RoomsError> {
     let kernel = args
         .image
         .parent()
@@ -1399,18 +1455,37 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
     rootfs::validate_rootfs(&args.image, config.min_rootfs_bytes).map_err(RoomsError::Rootfs)?;
     rootfs::validate_snapshot_base_image(&args.image).map_err(RoomsError::Internal)?;
+    let toolstore = args
+        .toolstore
+        .as_deref()
+        .map(rooms::toolstore::Toolstore::open)
+        .transpose()
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    if toolstore.is_some() {
+        rootfs::validate_toolstore_image(&args.image).map_err(RoomsError::Internal)?;
+    }
     // A base always wires the vsock device; prove the guest kernel can open one
     // before claiming a slot or booting.
     ensure_kernel_has_vsock(&kernel)?;
     if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
         return Err(RoomsError::Internal(remediation));
     }
+    Ok((kernel, toolstore))
+}
+
+async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(image = ?args.image, repo = ?args.repo, "rooms base-create");
+    let json = args.json;
+    let (kernel, toolstore) = admit_base_inputs(&args, config)?;
 
     let state_base = config.resolved_state_base().ok_or_else(|| {
         RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
     })?;
-    let provisioning =
-        runner::prepare_base_provisioning(args.repo.as_deref(), args.warm.as_deref())?;
+    let provisioning = runner::prepare_base_provisioning(
+        args.repo.as_deref(),
+        args.base_sha.as_deref(),
+        args.warm.as_deref(),
+    )?;
 
     let room_id = firecracker::mint_room_id();
     let me = slot::Claimer::current().ok_or_else(|| {
@@ -1427,8 +1502,8 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     };
     let egress_plan = egress::resolve(&egress::Policy::None).map_err(RoomsError::Internal)?;
     let boot_req = firecracker::BootRequest {
-        resources: firecracker::Resources::default(),
-        toolstore: None,
+        resources: args.resources,
+        toolstore: toolstore.as_ref(),
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -1475,23 +1550,41 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     // `rooms gc` / `rooms kill` reaps it otherwise.
     vm.guard_mut().dismiss();
     std::mem::forget(vm);
-    emit_base_created(&room_id, &claimed, provenance, json);
+    emit_base_created(
+        &BaseCreatedRecord {
+            room_id: &room_id,
+            slot: claimed.index,
+            guest_ip: claimed.guest,
+            provenance,
+            toolstore_sha256: toolstore.as_ref().map(rooms::toolstore::Toolstore::digest),
+            base_repo_sha: provisioning.base_repo_sha(),
+        },
+        json,
+    );
     Ok(0)
+}
+
+/// `base-create --json` record: identity, sealed provenance, and what the base
+/// was provisioned from (also recorded in its `room.json` and snapshot).
+#[derive(serde::Serialize)]
+struct BaseCreatedRecord<'a> {
+    room_id: &'a str,
+    slot: u8,
+    guest_ip: std::net::Ipv4Addr,
+    // Serialized from the enum, not a literal, so `room.json` and this record
+    // can never drift on a variant rename.
+    provenance: room::Provenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolstore_sha256: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_repo_sha: Option<&'a str>,
 }
 
 /// Report a created base — a human line, or a `--json` record carrying the
 /// provisioning provenance so a caller can later gate the seal on it.
-fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provenance, json: bool) {
+fn emit_base_created(record: &BaseCreatedRecord<'_>, json: bool) {
     if json {
-        // Serialize the provenance from the enum, not a literal, so `room.json`
-        // and this record can never drift on a variant rename.
-        let record = serde_json::json!({
-            "room_id": room_id,
-            "slot": slot.index,
-            "guest_ip": slot.guest.to_string(),
-            "provenance": provenance,
-        });
-        match serde_json::to_string(&record) {
+        match serde_json::to_string(record) {
             Ok(line) => {
                 #[allow(
                     clippy::print_stdout,
@@ -1511,8 +1604,8 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provena
     )]
     {
         println!(
-            "base created: room {room_id} on slot {} (guest {}); provenance=neutral — ready for `rooms snapshot`",
-            slot.index, slot.guest
+            "base created: room {} on slot {} (guest {}); provenance=neutral — ready for `rooms snapshot`",
+            record.room_id, record.slot, record.guest_ip
         );
     }
 }
@@ -1530,6 +1623,7 @@ const RESTORE_ACK_TIMEOUT: Duration = Duration::from_mins(1);
 struct RestoreArgs {
     snapshot_dir: PathBuf,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     keep: bool,
     command: Option<String>,
     slot: Option<u8>,
@@ -1549,6 +1643,7 @@ struct RestoreArgs {
 struct CloneArgs {
     snapshot_dir: PathBuf,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     count: u8,
     command: Option<String>,
     workloads: Option<Vec<CloneWorkload>>,
@@ -1614,6 +1709,7 @@ impl CloneWorkload {
 struct MatrixArgs {
     snapshot_dir: PathBuf,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     cases: PathBuf,
     out_dir: PathBuf,
     witness: bool,
@@ -2021,6 +2117,7 @@ impl Drop for CloneCustody {
             room_id,
             snapshot_id,
             clone_net,
+            ..
         } = restored;
         drop(vm);
         if let Err(error) = rooms::restore_exec::finish_teardown(
@@ -2055,6 +2152,10 @@ struct CloneRecord {
     exit_code: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     out_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolstore_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_repo_sha: Option<String>,
 }
 
 impl CloneRecord {
@@ -2081,6 +2182,8 @@ impl CloneRecord {
             status,
             exit_code,
             out_dir,
+            toolstore_sha256: restored.toolstore_sha256.clone(),
+            base_repo_sha: restored.base_repo_sha.clone(),
         })
     }
 }
@@ -2550,6 +2653,7 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
             room_id: &requested_room_id,
             snapshot_dir: &args.snapshot_dir,
             image: &args.image,
+            toolstore: args.toolstore.as_deref(),
             target_slot: args.slot,
             label: args.command.clone().or_else(|| Some("restore".to_owned())),
             keep: args.keep,
@@ -2580,15 +2684,16 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
         }
     }
 
+    emit_restored(&restored, args.json);
     let rooms::restore_exec::Restored {
         mut vm,
         slot,
         room_id,
         snapshot_id,
         clone_net,
+        ..
     } = restored;
     let network = network_config_for(&slot);
-    emit_restored(&room_id, &snapshot_id, &slot, args.json);
 
     if args.keep {
         // Hand ownership to the persisted room. The guard dismisses (and never
@@ -2850,8 +2955,14 @@ async fn prepare_clone_batch(
     let prepare_config = config.clone();
     let prepare_snapshot = args.snapshot_dir.clone();
     let prepare_image = args.image.clone();
+    let prepare_toolstore = args.toolstore.clone();
     let prepared_task = tokio::task::spawn_blocking(move || {
-        rooms::restore_exec::prepare_restore(&prepare_config, &prepare_snapshot, &prepare_image)
+        rooms::restore_exec::prepare_restore(
+            &prepare_config,
+            &prepare_snapshot,
+            &prepare_image,
+            prepare_toolstore.as_deref(),
+        )
     });
     let allocation_state = state_base.to_path_buf();
     let count = args.count;
@@ -2927,6 +3038,36 @@ struct CloneRestoreBatch {
     cancelled: Option<CloneTermination>,
 }
 
+/// The batch outcome when no restore may start: a signal already arrived, or
+/// the workload plan does not cover exactly the allocated clones.
+fn refuse_clone_batch(
+    allocated: usize,
+    planned: usize,
+    cancellation: &tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Option<CloneRestoreBatch> {
+    if let Some(signal) = observed_clone_termination(cancellation) {
+        return Some(CloneRestoreBatch {
+            ready: Vec::new(),
+            failures: Vec::new(),
+            cancelled: Some(signal),
+        });
+    }
+    if planned == allocated {
+        return None;
+    }
+    Some(CloneRestoreBatch {
+        ready: Vec::new(),
+        failures: vec![CloneFailure::new(
+            u8::MAX,
+            "unknown",
+            RoomsError::Internal(
+                "clone workload count did not match allocated clone count".to_owned(),
+            ),
+        )],
+        cancelled: None,
+    })
+}
+
 async fn restore_clone_batch(
     allocations: Vec<AllocatedClone>,
     prepared: Arc<rooms::restore_exec::PreparedRestoreSource>,
@@ -2935,35 +3076,18 @@ async fn restore_clone_batch(
     config: &RoomsConfig,
     cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
 ) -> CloneRestoreBatch {
-    if let Some(signal) = observed_clone_termination(&cancellation) {
+    let workloads = args.assigned_workloads();
+    if let Some(refused) = refuse_clone_batch(allocations.len(), workloads.len(), &cancellation) {
         drop(allocations);
-        return CloneRestoreBatch {
-            ready: Vec::new(),
-            failures: Vec::new(),
-            cancelled: Some(signal),
-        };
+        return refused;
     }
     let mut tasks = tokio::task::JoinSet::new();
     let mut task_identities = HashMap::new();
-    let workloads = args.assigned_workloads();
-    if workloads.len() != allocations.len() {
-        drop(allocations);
-        return CloneRestoreBatch {
-            ready: Vec::new(),
-            failures: vec![CloneFailure::new(
-                u8::MAX,
-                "unknown",
-                RoomsError::Internal(
-                    "clone workload count did not match allocated clone count".to_owned(),
-                ),
-            )],
-            cancelled: None,
-        };
-    }
     for (mut allocation, workload) in allocations.into_iter().zip(workloads) {
         let task_config = config.clone();
         let snapshot_dir = args.snapshot_dir.clone();
         let image = args.image.clone();
+        let toolstore = args.toolstore.clone();
         let witness = args.witness;
         let plan = egress_plan.clone();
         let secrets = args
@@ -2997,6 +3121,7 @@ async fn restore_clone_batch(
                     room_id: &allocation.room_id,
                     snapshot_dir: &snapshot_dir,
                     image: &image,
+                    toolstore: toolstore.as_deref(),
                     target_slot: None,
                     label: workload
                         .as_ref()
@@ -3648,6 +3773,7 @@ async fn teardown_restored_clone(
         room_id,
         snapshot_id,
         clone_net,
+        ..
     } = restored;
     let finalizer = CloneTeardownFinalizer {
         config: config.clone(),
@@ -3745,15 +3871,33 @@ fn emit_clone_records(
     Ok(())
 }
 
+/// `restore --json` record: identity plus the verified lineage the room runs on.
+#[derive(serde::Serialize)]
+struct RestoredRecord<'a> {
+    room_id: &'a str,
+    snapshot_id: &'a str,
+    slot: u8,
+    guest_ip: std::net::Ipv4Addr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolstore_sha256: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_repo_sha: Option<&'a str>,
+}
+
 /// Report a restored room — a human line, or a `--json` record.
-fn emit_restored(room_id: &str, snapshot_id: &str, slot: &room::Slot, json: bool) {
+fn emit_restored(restored: &rooms::restore_exec::Restored, json: bool) {
+    let room_id = &restored.room_id;
+    let snapshot_id = &restored.snapshot_id;
+    let slot = &restored.slot;
     if json {
-        let record = serde_json::json!({
-            "room_id": room_id,
-            "snapshot_id": snapshot_id,
-            "slot": slot.index,
-            "guest_ip": slot.guest.to_string(),
-        });
+        let record = RestoredRecord {
+            room_id,
+            snapshot_id,
+            slot: slot.index,
+            guest_ip: slot.guest,
+            toolstore_sha256: restored.toolstore_sha256.as_deref(),
+            base_repo_sha: restored.base_repo_sha.as_deref(),
+        };
         match serde_json::to_string(&record) {
             Ok(line) => {
                 #[allow(
@@ -5567,6 +5711,8 @@ mod tests {
             status: "exited",
             exit_code: Some(0),
             out_dir: Some(invalid),
+            toolstore_sha256: None,
+            base_repo_sha: None,
         };
         assert!(
             clone_records_json(&[record], None).is_err(),
@@ -5839,6 +5985,8 @@ mod tests {
             status: "exited",
             exit_code: Some(0),
             out_dir: Some(PathBuf::from("/out/room-three")),
+            toolstore_sha256: None,
+            base_repo_sha: None,
         };
         let batch = CloneCommandBatchFailure::new(
             vec![success],
@@ -5886,6 +6034,8 @@ mod tests {
             status,
             exit_code,
             out_dir: Some(PathBuf::from(format!("/out/{case_id}"))),
+            toolstore_sha256: None,
+            base_repo_sha: None,
         }
     }
 
@@ -6529,5 +6679,88 @@ mod tests {
         assert!(Cli::try_parse_from(base.into_iter().chain(["--keep"])).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--task", "do work"])).is_err());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--command", "cargo test"])).is_ok());
+    }
+
+    #[test]
+    fn base_create_fixes_machine_shape_toolstore_and_pinned_revision() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "base-create",
+            "--image",
+            "image.ext4",
+            "--cpus",
+            "2",
+            "--memory",
+            "1024",
+            "--toolstore",
+            "tools",
+            "--repo",
+            "/src/workbench",
+            "--base-sha",
+            "92a706a",
+        ])
+        .expect("parse");
+        let Command::BaseCreate {
+            cpus,
+            memory,
+            toolstore,
+            base_sha,
+            ..
+        } = cli.command
+        else {
+            panic!("expected base-create");
+        };
+        assert_eq!((cpus, memory), (2, 1024));
+        assert_eq!(toolstore, Some(PathBuf::from("tools")));
+        assert_eq!(base_sha.as_deref(), Some("92a706a"));
+        let base = ["rooms", "base-create", "--image", "image.ext4"];
+        // A pinned revision without a repository has nothing to pin.
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--base-sha", "92a706a"])).is_err());
+        // Bases share the cold-run machine limits.
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--cpus", "3"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--memory", "64"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--disk", "1"])).is_err());
+    }
+
+    #[test]
+    fn restore_clone_and_matrix_accept_the_frozen_toolstore() {
+        let restore = [
+            "rooms",
+            "restore",
+            "snap",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+            "--command",
+            "true",
+        ];
+        assert!(Cli::try_parse_from(restore).is_ok());
+        let clone = [
+            "rooms",
+            "clone",
+            "snap",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+            "-n",
+            "2",
+        ];
+        assert!(Cli::try_parse_from(clone).is_ok());
+        let matrix = [
+            "rooms",
+            "matrix",
+            "snap",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+            "--cases",
+            "cases.json",
+            "--out",
+            "out",
+        ];
+        assert!(Cli::try_parse_from(matrix).is_ok());
     }
 }

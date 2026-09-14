@@ -63,6 +63,7 @@ impl Manifest {
 
 /// An immutable inode held open across admission and jail attachment. A path
 /// replacement cannot substitute another disk after its digest was checked.
+#[derive(Debug)]
 pub struct Toolstore {
     file: File,
     digest: String,
@@ -116,6 +117,16 @@ impl Toolstore {
         })
     }
 
+    /// A held descriptor with an asserted digest, for policy tests on hosts
+    /// that cannot seal or mount a real toolstore.
+    #[cfg(test)]
+    pub(crate) fn fixture(file: File, digest: &str) -> Self {
+        Self {
+            file,
+            digest: digest.to_owned(),
+        }
+    }
+
     /// Duplicate the admitted descriptor for an owned blocking mount worker.
     pub(crate) fn try_clone(&self) -> std::io::Result<Self> {
         Ok(Self {
@@ -128,6 +139,12 @@ impl Toolstore {
     #[must_use]
     pub fn digest(&self) -> &str {
         &self.digest
+    }
+
+    /// Recheck that the held inode still refuses writes, so a long-lived
+    /// holder such as a clone batch never attaches bytes changed after hashing.
+    pub(crate) fn require_sealed(&self) -> anyhow::Result<()> {
+        self.mount_source().map(drop)
     }
 
     /// Linux mount(8) resolves the parent's descriptor rather than reopening
@@ -168,7 +185,8 @@ impl Toolstore {
         self.verify_attachment(target)
     }
 
-    fn verify_attachment(&self, target: &Path) -> anyhow::Result<()> {
+    /// Require `target` to be this exact sealed inode, not a same-named file.
+    pub(crate) fn verify_attachment(&self, target: &Path) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::fs::MetadataExt;

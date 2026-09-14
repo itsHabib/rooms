@@ -990,18 +990,32 @@ async fn clone_repo_in_guest(
 
 /// Resolve the optional repository entirely on the host and build the
 /// credential-free input served to the base agent.
+///
+/// With `base_revision`, the host resolves it to a full commit and bundles only
+/// that commit's history behind a detached `HEAD`, so the guest's plain clone
+/// checks out exactly the recorded commit.
 pub fn prepare_base_provisioning(
     repo: Option<&str>,
+    base_revision: Option<&str>,
     warm: Option<&str>,
 ) -> Result<crate::vsock::ProvisioningPayload, FirecrackerError> {
     if let Some(command) = warm {
         validate_neutral_warm(command)?;
     }
-    let bundle = match repo {
-        Some(repo) => create_repo_bundle(repo)?,
-        None => Vec::new(),
+    let Some(repo) = repo else {
+        if base_revision.is_some() {
+            return Err(FirecrackerError::Internal(
+                "--base-sha requires --repo".to_owned(),
+            ));
+        }
+        return Ok(crate::vsock::ProvisioningPayload::new(Vec::new(), warm));
     };
-    Ok(crate::vsock::ProvisioningPayload::new(bundle, warm))
+    let (bundle, pinned) = create_repo_bundle(repo, base_revision)?;
+    let payload = crate::vsock::ProvisioningPayload::new(bundle, warm);
+    Ok(match pinned {
+        Some(commit) => payload.pinned_to(commit),
+        None => payload,
+    })
 }
 
 fn validate_neutral_warm(command: &str) -> Result<(), FirecrackerError> {
@@ -1030,7 +1044,10 @@ fn validate_neutral_warm(command: &str) -> Result<(), FirecrackerError> {
     Ok(())
 }
 
-fn create_repo_bundle(repo: &str) -> Result<Vec<u8>, FirecrackerError> {
+fn create_repo_bundle(
+    repo: &str,
+    base_revision: Option<&str>,
+) -> Result<(Vec<u8>, Option<String>), FirecrackerError> {
     if repo_url_has_userinfo(repo) {
         return Err(FirecrackerError::Internal(
             "base --repo URL must not embed credentials".to_owned(),
@@ -1053,17 +1070,73 @@ fn create_repo_bundle(repo: &str) -> Result<Vec<u8>, FirecrackerError> {
         mirror
     };
     let bundle_path = temp.join("repo.bundle");
-    run_git(
-        &repo_dir,
-        &["bundle", "create", &bundle_path.to_string_lossy(), "--all"],
-        "create credential-free repository bundle",
-    )?;
+    let pinned = base_revision
+        .map(|revision| {
+            bundle_pinned_head(&repo_dir, &temp.join("pinned.git"), revision, &bundle_path)
+        })
+        .transpose()?;
+    if pinned.is_none() {
+        run_git(
+            &repo_dir,
+            &["bundle", "create", &bundle_path.to_string_lossy(), "--all"],
+            "create credential-free repository bundle",
+        )?;
+    }
     let bytes = std::fs::read(&bundle_path)?;
     drop(cleanup);
-    Ok(bytes)
+    Ok((bytes, pinned))
+}
+
+/// Resolve `revision` to a full commit in `repo_dir`, then bundle only that
+/// commit's history behind a detached `HEAD`. A shared bare clone at `staging`
+/// carries the pin, so the caller's repository is never modified.
+fn bundle_pinned_head(
+    repo_dir: &Path,
+    staging: &Path,
+    revision: &str,
+    bundle: &Path,
+) -> Result<String, FirecrackerError> {
+    let spec = format!("{revision}^{{commit}}");
+    let commit = git_stdout(
+        repo_dir,
+        &["rev-parse", "--verify", "--end-of-options", &spec],
+        "resolve --base-sha on host",
+    )?;
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(FirecrackerError::Internal(format!(
+            "--base-sha {revision} did not resolve to a full commit id"
+        )));
+    }
+    run_git(
+        Path::new("."),
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            "--shared",
+            &repo_dir.to_string_lossy(),
+            &staging.to_string_lossy(),
+        ],
+        "stage pinned base repository",
+    )?;
+    run_git(
+        staging,
+        &["update-ref", "--no-deref", "HEAD", &commit],
+        "pin base repository HEAD",
+    )?;
+    run_git(
+        staging,
+        &["bundle", "create", &bundle.to_string_lossy(), "HEAD"],
+        "create pinned repository bundle",
+    )?;
+    Ok(commit)
 }
 
 fn run_git(cwd: &Path, args: &[&str], action: &str) -> Result<(), FirecrackerError> {
+    git_stdout(cwd, args, action).map(drop)
+}
+
+fn git_stdout(cwd: &Path, args: &[&str], action: &str) -> Result<String, FirecrackerError> {
     let output = std::process::Command::new("git")
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -1071,7 +1144,7 @@ fn run_git(cwd: &Path, args: &[&str], action: &str) -> Result<(), FirecrackerErr
         .output()
         .map_err(|e| FirecrackerError::Internal(format!("{action}: {e}")))?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
     Err(FirecrackerError::Internal(format!(
         "{action}: {}",
@@ -1573,6 +1646,62 @@ mod tests {
             .output()
             .unwrap();
         assert!(!missing.status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_base_bundle_checks_out_exactly_the_resolved_commit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let clone = temp.path().join("clone");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            super::git_stdout(cwd, args, "fixture git").unwrap()
+        };
+        git(
+            temp.path(),
+            &["init", "-b", "main", source.to_str().unwrap()],
+        );
+        let commit = [
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@rooms.local",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ];
+        git(&source, &commit);
+        let pinned = git(&source, &["rev-parse", "HEAD"]);
+        git(&source, &commit);
+        let tip = git(&source, &["rev-parse", "HEAD"]);
+        let refs_before = git(&source, &["for-each-ref"]);
+
+        let (bundle, resolved) =
+            super::create_repo_bundle(source.to_str().unwrap(), Some(&pinned[..12])).unwrap();
+        assert_eq!(resolved.as_deref(), Some(pinned.as_str()));
+        let bundle_path = temp.path().join("pinned.bundle");
+        std::fs::write(&bundle_path, bundle).unwrap();
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--quiet",
+                bundle_path.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]), pinned);
+        assert_eq!(git(&clone, &["rev-list", "--count", "HEAD"]), "1");
+        // The caller's repository keeps its refs and HEAD.
+        assert_eq!(git(&source, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(git(&source, &["for-each-ref"]), refs_before);
+        assert!(super::create_repo_bundle(source.to_str().unwrap(), Some("missing")).is_err());
+        assert!(super::prepare_base_provisioning(None, Some("main"), None).is_err());
     }
 
     #[test]
