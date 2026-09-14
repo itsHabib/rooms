@@ -21,6 +21,7 @@ use crate::room::{self, Liveness};
 use crate::slot;
 use crate::snapshot::{self, SnapshotMeta};
 use crate::snapshot_exec::{canonical_candidate, firecracker_version, overlaps, sha256_open_file};
+use crate::toolstore::Toolstore;
 use crate::{clonenet, egress, transport, vsock, witness};
 
 const INTENT_SCHEMA_VERSION: u32 = 1;
@@ -66,6 +67,10 @@ pub struct Restored {
     pub room_id: String,
     pub snapshot_id: String,
     pub clone_net: Option<clonenet::CloneNet>,
+    /// Digest of the toolstore verified and attached to this room, if any.
+    pub toolstore_sha256: Option<String>,
+    /// Commit the snapshot's base repository was pinned to, if recorded.
+    pub base_repo_sha: Option<String>,
 }
 
 /// One request-scoped, compatibility-checked restore source.
@@ -90,6 +95,11 @@ pub struct PreparedRestoreSource {
     vmstate_hash: String,
     /// Pins the exact backing inode whose receipt/full hash was checked.
     image_guard: File,
+    /// Canonical directory the toolstore was admitted from, if any.
+    toolstore_dir: Option<PathBuf>,
+    /// The admitted toolstore whose digest matched the snapshot's. Its held
+    /// descriptor, not a path, is what every member of a batch attaches.
+    toolstore: Option<Toolstore>,
 }
 
 impl PreparedRestoreSource {
@@ -113,6 +123,9 @@ impl PreparedRestoreSource {
 
     fn revalidate(&self) -> anyhow::Result<()> {
         require_immutable_restore_source(&self.snapshot_dir, &self.image)?;
+        if let Some(toolstore) = &self.toolstore {
+            toolstore.require_sealed()?;
+        }
         #[cfg(target_os = "linux")]
         crate::inode_seal::require_file(&self.image_guard, &self.image, "backing image")?;
         self.identity
@@ -132,6 +145,9 @@ impl PreparedRestoreSource {
             "snapshot memory",
             &jail_root.join(snapshot::SNAPSHOT_MEM_FILE),
         )?;
+        if let Some(toolstore) = &self.toolstore {
+            toolstore.verify_attachment(&jail_root.join(firecracker::JAIL_TOOLSTORE))?;
+        }
 
         let staged_vmstate_path = jail_root.join(snapshot::SNAPSHOT_VMSTATE_FILE);
         let mut staged_vmstate = File::open(&staged_vmstate_path).map_err(|error| {
@@ -158,6 +174,8 @@ pub struct RestoreRequest<'a> {
     pub snapshot_dir: &'a Path,
     /// The backing rootfs; its hash must equal the snapshot's pinned hash.
     pub image: &'a Path,
+    /// Sealed toolstore directory; its digest must equal the snapshot's.
+    pub toolstore: Option<&'a Path>,
     /// `--slot` override; must equal the frozen slot when given.
     pub target_slot: Option<u8>,
     /// Room label for `rooms ls`.
@@ -188,7 +206,7 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
     if !crate::registry::is_valid_room_id(req.room_id) {
         anyhow::bail!("restore room id is invalid");
     }
-    let prepared = prepare_restore(config, req.snapshot_dir, req.image)?;
+    let prepared = prepare_restore(config, req.snapshot_dir, req.image, req.toolstore)?;
     restore_prepared(config, req, &prepared).await
 }
 
@@ -200,24 +218,30 @@ pub async fn restore(config: &RoomsConfig, req: RestoreRequest<'_>) -> anyhow::R
 ///
 /// # Errors
 /// Refuses missing, empty, symlinked, or non-regular artifacts; malformed or
-/// incompatible metadata; and any source whose identity changes while it is
-/// being prepared.
+/// incompatible metadata; a missing, extra, unsealed, or different toolstore;
+/// and any source whose identity changes while it is being prepared.
 pub fn prepare_restore(
     config: &RoomsConfig,
     snapshot_dir: &Path,
     image: &Path,
+    toolstore: Option<&Path>,
 ) -> anyhow::Result<PreparedRestoreSource> {
-    prepare_restore_inner(config, snapshot_dir, image, true)
+    prepare_restore_inner(config, snapshot_dir, image, toolstore, true)
 }
 
 fn prepare_restore_inner(
     config: &RoomsConfig,
     snapshot_dir: &Path,
     image: &Path,
+    toolstore: Option<&Path>,
     require_immutable: bool,
 ) -> anyhow::Result<PreparedRestoreSource> {
     let snapshot_dir = canonical_candidate(snapshot_dir)?;
     let image = canonical_candidate(image)?;
+    let toolstore_dir = toolstore.map(canonical_candidate).transpose()?;
+    // Full architecture, seal, and content check of the held inode; a caller
+    // path is never an attestation.
+    let toolstore = toolstore_dir.as_deref().map(Toolstore::open).transpose()?;
     if require_immutable {
         require_immutable_restore_source(&snapshot_dir, &image)?;
     }
@@ -242,7 +266,12 @@ fn prepare_restore_inner(
         &before,
         require_immutable,
     )?;
-    let plan = restore::plan_restore(&meta, &host_fc, &rootfs_hash)?;
+    let plan = restore::plan_restore(
+        &meta,
+        &host_fc,
+        &rootfs_hash,
+        toolstore.as_ref().map(Toolstore::digest),
+    )?;
     let identity = RestoreSourceIdentity::capture(&snapshot_dir, &image)?;
     before.assert_same(&identity, "changed while being prepared")?;
     identity.assert_open("backing image", &image_guard)?;
@@ -262,6 +291,8 @@ fn prepare_restore_inner(
         identity,
         vmstate_hash,
         image_guard,
+        toolstore_dir,
+        toolstore,
     })
 }
 
@@ -326,7 +357,7 @@ fn prepare_unsealed_restore_fixture(
     snapshot_dir: &Path,
     image: &Path,
 ) -> anyhow::Result<PreparedRestoreSource> {
-    prepare_restore_inner(config, snapshot_dir, image, false)
+    prepare_restore_inner(config, snapshot_dir, image, None, false)
 }
 
 /// A restored VMM can demand-page these inodes after the API load and resume
@@ -390,6 +421,10 @@ fn validate_prepared_request_paths(
             requested_snapshot.display(),
             prepared.snapshot_dir.display()
         );
+    }
+    let requested_toolstore = req.toolstore.map(canonical_candidate).transpose()?;
+    if requested_toolstore != prepared.toolstore_dir {
+        anyhow::bail!("restore request toolstore differs from the prepared toolstore");
     }
     validate_output_disjoint(config, req.out_dir, &prepared.image, &prepared.snapshot_dir)
 }
@@ -465,6 +500,7 @@ pub async fn restore_prepared(
         rootfs: &prepared.image,
         host_vmstate: &prepared.snapshot_dir.join(snapshot::SNAPSHOT_VMSTATE_FILE),
         host_mem: &prepared.snapshot_dir.join(snapshot::SNAPSHOT_MEM_FILE),
+        toolstore: prepared.toolstore.as_ref(),
         descriptor: &descriptor,
         snapshot_id: &prepared.meta.snapshot_id,
         network_namespace: clone_net.as_ref().map(|net| net.netns.as_str()),
@@ -514,6 +550,8 @@ pub async fn restore_prepared(
             room_id,
             snapshot_id: prepared.meta.snapshot_id.clone(),
             clone_net,
+            toolstore_sha256: prepared.meta.toolstore_sha256.clone(),
+            base_repo_sha: prepared.meta.base_repo_sha.clone(),
         }),
         Err(e) => {
             abort_launch(config, launch, &intent);
@@ -540,7 +578,7 @@ async fn drive_to_ready(
     let room_dir = config
         .room_dir(&intent.room_id)
         .ok_or_else(|| anyhow::anyhow!("cannot resolve room dir"))?;
-    let (fc_uid, fc_gid) = firecracker::lookup_firecracker_ids()?;
+    let (fc_uid, fc_gid) = firecracker::lookup_firecracker_ids_async().await?;
 
     let mut witness_capture = None;
     let mut resume_delivery = None;
@@ -1447,8 +1485,8 @@ mod tests {
     use super::{
         canonical_clone_net, create_intent_exclusive, finish_index, pending_all,
         prepare_unsealed_restore_fixture, read_intents, rootfs_compat_hash,
-        validate_output_disjoint, write_intent_atomic, Boundary, RestoreIntent,
-        INTENT_SCHEMA_VERSION,
+        validate_output_disjoint, validate_prepared_request_paths, write_intent_atomic, Boundary,
+        RestoreIntent, RestoreRequest, INTENT_SCHEMA_VERSION,
     };
     use crate::clonenet::{CloneNet, CLONENETS_DIR};
     use crate::config::RoomsConfig;
@@ -1511,6 +1549,7 @@ mod tests {
             slot_index: Some(3),
             guest_ip: None,
             base_repo_sha: None,
+            toolstore_sha256: None,
             provenance: Provenance::Neutral,
         };
         std::fs::write(
@@ -1551,6 +1590,54 @@ mod tests {
         assert_eq!(prepared.snapshot_meta().snapshot_id, SNAP_ID);
         assert_eq!(prepared.snapshot_meta().created_at, created_at);
         prepared.identity.revalidate().expect("unchanged source");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_must_name_the_prepared_toolstore() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let prepared =
+            prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image).expect("prepare");
+        let tools = root.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let egress = crate::egress::Plan::Observe;
+        let request = |toolstore| RestoreRequest {
+            room_id: ROOM_ID,
+            snapshot_dir: &snapshot_dir,
+            image: &image,
+            toolstore,
+            target_slot: None,
+            label: None,
+            keep: false,
+            witness: false,
+            egress: &egress,
+            secrets: None,
+            out_dir: None,
+            ack_timeout: std::time::Duration::from_secs(1),
+            clone_net: None,
+        };
+        validate_prepared_request_paths(&config, &request(None), &prepared)
+            .expect("the prepared source had no toolstore");
+        let error = validate_prepared_request_paths(&config, &request(Some(&tools)), &prepared)
+            .expect_err("a batch member cannot swap in another toolstore");
+        assert!(error.to_string().contains("toolstore differs"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolstore_snapshot_is_refused_before_restore_without_its_toolstore() {
+        let root = tempfile::tempdir().unwrap();
+        let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
+        let meta_path = snapshot_dir.join(SNAPSHOT_META_FILE);
+        let mut meta: SnapshotMeta =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        meta.schema_version = crate::snapshot::TOOLSTORE_SNAPSHOT_SCHEMA_VERSION;
+        meta.toolstore_sha256 = Some("e".repeat(64));
+        std::fs::write(&meta_path, serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
+        let error = prepare_unsealed_restore_fixture(&config, &snapshot_dir, &image)
+            .expect_err("a toolstore snapshot needs its toolstore");
+        assert!(error.to_string().contains("pass --toolstore"), "{error}");
     }
 
     #[cfg(unix)]
@@ -1691,7 +1778,7 @@ mod tests {
     fn production_prepare_refuses_unsealed_restore_inputs() {
         let root = tempfile::tempdir().unwrap();
         let (config, snapshot_dir, image, _) = prepared_fixture(root.path());
-        let error = prepare_restore(&config, &snapshot_dir, &image)
+        let error = prepare_restore(&config, &snapshot_dir, &image, None)
             .expect_err("mutable source artifacts must never reach Firecracker restore");
         assert!(
             error.to_string().contains("not kernel-immutable"),

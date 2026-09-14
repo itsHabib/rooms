@@ -1,8 +1,8 @@
-.PHONY: check fmt fmt-check lint test e2e build release clean
+.PHONY: check fmt fmt-check lint test test-rehearsal e2e build release clean
 
 # `make check` is the single command CI runs and you run before commit.
 # Same matrix locally and in CI so failures are reproducible.
-check: fmt-check lint test
+check: fmt-check lint test test-rehearsal
 
 fmt:
 	cargo fmt --all
@@ -18,6 +18,9 @@ test:
 	# Firecracker + kernel + rootfs on the host. Run e2e tests explicitly
 	# via `cargo test --features e2e` on the rooms-host VM.
 	cargo test
+
+test-rehearsal:
+	python3 -m unittest discover -s examples/rehearsal -p 'test_*.py'
 
 e2e:
 	# Host-e2e harness (rooms-host only): preflight → build → run e2e →

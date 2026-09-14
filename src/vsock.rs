@@ -150,6 +150,9 @@ impl Drop for Delivery {
 pub struct ProvisioningPayload {
     bundle: Vec<u8>,
     warm: Vec<u8>,
+    /// Host-resolved commit the bundle's detached `HEAD` names. Host-side
+    /// record only; never served to the guest.
+    base_repo_sha: Option<String>,
 }
 
 impl ProvisioningPayload {
@@ -160,7 +163,21 @@ impl ProvisioningPayload {
         Self {
             bundle,
             warm: warm.unwrap_or_default().as_bytes().to_vec(),
+            base_repo_sha: None,
         }
+    }
+
+    /// Record the full commit the bundle was pinned to on the host.
+    #[must_use]
+    pub fn pinned_to(mut self, commit: String) -> Self {
+        self.base_repo_sha = Some(commit);
+        self
+    }
+
+    /// The host-resolved commit the guest checks out, when pinned.
+    #[must_use]
+    pub fn base_repo_sha(&self) -> Option<&str> {
+        self.base_repo_sha.as_deref()
     }
 }
 

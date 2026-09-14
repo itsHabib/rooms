@@ -112,6 +112,10 @@ pub struct SnapshotResult {
     pub slot: u8,
     pub guest_ip: std::net::Ipv4Addr,
     pub provenance: room::Provenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolstore_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_repo_sha: Option<String>,
 }
 
 /// One indexed transaction and the next safe operator action.
@@ -302,12 +306,14 @@ fn build_intent(
     // would let a transient ancestor rename pair identity(A) with hash(B).
     #[cfg(target_os = "linux")]
     inode_seal::require_file(&rootfs_file, &rootfs, "snapshot backing image")?;
+    let toolstore_sha256 = attached_toolstore(&jail_root, base.toolstore_sha256.as_deref())?;
     let request = SnapshotRequest {
         out_dir: out_dir.clone(),
         snapshot_id: snapshot_id.clone(),
         fc_version: firecracker_version(config)?,
         rootfs_hash,
-        base_repo_sha: None,
+        base_repo_sha: base.base_repo_sha.clone(),
+        toolstore_sha256,
         active_vsock,
     };
     let plan = snapshot::plan(base, request, Utc::now())?;
@@ -325,6 +331,58 @@ fn build_intent(
         boundary: Boundary::Pending,
         aborted: false,
     })
+}
+
+/// Identify the toolstore actually bound into the live base's jail and prove it
+/// is the one `base-create` admitted: one sealed inode for the whole hash, whose
+/// bytes match the recorded digest. An attachment without an admission record,
+/// or a record without an attachment, is refused before the base is paused.
+fn attached_toolstore(jail_root: &Path, recorded: Option<&str>) -> anyhow::Result<Option<String>> {
+    let path = jail_root.join(firecracker::JAIL_TOOLSTORE);
+    let attached = match std::fs::symlink_metadata(&path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let expected = match (attached, recorded) {
+        (false, None) => return Ok(None),
+        (false, Some(_)) => anyhow::bail!(
+            "base records an admitted toolstore but its jail has no toolstore attachment"
+        ),
+        (true, None) => anyhow::bail!(
+            "base jail has a toolstore attachment its room record never admitted: {}",
+            path.display()
+        ),
+        (true, Some(expected)) => expected,
+    };
+    let digest = hash_sealed_toolstore(&path)?;
+    if digest != expected {
+        anyhow::bail!(
+            "attached toolstore {} differs from the digest base-create admitted",
+            path.display()
+        );
+    }
+    Ok(Some(digest))
+}
+
+/// Bare-hex SHA-256 of one sealed inode, refusing a change during the hash.
+fn hash_sealed_toolstore(path: &Path) -> anyhow::Result<String> {
+    let mut file = inode_seal::open_regular(path, "attached toolstore")?;
+    #[cfg(unix)]
+    let before = snapshot::ImmutableFileIdentity::capture_file(&file)?;
+    let digest = sha256_open_file(&mut file)?;
+    #[cfg(unix)]
+    if before != snapshot::ImmutableFileIdentity::capture_file(&file)? {
+        anyhow::bail!(
+            "attached toolstore {} changed while being hashed",
+            path.display()
+        );
+    }
+    inode_seal::require_file(&file, path, "attached toolstore")?;
+    digest
+        .strip_prefix("sha256:")
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("unexpected toolstore digest format"))
 }
 
 async fn drive(config: &RoomsConfig, mut intent: SnapshotIntent) -> anyhow::Result<SnapshotResult> {
@@ -1437,6 +1495,8 @@ fn result_from(intent: &SnapshotIntent) -> anyhow::Result<SnapshotResult> {
             .guest_ip
             .ok_or_else(|| anyhow::anyhow!("snapshot metadata lost guest ip"))?,
         provenance: intent.meta.provenance,
+        toolstore_sha256: intent.meta.toolstore_sha256.clone(),
+        base_repo_sha: intent.meta.base_repo_sha.clone(),
     })
 }
 
@@ -1612,10 +1672,11 @@ mod tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing, reason = "test module")]
 
     use super::{
-        acquire_lock, canonical_candidate, create_intent_exclusive, create_output_tree,
-        ensure_output_unclaimed, ensure_snapshot_metadata, op_request, overlaps, pending_for_base,
-        pending_summary, pinned_process_identity, read_intents, record_abort, resolve_output,
-        sha256_file, snapshot_ops, Boundary, SnapshotIntent, INTENT_SCHEMA_VERSION,
+        acquire_lock, attached_toolstore, canonical_candidate, create_intent_exclusive,
+        create_output_tree, ensure_output_unclaimed, ensure_snapshot_metadata, op_request,
+        overlaps, pending_for_base, pending_summary, pinned_process_identity, read_intents,
+        record_abort, resolve_output, sha256_file, snapshot_ops, Boundary, SnapshotIntent,
+        INTENT_SCHEMA_VERSION,
     };
     use crate::config::RoomsConfig;
     use crate::room::{Provenance, RoomMeta, Slot};
@@ -1656,6 +1717,7 @@ mod tests {
                 slot_index: Some(1),
                 guest_ip: Some(Ipv4Addr::new(172, 16, 0, 6)),
                 base_repo_sha: None,
+                toolstore_sha256: None,
                 provenance: Provenance::Neutral,
             },
             rootfs_source: None,
@@ -1689,6 +1751,52 @@ mod tests {
         });
         meta.seal().expect("seal");
         crate::room::write_atomic(&dir, &meta).expect("write room");
+    }
+
+    #[test]
+    fn toolstore_attachment_must_match_the_admission_record() {
+        let jail = tempfile::tempdir().expect("tempdir");
+        let digest = "d".repeat(64);
+        // No record and no attachment: a legacy base without a toolstore.
+        assert_eq!(attached_toolstore(jail.path(), None).expect("legacy"), None);
+        // A record whose attachment is missing never snapshots.
+        let missing = attached_toolstore(jail.path(), Some(&digest)).expect_err("missing bind");
+        assert!(missing.to_string().contains("no toolstore attachment"));
+        // An attachment nobody admitted never snapshots either.
+        std::fs::write(jail.path().join("toolstore.sqfs"), b"hsqs").expect("stray");
+        let stray = attached_toolstore(jail.path(), None).expect_err("unadmitted bind");
+        assert!(stray.to_string().contains("never admitted"));
+        // An unsealed attachment is refused before any digest comparison.
+        assert!(attached_toolstore(jail.path(), Some(&digest)).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires root with immutable-inode support; run explicitly on the Rooms host"]
+    fn attached_toolstore_hashes_the_sealed_inode_against_the_record() -> anyhow::Result<()> {
+        use rustix::fs::{ioctl_getflags, ioctl_setflags, IFlags};
+        use sha2::{Digest, Sha256};
+        let jail = tempfile::tempdir()?;
+        let path = jail.path().join("toolstore.sqfs");
+        std::fs::write(&path, b"hsqs-attached-bytes")?;
+        let digest = format!("{:x}", Sha256::digest(b"hsqs-attached-bytes"));
+        let file = std::fs::File::open(&path)?;
+        let baseline = ioctl_getflags(&file)?;
+        ioctl_setflags(&file, baseline | IFlags::IMMUTABLE)?;
+        // Clear the test's seal even if an assertion returns an error.
+        let result = (|| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                attached_toolstore(jail.path(), Some(&digest))? == Some(digest.clone())
+            );
+            let other = "0".repeat(64);
+            let error = attached_toolstore(jail.path(), Some(&other))
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("a different admitted digest must be refused"))?;
+            anyhow::ensure!(error.to_string().contains("differs from the digest"));
+            Ok(())
+        })();
+        ioctl_setflags(&file, baseline)?;
+        result
     }
 
     #[test]
@@ -1750,6 +1858,7 @@ mod tests {
             slot_index: Some(1),
             guest_ip: Some(Ipv4Addr::new(172, 16, 0, 6)),
             base_repo_sha: None,
+            toolstore_sha256: None,
             provenance: Provenance::Neutral,
         };
         let meta_path = snapshot_dir.join(crate::snapshot::SNAPSHOT_META_FILE);
