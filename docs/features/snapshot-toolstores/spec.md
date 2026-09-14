@@ -1,7 +1,8 @@
 # Reusable Nix environments for repository checks
 
-Status: implementation proposal, based on the reviewed cold-toolstore tree in #121.
-This extends the existing neutral-base/snapshot/restore path; it is not a new runtime.
+Status: first slice implemented and exercised on the local Lima host (see
+"As implemented" and "Measured result"). This extends the existing
+neutral-base/snapshot/restore path; it is not a new runtime.
 
 ## Useful result
 
@@ -155,3 +156,24 @@ isolated branch, and exercise a single restored real task before extending the
 same path to concurrent clones. The headless workflow remains owned by its existing
 lead. No KV service, agent messaging protocol, scheduler or cross-host migration
 is needed to establish this result.
+
+## Measured result
+
+On 2026-09-14 the local nested aarch64 Lima host ran the Workbench fixture
+(`92a706a`, patch `83da8be4…`, sealed Python toolstore `85074bed…`) through
+five cold controls, two toolstore bases (one snapshot on disk, one on a
+`huge=always` tmpfs), ten restores and four clone batches (n=2 and n=4). All 27
+returned patches were byte-identical and produced tree `8e0ed976…`; 16 of 16
+tests passed everywhere. No restored room saw another's sentinel, each had a
+distinct sshd host key, and restores without the toolstore or with a different
+sealed one were refused before admission with no residue.
+
+In interleaved rounds under the same contention, cold took 18.2 s end to end
+and restore 15.8 s (disk snapshot) or 16.4 s (tmpfs snapshot). Restore reached
+a ready, pinned repository in 1.9 s instead of 11.4 s, but the tests ran in
+10 s instead of 3 s: after a restore, each first write to a guest page is a
+nested stage-2 fault on this host. The hugepage snapshot helped readiness, not
+the write-heavy tests. Concurrent clones gave no throughput gain here. These
+numbers are specific to one nested host with shared CPUs and say nothing about
+bare-metal KVM. Evidence, per-phase timings and the orchestration:
+`~/Documents/Codex/2026-09-14/rooms-snapshot/RESULTS.md` (summarized in #123).
