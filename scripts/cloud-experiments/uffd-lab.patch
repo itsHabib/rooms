@@ -156,17 +156,3 @@
          vm,
          slot,
          room_id,
-@@ -5500,10 +5506,11 @@
-     }
- 
-     #[test]
--    fn clone_count_accepts_one_through_eight_only() {
-+    fn clone_count_accepts_one_through_128_only() {
-         assert_eq!(parse_clone_count("1"), Ok(1));
-         assert_eq!(parse_clone_count("8"), Ok(8));
--        for bad in ["0", "9", "abc", ""] {
-+        assert_eq!(parse_clone_count("128"), Ok(128));
-+        for bad in ["0", "129", "abc", ""] {
-             assert!(
-                 parse_clone_count(bad).is_err(),
-                 "clone count {bad:?} should be rejected"
