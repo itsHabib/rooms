@@ -1,0 +1,23 @@
+{
+  "identities": {
+    "/home/rooms/src/target/release/rooms": "92028f9e8e1ef4cf4fb92aa77cbda87876431cd31df07ec6f59db06f2e68e9cb",
+    "/home/rooms/rooms/images/agent.ext4": "a07a0717eb11cfccdfd16371bf5ee4e8f9bd2378ea0a5e311505af7a1ae09c09",
+    "/home/rooms/lab/python/toolstore.sqfs": "55e05cd70959c58446a3c9da76686adc4e58dcf47d883cca73d73df2643c9b5e",
+    "/home/rooms/lab/python/meta.json": "28be739bf085a03549354cb438de36b749db69460bfd05c1e0e41f719460c269",
+    "/home/rooms/lab/experiments/author.patch": "83da8be43c9032f1e44bceeae7a3af135ffe7934ec722963c6d99031feac6c87"
+  },
+  "uname": "7.0.0-1011-gcp",
+  "cpus": 16,
+  "warm": "set -eu\ncd /workspace/repo\ntest \"$(git rev-parse HEAD)\" = 92a706a7982a527ade967e43b68afd4bc1e5d667\nexport PATH=/nix/var/rooms/env/bin:/usr/local/bin:/usr/bin:/bin\nexport PYTHONDONTWRITEBYTECODE=1\npython3 -c 'import argparse, copy, json, pathlib, re, subprocess, sys, tempfile, unittest; unittest.TestLoader()'\npython3 -m unittest --help >/dev/null\ngit status --porcelain >/dev/null\ntest -z \"$(git status --porcelain)\"\n",
+  "host": {
+    "firecracker_processes": "",
+    "jailer_mounts": "",
+    "netns": "",
+    "taps": "",
+    "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+    "restore_intents": "",
+    "snapshot_intents": "",
+    "meminfo": "MemAvailable:   64429252 kB\nShmem:              1060 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+    "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+  }
+}

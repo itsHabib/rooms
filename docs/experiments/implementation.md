@@ -1,6 +1,6 @@
 # Rooms experiments: implementation
 
-Owner: Michael's coordinator session, September14. Other agent/model workers and monitors remain paused. No cloud provisioning is implicit in this plan.
+Owner: Michael's coordinator session, September14. Other agent/model workers and monitors remain paused. Michael subsequently authorized up to USD50 GCP for this batch; other model sessions remain paused.
 
 The first implementation is `scripts/experiment-report.py`: an offline reader for the existing cold-run artifact layout. It does not launch commands or infer semantic correctness from tests. It counts execution completion only when CLI, guest result, collection and cleanup agree. Incomplete attempts stay in the denominator. Raw evidence hashes make each reported attempt inspectable.
 
@@ -25,11 +25,11 @@ Cost is optional, `estimated_total_cost_usd`, and remains explicitly estimated. 
 ## Delivery order
 
 1. **Evidence reader (implemented):** test against the retained real cold baseline, then use the same collector format for cold/restored batches.
-2. **Density/cold/restore runner (next):** reuse existing Rooms commands and #123 toolstore snapshot support. Pin one workload; preserve exact argv, full CLI interval, exit and lifecycle for each attempt. Start1/2/4/8 within actual memory/pool capacity. Report warm/cold separately and include snapshot preparation. Do not exceed63network slots without changing the allocator.
+2. **Density/cold/restore pilot (run):** See [September14 GCP results](2026-09-14-gcp/README.md). The fixed host harness and raw evidence are retained locally. A generalized launcher is not implemented. Further work: reuse existing Rooms commands and #123 toolstore snapshot support. Pin one workload; preserve exact argv, full CLI interval, exit and lifecycle for each attempt. Start1/2/4/8 within actual memory/pool capacity. Report warm/cold separately and include snapshot preparation. Do not exceed63network slots without changing the allocator.
 3. **Branch and verify:** fixed candidate patches for one real task, sequential/worktree/cold/restore comparison, independent verifier consuming the exact published patch digest and base. Exercise partial publication, duplicate delivery and restart. Same total model budget when comparing candidate quality.
 4. **Agents inside Rooms / sharded CI:** start with one verifier, then useful independent test shards. Scope provider credentials and keep them out of captured snapshots/artifacts.
 5. **Remote migration / spot recovery:** compatible hosts, complete snapshot artifact set, cold reconstruction comparison, late old-host result rejection. Remote cleanup must distinguish unreachable old processes from reconciled cloud resources.
 6. **Memory sharing / hostile workloads:** diagnose host cache and guest duplication before a new storage device; run concrete resource/isolation probes at measured density. Probe success is not general containment proof.
 7. **GPU:** compare a host model service first; another VMM is a separate experiment if actual device requirements demand it.
 
-The broad backlog stays in PR124. The coordinator's detailed proposed corrections are Mac-only `/Users/mh/dev/ROOMS-124-REVIEW.md`. No expensive run or model reviewer is started during the current usage-conservation hold. For each paid experiment, prepare exact host, duration/cost cap, workload and cleanup path for Michael's approval.
+The broad backlog stays in PR124. The coordinator's detailed proposed corrections are Mac-only `/Users/mh/dev/ROOMS-124-REVIEW.md`. GCP execution within the explicit USD50 batch budget is authorized; no repeat approval is needed. Model reviewers and other sessions remain paused. Record actual provisioning, estimated cumulative cost, evidence and cleanup before another batch.

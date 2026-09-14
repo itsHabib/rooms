@@ -1,0 +1,16 @@
+{
+  "cli_exit": 124,
+  "elapsed_seconds": 12.362,
+  "successful_sibling_receipt": "survived\n",
+  "host": {
+    "firecracker_processes": "",
+    "jailer_mounts": "",
+    "netns": "",
+    "taps": "",
+    "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+    "restore_intents": "",
+    "snapshot_intents": "01m2gfa349je6h232jabhabadz.lock\nout-8552568657dde3beb2eebbc017e45c7ebb3f846c20ccce6ab015e70d6e529cb0.lock",
+    "meminfo": "MemAvailable:   64387660 kB\nShmem:              1076 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+    "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+  }
+}

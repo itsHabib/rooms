@@ -1,0 +1,94 @@
+[
+  {
+    "run": "cold-batch-2-0",
+    "count": 2,
+    "elapsed_seconds": 13.520966656000041,
+    "started_unix": 1789407125.3061297,
+    "completed_per_minute": 8.875105090711026,
+    "attempts": [
+      "cold-batch-2-0-0",
+      "cold-batch-2-0-1"
+    ],
+    "host_after": {
+      "firecracker_processes": "",
+      "jailer_mounts": "",
+      "netns": "",
+      "taps": "",
+      "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+      "restore_intents": "",
+      "snapshot_intents": "01m2gfa349je6h232jabhabadz.lock\nout-8552568657dde3beb2eebbc017e45c7ebb3f846c20ccce6ab015e70d6e529cb0.lock",
+      "meminfo": "MemAvailable:   64379580 kB\nShmem:              1064 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+      "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+    }
+  },
+  {
+    "run": "cold-batch-2-1",
+    "count": 2,
+    "elapsed_seconds": 13.452083902000027,
+    "started_unix": 1789407138.8533826,
+    "completed_per_minute": 8.920550962528464,
+    "attempts": [
+      "cold-batch-2-1-0",
+      "cold-batch-2-1-1"
+    ],
+    "host_after": {
+      "firecracker_processes": "",
+      "jailer_mounts": "",
+      "netns": "",
+      "taps": "",
+      "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+      "restore_intents": "",
+      "snapshot_intents": "01m2gfa349je6h232jabhabadz.lock\nout-8552568657dde3beb2eebbc017e45c7ebb3f846c20ccce6ab015e70d6e529cb0.lock",
+      "meminfo": "MemAvailable:   64368080 kB\nShmem:              1056 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+      "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+    }
+  },
+  {
+    "run": "cold-batch-4-0",
+    "count": 4,
+    "elapsed_seconds": 13.864375672000051,
+    "started_unix": 1789407152.3308504,
+    "completed_per_minute": 17.31055228723314,
+    "attempts": [
+      "cold-batch-4-0-0",
+      "cold-batch-4-0-1",
+      "cold-batch-4-0-2",
+      "cold-batch-4-0-3"
+    ],
+    "host_after": {
+      "firecracker_processes": "",
+      "jailer_mounts": "",
+      "netns": "",
+      "taps": "",
+      "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+      "restore_intents": "",
+      "snapshot_intents": "01m2gfa349je6h232jabhabadz.lock\nout-8552568657dde3beb2eebbc017e45c7ebb3f846c20ccce6ab015e70d6e529cb0.lock",
+      "meminfo": "MemAvailable:   64300424 kB\nShmem:              1060 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+      "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+    }
+  },
+  {
+    "run": "cold-batch-4-1",
+    "count": 4,
+    "elapsed_seconds": 13.687623095999925,
+    "started_unix": 1789407166.22314,
+    "completed_per_minute": 17.534088885756773,
+    "attempts": [
+      "cold-batch-4-1-0",
+      "cold-batch-4-1-1",
+      "cold-batch-4-1-2",
+      "cold-batch-4-1-3"
+    ],
+    "host_after": {
+      "firecracker_processes": "",
+      "jailer_mounts": "",
+      "netns": "",
+      "taps": "",
+      "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+      "restore_intents": "",
+      "snapshot_intents": "01m2gfa349je6h232jabhabadz.lock\nout-8552568657dde3beb2eebbc017e45c7ebb3f846c20ccce6ab015e70d6e529cb0.lock",
+      "meminfo": "MemAvailable:   64279556 kB\nShmem:              1056 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+      "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+    }
+  }
+]
