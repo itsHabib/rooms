@@ -162,7 +162,7 @@ set -e
 CLAUDE_VERSION="$1"; KEY_URL="$2"; KEY_SHA="$3"; APK_REPO="$4"
 apk update
 apk add --no-cache \
-    alpine-base openrc openssh-server sudo \
+    alpine-base openrc openssh-server openssh-client-default sudo \
     git ca-certificates bash curl \
     libgcc libstdc++ ripgrep socat
 wget -q -O /etc/apk/keys/claude-code.rsa.pub "$KEY_URL"
@@ -401,6 +401,9 @@ cat >"$MNT/home/$GUEST_USER/.claude/settings.json" <<'EOF'
 { "env": { "USE_BUILTIN_RIPGREP": "0", "DISABLE_AUTOUPDATER": "1" } }
 EOF
 chown "$GUEST_UID:$GUEST_UID" "$MNT/home/$GUEST_USER/.claude/settings.json"
+
+log "smoke gate: SSH client inside the image"
+chroot "$MNT" /usr/bin/ssh -V || fatal "SSH client failed in image"
 
 log "smoke gate: claude --version inside the image"
 SMOKE="$(chroot "$MNT" /bin/sh -c 'USE_BUILTIN_RIPGREP=0 claude --version' 2>&1)" \

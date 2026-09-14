@@ -84,21 +84,22 @@ Each layer owns one responsibility and can be replaced without rippling: dossier
 The contract planes are **State** (dossier plus run, verdict, grant, and receipt artifacts), **Execution** (Ship), **Verification** (review and Gate's escalate-only verifier ladder), **Capability** (scoped operator-minted grants), and **Observability** (Console, Flare, /wip, /shipped, /status). This section is **Composition**. Planes share typed artifacts - evidence -> verdict -> action - rather than call stacks.
 <!-- END dev-workbench -->
 
-<!-- BEGIN eng-philo (managed by /eng-philo — re-run to refresh; hand-edits inside this block will be overwritten) -->
+<!-- BEGIN eng-philo (managed by /eng-philo - re-run to refresh; hand-edits inside this block will be overwritten) -->
 ## Engineering principles
 
-How code is written here — Dave Cheney lineage ([Practical Go](https://dave.cheney.net/practical-go)): simplicity, clarity, line-of-sight. Apply on every change; the lint below catches the slips.
+Dave Cheney lineage: simplicity, clarity, and line-of-sight. Apply these on every change.
 
-1. **No `else` — line-of-sight.** Handle errors / edge cases with early returns and guard clauses; keep the happy path un-indented, flowing down the left margin. Reaching for `else` → return early instead.
-2. **Shallow nesting — ≤2 levels *per scope*.** A `for` + an `if` is the ceiling in one scope. The budget is per-scope, not per-function — a closure / anon fn is its own scope, so a `for`+`if` inside a closure is fine. Deeper in one scope → extract a function.
-3. **Policy vs mechanism.** Separate the decisions (policy: validation, state machines, business rules) from the plumbing (mechanism: persistence, transport, I/O). Mechanism is dumb and swappable; policy lives in a layer above it. Never let policy leak into a mechanism layer.
-4. **Composition of single-responsibility layers.** Each layer / package owns ~one responsibility; the app is a *composition* of them; any piece is swappable without rippling into the others. Dependencies flow one direction.
-5. **Small, sharp APIs.** Export the least callers need. Intention-revealing names. Accept the narrowest input, return concrete types. Make the zero value useful.
-6. **Errors are values; simplicity over cleverness.** Handle or propagate errors explicitly — never swallow. Readable > clever > short. A little copying beats a premature abstraction or dependency.
+1. **No `else`; preserve line-of-sight.** Handle errors and edge cases with early returns and guard clauses. Keep the happy path on the left margin.
+2. **Keep nesting at two levels or fewer per scope.** A loop plus a condition is the ceiling. Extract a focused function instead of adding another level.
+3. **Separate policy from mechanism.** Validation, state transitions, and business rules sit above persistence, transport, and I/O. Mechanism stays dumb and swappable.
+4. **Compose single-responsibility layers.** Each layer or package owns one job, dependencies flow one way, and replacing one piece does not ripple through the rest.
+5. **Keep APIs small and sharp.** Export the least callers need, use intention-revealing names, accept narrow inputs, and return concrete values.
+6. **Treat errors as values; prefer simple code.** Handle or propagate errors explicitly. Readable beats clever, and a little duplication beats a premature abstraction.
+7. **Build only what the outcome requires.** Start from the intended outcome. For each option, abstraction, dependency, or workflow step, ask what requires it, what concretely breaks without it, and whether a simpler alternative is adequate. Prefer existing capabilities and direct implementations; derive information already known. Consider setup, operation, and maintenance, not just line count. Preserve required behavior, correctness, security, accessibility, and authority boundaries. "Nothing worth cutting" is a valid result.
 
-### Rust idioms + enforcement
+### Rust idioms and enforcement
 
-`?` over nested `match`; early-return guards, no `else` after a `return`; newtypes for domain values; minimal surface (lean on `pub(crate)`, `unreachable_pub`).
+Prefer `?` and early-return guards over nested `match`; use newtypes for domain values and keep visibility narrow with `pub(crate)` where possible.
 
-*Enforce:* clippy `cognitive_complexity` + `too_many_lines`, `clippy.toml` complexity caps, `-D warnings`.
+Enforce with `cargo fmt`, Clippy `cognitive_complexity`, `too_many_lines`, `unreachable_pub`, and `-D warnings`.
 <!-- END eng-philo -->

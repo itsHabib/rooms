@@ -28,7 +28,27 @@ case "$*" in
     *"instances describe"*) echo 203.0.113.7 ;;
     *"instances list"*)
         [ -n "${BOX_TEST_GCP_LIST_FAILS:-}" ] && exit 1
-        printf '%s\n' "${BOX_TEST_GCP_LISTED:-}" ;;
+        if [ -n "${BOX_TEST_LIST_BARRIER:-}" ]; then
+            touch "$BOX_TEST_LIST_BARRIER/$$"
+            tries=0
+            while [ "$(find "$BOX_TEST_LIST_BARRIER" -type f | wc -l)" -lt 2 ]; do
+                tries=$((tries + 1))
+                [ "$tries" -lt 500 ] || exit 1
+                sleep 0.01
+            done
+        fi
+        filter=""
+        for arg in "$@"; do
+            case "$arg" in --filter=*) filter=${arg#--filter=} ;; esac
+        done
+        name=${filter#name=}
+        name=${name%% *}
+        token=""
+        case "$filter" in *"labels.rooms_box_token="*) token=${filter##*labels.rooms_box_token=} ;; esac
+        printf '%s\n' "${BOX_TEST_GCP_LISTED:-}" |
+            awk -v n="$name" -v t="$token" '$1 == n && (t == "" || $2 == t) { print $1 }' ;;
+    *"instances create"*) [ -n "${BOX_TEST_CREATE_FAILS:-}" ] && exit 1 ;;
+
 esac
 exit 0
 "#;
@@ -332,9 +352,10 @@ fn down_deletes_the_recorded_gcp_instance() {
     let h = Harness::new();
     h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
     let token = h.token("cloudbox");
+    let instances = format!("cloudbox {token}");
     let out = h.run(
         &["down", "cloudbox"],
-        &[("BOX_TEST_GCP_LISTED", "cloudbox")],
+        &[("BOX_TEST_GCP_LISTED", &instances)],
     );
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = h.calls();
@@ -573,4 +594,90 @@ fn git_head(repo: &Path) -> String {
         .output()
         .expect("git rev-parse runs");
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn down_never_deletes_a_same_named_gcp_instance_without_the_token() {
+    let h = Harness::new();
+    h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    let out = h.run(
+        &["down", "cloudbox"],
+        &[("BOX_TEST_GCP_LISTED", "cloudbox foreign-token")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!h.calls().contains("instances delete"), "{}", h.calls());
+}
+
+#[test]
+fn interrupted_empty_reservation_can_be_retried() {
+    let h = Harness::new();
+    fs::create_dir_all(h.path("state/cloudbox")).expect("empty reservation");
+    h.up("cloudbox", "gcp", &["--project", "sandbox-1"]);
+    assert_eq!(h.calls().matches("instances create").count(), 1);
+}
+
+#[test]
+fn failed_creation_keeps_complete_ownership_for_cleanup() {
+    let h = Harness::new();
+    let out = h.run(
+        &[
+            "up",
+            "cloudbox",
+            "--backend",
+            "gcp",
+            "--project",
+            "sandbox-1",
+        ],
+        &[("BOX_TEST_CREATE_FAILS", "1")],
+    );
+    assert!(!out.status.success());
+    let instances = format!("cloudbox {}", h.token("cloudbox"));
+    let out = h.run(
+        &["down", "cloudbox"],
+        &[("BOX_TEST_GCP_LISTED", &instances)],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(h
+        .calls()
+        .contains("instances delete cloudbox --project=sandbox-1 --zone=us-central1-a"));
+}
+
+#[test]
+fn concurrent_up_has_one_owner_and_one_creation() {
+    let h = Harness::new();
+    fs::create_dir(h.path("barrier")).expect("barrier");
+    let barrier = h.path("barrier").to_string_lossy().into_owned();
+    let run = || {
+        h.run(
+            &[
+                "up",
+                "cloudbox",
+                "--backend",
+                "gcp",
+                "--project",
+                "sandbox-1",
+            ],
+            &[("BOX_TEST_LIST_BARRIER", &barrier)],
+        )
+    };
+    let (a, b) = std::thread::scope(|scope| {
+        let a = scope.spawn(run);
+        let b = scope.spawn(run);
+        (a.join().expect("first up"), b.join().expect("second up"))
+    });
+    assert_ne!(
+        a.status.success(),
+        b.status.success(),
+        "first: {} second: {}",
+        stderr(&a),
+        stderr(&b)
+    );
+    let calls = h.calls();
+    assert_eq!(calls.matches("instances create").count(), 1, "{calls}");
+    assert!(
+        calls.contains(&format!("rooms_box_token={}", h.token("cloudbox"))),
+        "{calls}"
+    );
+    let record = fs::read_to_string(h.path("state/cloudbox/box.env")).expect("ownership record");
+    assert_eq!(record.matches("BOX_TOKEN=").count(), 1, "{record}");
 }

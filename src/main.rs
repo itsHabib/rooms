@@ -27,6 +27,14 @@ struct Cli {
     command: Command,
 }
 
+fn parse_cpus(value: &str) -> Result<u8, String> {
+    let cpus = value.parse::<u8>().map_err(|e| e.to_string())?;
+    if !(1..=32).contains(&cpus) || (cpus > 1 && !cpus.is_multiple_of(2)) {
+        return Err("CPUs must be 1 or an even number from 2 to 32".to_owned());
+    }
+    Ok(cpus)
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(
     clippy::large_enum_variant,
@@ -38,12 +46,26 @@ enum Command {
         /// Path to the rootfs image (ext4).
         #[arg(long)]
         image: PathBuf,
+        /// Number of virtual CPUs for this cold room.
+        #[arg(long, default_value_t = 1, value_parser = parse_cpus)]
+        cpus: u8,
+        /// Guest RAM in MiB.
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(128..=65536))]
+        memory: u32,
+        /// Private sparse ext4 overlay in GiB. Requires an updated Alpine image;
+        /// implies --readonly-rootfs. Removed after output collection.
+        #[arg(long, conflicts_with = "keep", value_parser = clap::value_parser!(u32).range(1..=1024))]
+        disk: Option<u32>,
+        /// Sealed Nix toolstore directory built by scripts/build-toolstore.py.
+        /// Cold command runs only; mounted read-only and added to PATH.
+        #[arg(long, requires = "command", conflicts_with_all = ["keep", "task"])]
+        toolstore: Option<PathBuf>,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
         /// Mutually exclusive with the exec paths. Suppresses cleanup for debugging.
         #[arg(long, conflicts_with_all = ["command", "task"])]
         keep: bool,
-        /// Run a single command in the guest via SSH, capture its stdout/stderr on
-        /// host stdout/stderr, propagate its exit code, then shut down.
+        /// Run a command in the guest via SSH, record stdout/stderr under
+        /// /workspace/out/logs (collect with --out), return its exit code, and shut down.
         ///
         /// `conflicts_with task` also makes `--runner cursor --command` invalid:
         /// `cursor` requires `--task` (below), which `--command` excludes.
@@ -53,7 +75,7 @@ enum Command {
         /// path); `cursor` clones `--repo` and drives the baked cursor-runner.js.
         #[arg(long, value_enum, default_value = "command")]
         runner: RunnerKind,
-        /// Git URL cloned into `/workspace/repo` for `--runner cursor`.
+        /// Git URL cloned into `/workspace/repo`; commands run there when supplied.
         #[arg(long, required_if_eq("runner", "cursor"))]
         repo: Option<String>,
         /// Path to the task prompt (markdown) for `--runner cursor`.
@@ -62,8 +84,8 @@ enum Command {
         /// Model id for `--runner cursor` (e.g. "composer-2.5").
         #[arg(long, required_if_eq("runner", "cursor"))]
         model: Option<String>,
-        /// Base git sha for `--runner cursor`; checked out before the run and
-        /// used as the `result.patch` diff base.
+        /// Base git revision checked out before a repository run and used as
+        /// the result.patch diff base. Command runs default to HEAD.
         #[arg(long = "base-sha", required_if_eq("runner", "cursor"))]
         base_sha: Option<String>,
         /// Branch to push the agent's changes to (cursor only); requires `GH_TOKEN`
@@ -75,9 +97,8 @@ enum Command {
         #[arg(long = "out", conflicts_with = "keep")]
         out_dir: Option<PathBuf>,
         /// Mount the rootfs read-only with a tmpfs overlay (needs an image
-        /// carrying `/sbin/overlay-init`). Auto-enabled for `--runner cursor`;
-        /// set it on a `--command` run to make the change set visible to
-        /// `rooms diff`.
+        /// carrying `/sbin/overlay-init`). Auto-enabled for --repo, --disk,
+        /// and --runner cursor. --disk uses ext4 in place of tmpfs.
         #[arg(long = "readonly-rootfs")]
         readonly_rootfs: bool,
         /// Hard wall-clock cap on the run: when reached, the exec is aborted, a
@@ -150,9 +171,28 @@ enum Command {
         /// Path to the rootfs image (ext4).
         #[arg(long)]
         image: PathBuf,
+        /// Number of virtual CPUs. Fixed for every room restored from this
+        /// base's snapshot.
+        #[arg(long, default_value_t = 1, value_parser = parse_cpus)]
+        cpus: u8,
+        /// Guest RAM in MiB; also bounds the tmpfs overlay (half of RAM).
+        /// Fixed for every room restored from this base's snapshot.
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(128..=65536))]
+        memory: u32,
+        /// Sealed Nix toolstore directory built by scripts/build-toolstore.py,
+        /// attached read-only at `/nix`. The warm command and restored commands
+        /// must name `/nix/var/rooms/env/bin` explicitly: neither the scrubbed
+        /// warm environment nor restored SSH sessions put it on PATH.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Git URL cloned into `/workspace/repo` to warm the base (at `HEAD`).
         #[arg(long)]
         repo: Option<String>,
+        /// Pin `--repo` to this revision: the host resolves it to a full commit,
+        /// the guest checks out exactly that commit (detached), and the commit is
+        /// recorded in the base and its snapshot.
+        #[arg(long = "base-sha", requires = "repo")]
+        base_sha: Option<String>,
         /// A credential-free warm-up command run by the base agent after clone.
         /// It receives a fixed scrubbed environment and has no network access.
         #[arg(long, value_parser = non_empty_command)]
@@ -194,6 +234,11 @@ enum Command {
         /// The backing rootfs image; its hash must match the snapshot's pin.
         #[arg(long)]
         image: PathBuf,
+        /// Sealed toolstore the snapshot was frozen with; required exactly when
+        /// the snapshot has one. Restored SSH sessions do not add it to PATH, so
+        /// commands name `/nix/var/rooms/env/bin` explicitly.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Keep the restored room alive; hands ownership to the persisted room.
         #[arg(long, conflicts_with = "command")]
         keep: bool,
@@ -237,6 +282,10 @@ enum Command {
         /// The backing rootfs image; its hash must match the snapshot's pin.
         #[arg(long)]
         image: PathBuf,
+        /// Sealed toolstore the snapshot was frozen with; verified once and
+        /// attached read-only to every clone.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Number of clones to fork (bounded by the host's eight-room cap).
         #[arg(short = 'n', long = "count", value_parser = parse_clone_count)]
         count: u8,
@@ -278,6 +327,10 @@ enum Command {
         /// The backing rootfs image; its hash must match the snapshot's pin.
         #[arg(long)]
         image: PathBuf,
+        /// Sealed toolstore the snapshot was frozen with; verified once and
+        /// attached read-only to every case.
+        #[arg(long)]
+        toolstore: Option<PathBuf>,
         /// Strict `rooms.matrix.v1` case manifest.
         #[arg(long)]
         cases: PathBuf,
@@ -382,7 +435,9 @@ enum RunnerKind {
     reason = "a flat DTO mirroring independent, orthogonal CLI flags 1:1 — not a state machine to fold into enums"
 )]
 struct RunArgs {
+    resources: firecracker::Resources,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     keep: bool,
     command: Option<String>,
     runner: RunnerKind,
@@ -757,6 +812,10 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
     let config = RoomsConfig::default();
     match cli.command {
         Command::Run {
+            cpus,
+            memory,
+            disk,
+            toolstore,
             image,
             keep,
             command,
@@ -778,7 +837,13 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         } => {
             run_room(
                 RunArgs {
+                    resources: firecracker::Resources {
+                        cpus,
+                        memory_mib: memory,
+                        disk_gib: disk,
+                    },
                     image,
+                    toolstore,
                     keep,
                     command,
                     runner,
@@ -803,7 +868,11 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         }
         Command::BaseCreate {
             image,
+            cpus,
+            memory,
+            toolstore,
             repo,
+            base_sha,
             warm,
             readonly_rootfs: _,
             max_pool,
@@ -812,7 +881,14 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
             base_create(
                 BaseCreateArgs {
                     image,
+                    resources: firecracker::Resources {
+                        cpus,
+                        memory_mib: memory,
+                        disk_gib: None,
+                    },
+                    toolstore,
                     repo,
+                    base_sha,
                     warm,
                     max_pool,
                     json,
@@ -827,6 +903,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Restore {
             snapshot_dir,
             image,
+            toolstore,
             keep,
             command,
             slot,
@@ -841,6 +918,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                 RestoreArgs {
                     snapshot_dir,
                     image,
+                    toolstore,
                     keep,
                     command,
                     slot,
@@ -858,6 +936,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Clone {
             snapshot_dir,
             image,
+            toolstore,
             count,
             command,
             out_dir,
@@ -872,6 +951,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                 CloneArgs {
                     snapshot_dir,
                     image,
+                    toolstore,
                     count,
                     command,
                     workloads: None,
@@ -891,6 +971,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         Command::Matrix {
             snapshot_dir,
             image,
+            toolstore,
             cases,
             out_dir,
             witness,
@@ -904,6 +985,7 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
                 MatrixArgs {
                     snapshot_dir,
                     image,
+                    toolstore,
                     cases,
                     out_dir,
                     witness,
@@ -951,6 +1033,7 @@ async fn matrix_rooms(args: MatrixArgs, config: &RoomsConfig) -> Result<u8, Room
         CloneArgs {
             snapshot_dir: args.snapshot_dir,
             image: args.image,
+            toolstore: args.toolstore,
             count,
             command: None,
             workloads: Some(workloads),
@@ -1146,6 +1229,21 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             ))
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
+    if args.resources.disk_gib.is_some() {
+        rootfs::validate_scratch_image(&args.image).map_err(RoomsError::Internal)?;
+    }
+    if args.repo.is_some() && args.resources.disk_gib.is_none() {
+        rootfs::validate_overlay_image(&args.image).map_err(RoomsError::Internal)?;
+    }
+    let toolstore = args
+        .toolstore
+        .as_deref()
+        .map(rooms::toolstore::Toolstore::open)
+        .transpose()
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    if toolstore.is_some() {
+        rootfs::validate_toolstore_image(&args.image).map_err(RoomsError::Internal)?;
+    }
     // `--secret` admission, part two (values were harvested pre-runtime in
     // `main`): prove the guest kernel can even open a vsock, before any slot
     // is claimed or VM booted.
@@ -1178,11 +1276,16 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     // slot.
     let key = key_path()?;
     let action = resolve_action(&args).await?;
-    // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
-    // untrusted code) or when the operator opts in with --readonly-rootfs; a
-    // plain `rooms run --command` otherwise keeps a writable rootfs so any
-    // image — including ones without /sbin/overlay-init — still boots.
-    let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
+    let mut cancellation = matches!(action, Action::Exec(_))
+        .then(CloneSignalSource::arm)
+        .transpose()?;
+    // Repository and disk-backed runs share the immutable image. Bare commands
+    // retain compatibility with older images that lack overlay-init.
+    let readonly_rootfs = args.readonly_rootfs
+        || args.resources.disk_gib.is_some()
+        || args.repo.is_some()
+        || toolstore.is_some()
+        || matches!(args.runner, RunnerKind::Cursor);
 
     // Mint the room id before the claim so it stays the canonical identity; then
     // derive the guest network from it.
@@ -1214,6 +1317,8 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         keep: args.keep,
     };
     let boot_req = firecracker::BootRequest {
+        resources: args.resources,
+        toolstore: toolstore.as_ref(),
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -1227,15 +1332,32 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         egress: &egress_plan,
         base: false,
     };
-    let mut vm = match firecracker::boot(&boot_req, config).await {
+    let cancelled = async {
+        let Some(source) = &cancellation else {
+            return std::future::pending::<()>().await;
+        };
+        wait_for_clone_termination(&mut source.receiver()).await;
+    };
+    let mut vm = match firecracker::boot_with_cancellation(&boot_req, config, cancelled).await {
         Ok(vm) => vm,
         Err(e) => {
             lifecycle.emit(&Event::BootFailed {
                 error: e.to_string(),
             });
+            if let Some(signal) = cancellation
+                .as_ref()
+                .and_then(|source| observed_clone_termination(&source.receiver))
+            {
+                return Ok(signal.exit_code());
+            }
             return Err(e.into());
         }
     };
+    if let Some(toolstore) = &toolstore {
+        lifecycle.emit(&Event::ToolstoreAttached {
+            sha256: toolstore.digest().to_owned(),
+        });
+    }
     emit_started(
         &lifecycle,
         vm.pid(),
@@ -1255,14 +1377,29 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         egress: &egress_plan,
     };
     let secrets_delivery = vm.take_secrets_delivery();
-    let outcome = post_boot(&env, &action, &mut vm, secrets_delivery, None).await;
-    warn_legacy_artifact_failure(
-        collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await,
-        "run",
-    );
+    let outcome = post_boot(
+        &env,
+        &action,
+        &mut vm,
+        secrets_delivery,
+        cancellation.as_ref().map(CloneSignalSource::receiver),
+    )
+    .await;
+    let collection =
+        collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
-    outcome
+    // Complete cleanup before acknowledging a signal received during collection.
+    // The retained result.json still describes the already-finished guest command.
+    if let Some(source) = cancellation.as_mut() {
+        if let Some(signal) = source.commit_terminal_handoff().await? {
+            return Ok(signal.exit_code());
+        }
+    }
+    let code = outcome?;
+    // Missing requested output is a run failure even when the guest succeeded.
+    collection?;
+    Ok(code)
 }
 
 fn ensure_witness_available(requested: bool) -> Result<(), RoomsError> {
@@ -1275,7 +1412,10 @@ fn ensure_witness_available(requested: bool) -> Result<(), RoomsError> {
 /// Flags for `rooms base-create` (a flat mirror of the CLI variant).
 struct BaseCreateArgs {
     image: PathBuf,
+    resources: firecracker::Resources,
+    toolstore: Option<PathBuf>,
     repo: Option<String>,
+    base_sha: Option<String>,
     warm: Option<String>,
     max_pool: Option<u8>,
     json: bool,
@@ -1295,10 +1435,13 @@ async fn base_create(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, R
     result
 }
 
-async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
-    info!(image = ?args.image, repo = ?args.repo, "rooms base-create");
-    let json = args.json;
-
+/// Validate every host-side base input before a slot is claimed: the kernel
+/// beside `--image`, the sealed base image, and the admitted toolstore (whose
+/// held inode boot binds and `room.json` records).
+fn admit_base_inputs(
+    args: &BaseCreateArgs,
+    config: &RoomsConfig,
+) -> Result<(PathBuf, Option<rooms::toolstore::Toolstore>), RoomsError> {
     let kernel = args
         .image
         .parent()
@@ -1312,18 +1455,37 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
     rootfs::validate_rootfs(&args.image, config.min_rootfs_bytes).map_err(RoomsError::Rootfs)?;
     rootfs::validate_snapshot_base_image(&args.image).map_err(RoomsError::Internal)?;
+    let toolstore = args
+        .toolstore
+        .as_deref()
+        .map(rooms::toolstore::Toolstore::open)
+        .transpose()
+        .map_err(|error| RoomsError::Internal(error.to_string()))?;
+    if toolstore.is_some() {
+        rootfs::validate_toolstore_image(&args.image).map_err(RoomsError::Internal)?;
+    }
     // A base always wires the vsock device; prove the guest kernel can open one
     // before claiming a slot or booting.
     ensure_kernel_has_vsock(&kernel)?;
     if let Err(remediation) = doctor::ensure_rooms_fwd_installed() {
         return Err(RoomsError::Internal(remediation));
     }
+    Ok((kernel, toolstore))
+}
+
+async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result<u8, RoomsError> {
+    info!(image = ?args.image, repo = ?args.repo, "rooms base-create");
+    let json = args.json;
+    let (kernel, toolstore) = admit_base_inputs(&args, config)?;
 
     let state_base = config.resolved_state_base().ok_or_else(|| {
         RoomsError::Internal("HOME unset; cannot locate the rooms state base".to_owned())
     })?;
-    let provisioning =
-        runner::prepare_base_provisioning(args.repo.as_deref(), args.warm.as_deref())?;
+    let provisioning = runner::prepare_base_provisioning(
+        args.repo.as_deref(),
+        args.base_sha.as_deref(),
+        args.warm.as_deref(),
+    )?;
 
     let room_id = firecracker::mint_room_id();
     let me = slot::Claimer::current().ok_or_else(|| {
@@ -1340,6 +1502,8 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     };
     let egress_plan = egress::resolve(&egress::Policy::None).map_err(RoomsError::Internal)?;
     let boot_req = firecracker::BootRequest {
+        resources: args.resources,
+        toolstore: toolstore.as_ref(),
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -1386,23 +1550,41 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     // `rooms gc` / `rooms kill` reaps it otherwise.
     vm.guard_mut().dismiss();
     std::mem::forget(vm);
-    emit_base_created(&room_id, &claimed, provenance, json);
+    emit_base_created(
+        &BaseCreatedRecord {
+            room_id: &room_id,
+            slot: claimed.index,
+            guest_ip: claimed.guest,
+            provenance,
+            toolstore_sha256: toolstore.as_ref().map(rooms::toolstore::Toolstore::digest),
+            base_repo_sha: provisioning.base_repo_sha(),
+        },
+        json,
+    );
     Ok(0)
+}
+
+/// `base-create --json` record: identity, sealed provenance, and what the base
+/// was provisioned from (also recorded in its `room.json` and snapshot).
+#[derive(serde::Serialize)]
+struct BaseCreatedRecord<'a> {
+    room_id: &'a str,
+    slot: u8,
+    guest_ip: std::net::Ipv4Addr,
+    // Serialized from the enum, not a literal, so `room.json` and this record
+    // can never drift on a variant rename.
+    provenance: room::Provenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolstore_sha256: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_repo_sha: Option<&'a str>,
 }
 
 /// Report a created base — a human line, or a `--json` record carrying the
 /// provisioning provenance so a caller can later gate the seal on it.
-fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provenance, json: bool) {
+fn emit_base_created(record: &BaseCreatedRecord<'_>, json: bool) {
     if json {
-        // Serialize the provenance from the enum, not a literal, so `room.json`
-        // and this record can never drift on a variant rename.
-        let record = serde_json::json!({
-            "room_id": room_id,
-            "slot": slot.index,
-            "guest_ip": slot.guest.to_string(),
-            "provenance": provenance,
-        });
-        match serde_json::to_string(&record) {
+        match serde_json::to_string(record) {
             Ok(line) => {
                 #[allow(
                     clippy::print_stdout,
@@ -1422,8 +1604,8 @@ fn emit_base_created(room_id: &str, slot: &room::Slot, provenance: room::Provena
     )]
     {
         println!(
-            "base created: room {room_id} on slot {} (guest {}); provenance=neutral — ready for `rooms snapshot`",
-            slot.index, slot.guest
+            "base created: room {} on slot {} (guest {}); provenance=neutral — ready for `rooms snapshot`",
+            record.room_id, record.slot, record.guest_ip
         );
     }
 }
@@ -1441,6 +1623,7 @@ const RESTORE_ACK_TIMEOUT: Duration = Duration::from_mins(1);
 struct RestoreArgs {
     snapshot_dir: PathBuf,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     keep: bool,
     command: Option<String>,
     slot: Option<u8>,
@@ -1460,6 +1643,7 @@ struct RestoreArgs {
 struct CloneArgs {
     snapshot_dir: PathBuf,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     count: u8,
     command: Option<String>,
     workloads: Option<Vec<CloneWorkload>>,
@@ -1525,6 +1709,7 @@ impl CloneWorkload {
 struct MatrixArgs {
     snapshot_dir: PathBuf,
     image: PathBuf,
+    toolstore: Option<PathBuf>,
     cases: PathBuf,
     out_dir: PathBuf,
     witness: bool,
@@ -1932,6 +2117,7 @@ impl Drop for CloneCustody {
             room_id,
             snapshot_id,
             clone_net,
+            ..
         } = restored;
         drop(vm);
         if let Err(error) = rooms::restore_exec::finish_teardown(
@@ -1966,6 +2152,10 @@ struct CloneRecord {
     exit_code: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     out_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolstore_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_repo_sha: Option<String>,
 }
 
 impl CloneRecord {
@@ -1992,6 +2182,8 @@ impl CloneRecord {
             status,
             exit_code,
             out_dir,
+            toolstore_sha256: restored.toolstore_sha256.clone(),
+            base_repo_sha: restored.base_repo_sha.clone(),
         })
     }
 }
@@ -2461,6 +2653,7 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
             room_id: &requested_room_id,
             snapshot_dir: &args.snapshot_dir,
             image: &args.image,
+            toolstore: args.toolstore.as_deref(),
             target_slot: args.slot,
             label: args.command.clone().or_else(|| Some("restore".to_owned())),
             keep: args.keep,
@@ -2491,15 +2684,16 @@ async fn restore_room_inner(args: RestoreArgs, config: &RoomsConfig) -> Result<u
         }
     }
 
+    emit_restored(&restored, args.json);
     let rooms::restore_exec::Restored {
         mut vm,
         slot,
         room_id,
         snapshot_id,
         clone_net,
+        ..
     } = restored;
     let network = network_config_for(&slot);
-    emit_restored(&room_id, &snapshot_id, &slot, args.json);
 
     if args.keep {
         // Hand ownership to the persisted room. The guard dismisses (and never
@@ -2761,8 +2955,14 @@ async fn prepare_clone_batch(
     let prepare_config = config.clone();
     let prepare_snapshot = args.snapshot_dir.clone();
     let prepare_image = args.image.clone();
+    let prepare_toolstore = args.toolstore.clone();
     let prepared_task = tokio::task::spawn_blocking(move || {
-        rooms::restore_exec::prepare_restore(&prepare_config, &prepare_snapshot, &prepare_image)
+        rooms::restore_exec::prepare_restore(
+            &prepare_config,
+            &prepare_snapshot,
+            &prepare_image,
+            prepare_toolstore.as_deref(),
+        )
     });
     let allocation_state = state_base.to_path_buf();
     let count = args.count;
@@ -2838,6 +3038,36 @@ struct CloneRestoreBatch {
     cancelled: Option<CloneTermination>,
 }
 
+/// The batch outcome when no restore may start: a signal already arrived, or
+/// the workload plan does not cover exactly the allocated clones.
+fn refuse_clone_batch(
+    allocated: usize,
+    planned: usize,
+    cancellation: &tokio::sync::watch::Receiver<Option<CloneTermination>>,
+) -> Option<CloneRestoreBatch> {
+    if let Some(signal) = observed_clone_termination(cancellation) {
+        return Some(CloneRestoreBatch {
+            ready: Vec::new(),
+            failures: Vec::new(),
+            cancelled: Some(signal),
+        });
+    }
+    if planned == allocated {
+        return None;
+    }
+    Some(CloneRestoreBatch {
+        ready: Vec::new(),
+        failures: vec![CloneFailure::new(
+            u8::MAX,
+            "unknown",
+            RoomsError::Internal(
+                "clone workload count did not match allocated clone count".to_owned(),
+            ),
+        )],
+        cancelled: None,
+    })
+}
+
 async fn restore_clone_batch(
     allocations: Vec<AllocatedClone>,
     prepared: Arc<rooms::restore_exec::PreparedRestoreSource>,
@@ -2846,35 +3076,18 @@ async fn restore_clone_batch(
     config: &RoomsConfig,
     cancellation: tokio::sync::watch::Receiver<Option<CloneTermination>>,
 ) -> CloneRestoreBatch {
-    if let Some(signal) = observed_clone_termination(&cancellation) {
+    let workloads = args.assigned_workloads();
+    if let Some(refused) = refuse_clone_batch(allocations.len(), workloads.len(), &cancellation) {
         drop(allocations);
-        return CloneRestoreBatch {
-            ready: Vec::new(),
-            failures: Vec::new(),
-            cancelled: Some(signal),
-        };
+        return refused;
     }
     let mut tasks = tokio::task::JoinSet::new();
     let mut task_identities = HashMap::new();
-    let workloads = args.assigned_workloads();
-    if workloads.len() != allocations.len() {
-        drop(allocations);
-        return CloneRestoreBatch {
-            ready: Vec::new(),
-            failures: vec![CloneFailure::new(
-                u8::MAX,
-                "unknown",
-                RoomsError::Internal(
-                    "clone workload count did not match allocated clone count".to_owned(),
-                ),
-            )],
-            cancelled: None,
-        };
-    }
     for (mut allocation, workload) in allocations.into_iter().zip(workloads) {
         let task_config = config.clone();
         let snapshot_dir = args.snapshot_dir.clone();
         let image = args.image.clone();
+        let toolstore = args.toolstore.clone();
         let witness = args.witness;
         let plan = egress_plan.clone();
         let secrets = args
@@ -2908,6 +3121,7 @@ async fn restore_clone_batch(
                     room_id: &allocation.room_id,
                     snapshot_dir: &snapshot_dir,
                     image: &image,
+                    toolstore: toolstore.as_deref(),
                     target_slot: None,
                     label: workload
                         .as_ref()
@@ -3559,6 +3773,7 @@ async fn teardown_restored_clone(
         room_id,
         snapshot_id,
         clone_net,
+        ..
     } = restored;
     let finalizer = CloneTeardownFinalizer {
         config: config.clone(),
@@ -3656,15 +3871,33 @@ fn emit_clone_records(
     Ok(())
 }
 
+/// `restore --json` record: identity plus the verified lineage the room runs on.
+#[derive(serde::Serialize)]
+struct RestoredRecord<'a> {
+    room_id: &'a str,
+    snapshot_id: &'a str,
+    slot: u8,
+    guest_ip: std::net::Ipv4Addr,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    toolstore_sha256: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_repo_sha: Option<&'a str>,
+}
+
 /// Report a restored room — a human line, or a `--json` record.
-fn emit_restored(room_id: &str, snapshot_id: &str, slot: &room::Slot, json: bool) {
+fn emit_restored(restored: &rooms::restore_exec::Restored, json: bool) {
+    let room_id = &restored.room_id;
+    let snapshot_id = &restored.snapshot_id;
+    let slot = &restored.slot;
     if json {
-        let record = serde_json::json!({
-            "room_id": room_id,
-            "snapshot_id": snapshot_id,
-            "slot": slot.index,
-            "guest_ip": slot.guest.to_string(),
-        });
+        let record = RestoredRecord {
+            room_id,
+            snapshot_id,
+            slot: slot.index,
+            guest_ip: slot.guest,
+            toolstore_sha256: restored.toolstore_sha256.as_deref(),
+            base_repo_sha: restored.base_repo_sha.as_deref(),
+        };
         match serde_json::to_string(&record) {
             Ok(line) => {
                 #[allow(
@@ -3824,9 +4057,18 @@ async fn collect_run_artifacts(
     out_dir: Option<&Path>,
     vm: &mut firecracker::BootedVm,
 ) -> Result<(), RoomsError> {
+    let mut created = Vec::new();
     let collection = match out_dir {
         Some(out_dir) => {
-            collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await
+            collect_and_record(
+                env.guest_target(),
+                env.key,
+                action,
+                out_dir,
+                env.lifecycle,
+                &mut created,
+            )
+            .await
         }
         None => Ok(()),
     };
@@ -3835,10 +4077,14 @@ async fn collect_run_artifacts(
         None => None,
     };
     let witness = match (&witnessed, out_dir) {
-        (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut created).await,
         _ => Ok(()),
     };
-    let errors = [collection.err(), witness.err()]
+    let recursive_root = out_dir.filter(|dir| {
+        dir.is_dir() && matches!(action, Action::Exec(_)) && created.iter().any(|path| path == *dir)
+    });
+    let ownership = bounded_artifact_ownership(recursive_root, &created).await;
+    let errors = [collection.err(), witness.err(), ownership.err()]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
@@ -3849,6 +4095,29 @@ async fn collect_run_artifacts(
         "artifact finalization failed: {}",
         errors.join("; ")
     )))
+}
+
+async fn bounded_artifact_ownership(
+    root: Option<&Path>,
+    created: &[PathBuf],
+) -> Result<(), String> {
+    // Parents are repaired without recursion. Command output has its own tree;
+    // both operations share one deadline, so a stalled child cannot stack grace windows.
+    let remaining: Vec<_> = created
+        .iter()
+        .filter(|path| !root.is_some_and(|root| path.starts_with(root)))
+        .cloned()
+        .collect();
+    let repair = async {
+        if let Some(root) = root {
+            runner::return_artifact_ownership(&[root.to_path_buf()], true).await?;
+        }
+        runner::return_artifact_ownership(&remaining, false).await
+    };
+    tokio::time::timeout(PRE_TEARDOWN_GRACE, repair)
+        .await
+        .map_err(|_| "artifact ownership repair timed out".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
@@ -3932,27 +4201,25 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// gets its witness. Failures are returned after logging so matrix callers can
 /// treat missing evidence as terminal while legacy run/restore behavior stays
 /// best-effort at their call sites.
-async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
-    tokio::fs::create_dir_all(out_dir).await.map_err(|error| {
-        warn!(out = %out_dir.display(), %error, "failed to create --out for the witness");
-        format!("create witness output {}: {error}", out_dir.display())
-    })?;
-    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| {
-        warn!(%error, "failed to serialize witness.json");
-        format!("serialize witness.json: {error}")
-    })?;
-    write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes)
+async fn persist_witness(
+    w: &Witnessed,
+    out_dir: &Path,
+    written: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    runner::create_output_directory(out_dir, written)
         .await
-        .map_err(|error| {
-            warn!(%error, "failed to write witness.json");
-            format!("write witness.json: {error}")
-        })?;
-    write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw)
-        .await
-        .map_err(|error| {
-            warn!(%error, "failed to write witness.pcap into --out");
-            format!("write witness.pcap: {error}")
-        })
+        .map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| error.to_string())?;
+    for (name, data) in [
+        (artifacts::WITNESS_JSON, bytes.as_slice()),
+        (artifacts::WITNESS_PCAP, w.raw.as_slice()),
+    ] {
+        write_out_atomic(out_dir, name, data)
+            .await
+            .map_err(|error| format!("write {name}: {error}"))?;
+        written.push(out_dir.join(name));
+    }
+    Ok(())
 }
 
 /// Atomic artifact write into `--out`: temp file in the same dir, then rename,
@@ -3977,6 +4244,7 @@ async fn collect_and_record(
     action: &Action,
     out_dir: &Path,
     lifecycle: &Lifecycle,
+    created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
@@ -3984,7 +4252,7 @@ async fn collect_and_record(
         return Ok(());
     }
     lifecycle.emit(&Event::CollectionStarted);
-    let collect = collect_to_host(target, key, out_dir);
+    let collect = collect_to_host(target, key, out_dir, created);
     match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
         Ok(Ok(())) => {
             lifecycle.emit(&Event::CollectionDone);
@@ -4015,8 +4283,9 @@ async fn collect_to_host(
     target: runner::GuestTarget<'_>,
     key: &Path,
     out_dir: &Path,
+    created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    let primary = runner::collect_out_to_host(target, key, out_dir).await;
+    let primary = runner::collect_out_to_host_observed(target, key, out_dir, created).await;
     match runner::collect_changeset_to_host(target, key, out_dir).await {
         Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
         Err(e) => warn!(error = %e, "collect overlay changeset failed"),
@@ -4033,6 +4302,25 @@ async fn collect_to_host(
 /// file for the cursor path. clap's `required_if_eq` guarantees the cursor
 /// flags are present, so the `ok_or_else` arms are defensive.
 async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
+    if args
+        .repo
+        .as_deref()
+        .is_some_and(runner::repo_url_has_userinfo)
+    {
+        return Err(RoomsError::Internal(
+            "--repo URL must not embed credentials".to_owned(),
+        ));
+    }
+    if args.base_sha.is_some() && args.repo.is_none() {
+        return Err(RoomsError::Internal(
+            "--base-sha requires --repo".to_owned(),
+        ));
+    }
+    if args.repo.is_some() && matches!(args.runner, RunnerKind::Command) && args.command.is_none() {
+        return Err(RoomsError::Internal(
+            "--repo requires --command or --runner cursor".to_owned(),
+        ));
+    }
     if args.keep {
         return Ok(Action::Keep);
     }
@@ -4074,7 +4362,14 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
                 ));
             }
             let action = args.command.clone().map_or(Action::Idle, |command| {
-                Action::Exec(runner::Runner::Command(command))
+                let Some(repo_url) = args.repo.clone() else {
+                    return Action::Exec(runner::Runner::Command(command));
+                };
+                Action::Exec(runner::Runner::RepositoryCommand {
+                    command,
+                    repo_url,
+                    base_sha: args.base_sha.clone().unwrap_or_else(|| "HEAD".to_owned()),
+                })
             });
             Ok(action)
         }
@@ -4251,13 +4546,20 @@ async fn exec_workload(
     // `work` cascades through each child future — kill_on_drop fires on every
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
-    let work = run_workload(env, run, secrets, started_at);
+    let mut completed = None;
+    let work = run_workload(env, run, secrets, started_at, &mut completed);
     let raced = match clone_cancellation {
         Some(cancellation) => {
             race_workload_with_clone_cancellation(work, env.max_wall, Some(cancellation)).await
         }
         None => race_workload(work, env.max_wall).await,
     };
+    if let Some(outcome) = completed
+        .as_ref()
+        .filter(|_| !matches!(raced, ExecRace::Completed(_)))
+    {
+        return record_interrupted_finalization(env, run, outcome, raced).await;
+    }
     match raced {
         ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
@@ -4302,6 +4604,41 @@ async fn exec_workload(
     }
 }
 
+/// Cancellation after the command exited interrupts finalization, not the command.
+async fn record_interrupted_finalization(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    outcome: &runner::GuestExecOutcome,
+    raced: ExecRace,
+) -> Result<u8, RoomsError> {
+    let exit_code = match raced {
+        ExecRace::Cancelled(code) => code,
+        ExecRace::TimedOut => 124,
+        ExecRace::Completed(result) => return result,
+    };
+    env.lifecycle.emit(&Event::WorkloadExited {
+        exit_code: outcome.exit_code,
+        status: workload_status(outcome.status),
+    });
+    env.lifecycle.emit(&Event::WorkloadFailed {
+        error: format!("post-run finalization interrupted (CLI exit {exit_code})"),
+    });
+    let result = ResultJson::from_exec(
+        outcome.exit_code,
+        outcome.status,
+        outcome.started_at,
+        outcome.ended_at,
+        run.command_argv(),
+    );
+    let write = runner::write_guest_result_json(env.guest_target(), env.key, &result);
+    match tokio::time::timeout(PRE_TEARDOWN_GRACE, write).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "failed to retain completed-run result"),
+        Err(_) => warn!("completed-run result write timed out"),
+    }
+    Ok(exit_code)
+}
+
 /// Wait for the workload channel, pass the secrets gate when one is armed,
 /// then run the workload, recording each transition on the lifecycle stream.
 /// Returns the resolved exit code; a post-run push failure fails the run
@@ -4312,6 +4649,7 @@ async fn run_workload(
     run: &runner::Runner,
     secrets: Option<vsock::Delivery>,
     started_at: DateTime<Utc>,
+    completed: &mut Option<runner::GuestExecOutcome>,
 ) -> Result<u8, RoomsError> {
     let lifecycle = env.lifecycle;
     wait_for_channel(env).await?;
@@ -4321,9 +4659,23 @@ async fn run_workload(
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
     });
-    let outcome = match runner::exec(env.guest_target(), env.key, run, env.config).await {
+    let outcome = match runner::exec_observed(
+        env.guest_target(),
+        env.key,
+        run,
+        env.config,
+        completed,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => {
+            if let Some(outcome) = completed {
+                lifecycle.emit(&Event::WorkloadExited {
+                    exit_code: outcome.exit_code,
+                    status: workload_status(outcome.status),
+                });
+            }
             lifecycle.emit(&Event::WorkloadFailed {
                 error: e.to_string(),
             });
@@ -4334,11 +4686,11 @@ async fn run_workload(
         exit_code: outcome.exit_code,
         status: workload_status(outcome.status),
     });
-    if let Some(push_error) = outcome.push_error {
+    if let Some(post_run_error) = outcome.post_run_error {
         lifecycle.emit(&Event::WorkloadFailed {
-            error: push_error.clone(),
+            error: post_run_error.clone(),
         });
-        return Err(RoomsError::Internal(push_error));
+        return Err(RoomsError::Internal(post_run_error));
     }
     Ok(u8::try_from(outcome.exit_code).unwrap_or(2))
 }
@@ -4629,7 +4981,9 @@ fn room_label(action: &Action) -> String {
     match action {
         Action::Keep => "(keep)".to_owned(),
         Action::Idle => "(idle)".to_owned(),
-        Action::Exec(runner::Runner::Command(cmd)) => cmd.clone(),
+        Action::Exec(
+            runner::Runner::Command(cmd) | runner::Runner::RepositoryCommand { command: cmd, .. },
+        ) => cmd.clone(),
         Action::Exec(runner::Runner::Cursor(req)) => format!("cursor:{}", req.repo_url),
     }
 }
@@ -5357,6 +5711,8 @@ mod tests {
             status: "exited",
             exit_code: Some(0),
             out_dir: Some(invalid),
+            toolstore_sha256: None,
+            base_repo_sha: None,
         };
         assert!(
             clone_records_json(&[record], None).is_err(),
@@ -5629,6 +5985,8 @@ mod tests {
             status: "exited",
             exit_code: Some(0),
             out_dir: Some(PathBuf::from("/out/room-three")),
+            toolstore_sha256: None,
+            base_repo_sha: None,
         };
         let batch = CloneCommandBatchFailure::new(
             vec![success],
@@ -5676,6 +6034,8 @@ mod tests {
             status,
             exit_code,
             out_dir: Some(PathBuf::from(format!("/out/{case_id}"))),
+            toolstore_sha256: None,
+            base_repo_sha: None,
         }
     }
 
@@ -6101,6 +6461,8 @@ mod tests {
         // Covers the resolve-time guard (the clap conflict can't catch the bare
         // default-command case: `rooms run --image x --push-branch foo`).
         let args = RunArgs {
+            resources: rooms::firecracker::Resources::default(),
+            toolstore: None,
             image: PathBuf::from("x"),
             keep: false,
             command: None,
@@ -6127,6 +6489,41 @@ mod tests {
             ),
             Ok(_) => panic!("--push-branch with the default command runner should be rejected"),
             Err(other) => panic!("expected an Internal error; got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn toolstore_preserves_literal_command_in_plain_and_repository_action_metadata() {
+        let command = "# caller comment\nprintf 'literal command\\n'";
+        let mut args = RunArgs {
+            resources: rooms::firecracker::Resources::default(),
+            toolstore: Some(PathBuf::from("store")),
+            image: PathBuf::from("image"),
+            keep: false,
+            command: Some(command.to_owned()),
+            runner: RunnerKind::Command,
+            repo: None,
+            task: None,
+            model: None,
+            base_sha: None,
+            push_branch: None,
+            out_dir: None,
+            readonly_rootfs: false,
+            max_wall: None,
+            max_pool: None,
+            json: false,
+            lifecycle: None,
+            witness: false,
+            secrets: None,
+            egress: crate::egress::Policy::Observe,
+        };
+        for repo in [None, Some("https://example.com/repo.git".to_owned())] {
+            args.repo = repo;
+            let super::Action::Exec(run) = resolve_action(&args).await.expect("command action")
+            else {
+                panic!("expected executable command");
+            };
+            assert_eq!(run.command_argv(), vec!["sh", "-c", command]);
         }
     }
 
@@ -6237,5 +6634,133 @@ mod tests {
         let long = truncate_label(Some("abcdefghijklmnop"), 5);
         assert_eq!(long.chars().count(), 5, "truncated to max display width");
         assert!(long.ends_with('…'), "elision marker present: {long}");
+    }
+    #[test]
+    fn cold_room_resource_limits_are_enforced() {
+        for (flag, value) in [
+            ("--cpus", "0"),
+            ("--cpus", "33"),
+            ("--cpus", "3"),
+            ("--cpus", "31"),
+            ("--memory", "127"),
+            ("--disk", "0"),
+        ] {
+            assert!(Cli::try_parse_from(["rooms", "run", "--image", "x", flag, value]).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "rooms", "run", "--image", "x", "--cpus", "2", "--memory", "2048", "--disk", "8",
+        ])
+        .expect("valid resources");
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                cpus: 2,
+                memory: 2048,
+                disk: Some(8),
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["rooms", "run", "--image", "x", "--disk", "8", "--keep"]).is_err()
+        );
+    }
+
+    #[test]
+    fn toolstores_require_a_disposable_command() {
+        let base = [
+            "rooms",
+            "run",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--keep"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--task", "do work"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--command", "cargo test"])).is_ok());
+    }
+
+    #[test]
+    fn base_create_fixes_machine_shape_toolstore_and_pinned_revision() {
+        let cli = Cli::try_parse_from([
+            "rooms",
+            "base-create",
+            "--image",
+            "image.ext4",
+            "--cpus",
+            "2",
+            "--memory",
+            "1024",
+            "--toolstore",
+            "tools",
+            "--repo",
+            "/src/workbench",
+            "--base-sha",
+            "92a706a",
+        ])
+        .expect("parse");
+        let Command::BaseCreate {
+            cpus,
+            memory,
+            toolstore,
+            base_sha,
+            ..
+        } = cli.command
+        else {
+            panic!("expected base-create");
+        };
+        assert_eq!((cpus, memory), (2, 1024));
+        assert_eq!(toolstore, Some(PathBuf::from("tools")));
+        assert_eq!(base_sha.as_deref(), Some("92a706a"));
+        let base = ["rooms", "base-create", "--image", "image.ext4"];
+        // A pinned revision without a repository has nothing to pin.
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--base-sha", "92a706a"])).is_err());
+        // Bases share the cold-run machine limits.
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--cpus", "3"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--memory", "64"])).is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--disk", "1"])).is_err());
+    }
+
+    #[test]
+    fn restore_clone_and_matrix_accept_the_frozen_toolstore() {
+        let restore = [
+            "rooms",
+            "restore",
+            "snap",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+            "--command",
+            "true",
+        ];
+        assert!(Cli::try_parse_from(restore).is_ok());
+        let clone = [
+            "rooms",
+            "clone",
+            "snap",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+            "-n",
+            "2",
+        ];
+        assert!(Cli::try_parse_from(clone).is_ok());
+        let matrix = [
+            "rooms",
+            "matrix",
+            "snap",
+            "--image",
+            "image.ext4",
+            "--toolstore",
+            "tools",
+            "--cases",
+            "cases.json",
+            "--out",
+            "out",
+        ];
+        assert!(Cli::try_parse_from(matrix).is_ok());
     }
 }

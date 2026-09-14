@@ -5,6 +5,24 @@
 
 Disposable Firecracker microVMs with specified deps. The cold path takes a rootfs image, a repo, and a command; it boots an ephemeral microVM under the Firecracker jailer, SSHes the command into the guest, propagates the exit code, collects `/workspace/out` back to the host, and tears the VM down. The warm path creates one credential-free neutral base, snapshots it, then restores one room or forks up to eight isolated clones from that shared state. The first consumer is an LLM agent (`--runner cursor` drives a baked SDK runner against a cloned repo), but the substrate doesn't know that: it sees "exec a command," same as it would for a test suite or a shell script.
 
+A pinned Nix toolchain can now be attached to a cold command room independently
+of its Alpine image. On the Linux host, build it as your normal user, then run:
+
+```sh
+bash scripts/setup-nix-host.sh  # once, on the Ubuntu Rooms host; then log in again
+python3 scripts/build-toolstore.py --preset polyglot --out ~/rooms/toolstores/dev
+sudo -E rooms run --image ~/rooms/images/rootfs.ext4 \
+  --toolstore ~/rooms/toolstores/dev --cpus 2 --memory 2048 --disk 4 \
+  --repo https://github.com/itsHabib/rooms --command 'cargo test --locked --lib' \
+  --out out --lifecycle run.ndjson
+```
+
+The image must be rebuilt with the current Alpine builder's boot hook. Nix runs
+only on the Linux host; its sealed squashfs carries the tools and their runtime
+closure into the guest. See [Nix toolstores](docs/features/nix-toolstores/spec.md)
+for host prerequisites, scope, and validation. Snapshot attachment and cached
+project environments remain separate work.
+
 ## Status
 
 **v0.1.0 — tagged + public, dogfooded on the rooms-host.** The cold-room path remains intact:
@@ -41,6 +59,26 @@ The rest is another layer's job, on purpose — `rooms` stays focused on the mic
 - **Orchestration** — fan-out, scheduling, and review live in the consumer (ship / `/work-driver`), which calls `rooms`. `rooms` does not import them; dependency flows one way.
 
 Where the focus ends today (full list + rationale in [`docs/vision.md`](docs/vision.md)): not Codespaces-but-local, no persistent dev workspace or interactive shell-as-product, no web preview / port forwarding, no Docker / devcontainer / generic container runtime, no multi-tenant control plane, no cross-host orchestration. Those are layers other tools own, or that `rooms` adds when a real need shows up — not permanent vetoes. Rooms are ephemeral — a room dies when the command finishes.
+
+## Repository commands with private storage
+
+Rebuild the Alpine image with the current `scripts/build-rootfs-alpine.sh`, then:
+
+```sh
+sudo -E rooms run --image ~/rooms/images/agent-alpine.ext4 \
+  --repo https://github.com/itsHabib/rooms --base-sha HEAD \
+  --cpus 2 --memory 1024 --disk 8 \
+  --command 'bash -n scripts/lib/overlay-init.sh' \
+  --max-wall 120s --out /tmp/rooms-check
+cat /tmp/rooms-check/logs/stdout.log
+```
+
+`--memory` is MiB; `--disk` is GiB. Repository commands run in `/workspace/repo`
+and export edits as `result.patch`, including on a nonzero command exit. The disk
+backs a private writable overlay over the read-only image and is discarded after
+collection. Logs survive timeout/SIGTERM when the guest remains reachable. These
+flags configure cold rooms; prepared snapshots keep their recorded machine shape.
+See the [scope and acceptance contract](docs/features/usable-command-rooms/spec.md).
 
 ## CLI surface
 
@@ -119,6 +157,25 @@ Omit `clone --command` to keep the complete batch alive; the returned JSON gives
 On Linux, the Alpine builder publishes its rootfs with `FS_IMMUTABLE_FL`; snapshot publication applies the same kernel flag to all three artifacts and the snapshot directory. Restore refuses mutable backing, parses and hashes through pinned descriptors, and verifies that the jail contains those prepared rootfs/memory inodes plus the prepared vmstate bytes. The state-local compatibility receipt is deliberately outside the portable snapshot directory, so copying `snapshot.json` cannot copy hash authority. There is intentionally no snapshot delete/unseal verb yet: published snapshots are operator-retained evidence, and rerunning the rootfs builder is the one supported exact-output replacement path.
 
 `--keep` and `--command` are mutually exclusive on `run`/`restore`; kept modes cannot collect output or witness traffic; `--push-branch` is cursor-only. clap enforces these combinations at parse time.
+
+## Rehearse a change
+
+The [payment rehearsal lab](examples/rehearsal/README.md) compares an original
+handler and an idempotency patch under ordinary delivery, a lost reply followed
+by redelivery, and two legitimate events carrying the same amount. It produces
+an offline comparison report with independently checked ledger/trace evidence.
+
+```sh
+python3 examples/rehearsal/lab.py demo --out /tmp/payment-rehearsal
+```
+
+`demo` runs ordinary local processes; its report explicitly states that it provides
+no VM isolation evidence. The lab and `make check` require host Python 3.9+
+and POSIX `sh`/`awk`. The lab's `run` command uses
+six real snapshot clones through `rooms matrix`, with witnessed no-egress
+execution. The same specimen and oracle run on both paths. No credentials or
+external services are needed. See the lab README for the host invocation and
+how to retain and re-check the evidence.
 
 ## Prereqs
 

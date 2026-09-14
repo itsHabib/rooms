@@ -35,6 +35,7 @@
 # ROOMS_BOX_SSH_TIMEOUT bounds how long `up` waits for SSH (default 300 seconds).
 
 set -euo pipefail
+umask 077
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_ROOT="${ROOMS_BOX_STATE:-$HOME/.rooms-box}"
@@ -77,16 +78,19 @@ box_dir() { printf '%s/%s\n' "$STATE_ROOT" "$1"; }
 # shares the name.
 new_token() { od -An -N8 -tx1 /dev/urandom | tr -d ' \n'; }
 
-# record DIR KEY VALUE [KEY VALUE...] appends shell-quoted assignments in one
-# write, so an interrupted call leaves all of its pairs or none.
+# record DIR KEY VALUE [KEY VALUE...] publishes complete shell-quoted assignments.
+# A reader sees the previous record or the full update, never a partial write.
 record() {
-    local dir="$1" lines=""
+    local dir="$1" lines="" pending
     shift
     while [[ $# -ge 2 ]]; do
         lines+="$(printf '%s=%q' "$1" "$2")"$'\n'
         shift 2
     done
-    printf '%s' "$lines" >>"$dir/box.env"
+    pending="$(mktemp "$dir/.record.XXXXXX")"
+    cat "$dir/box.env" >"$pending"
+    printf '%s' "$lines" >>"$pending"
+    mv "$pending" "$dir/box.env"
 }
 
 load_box() {
@@ -174,8 +178,7 @@ gcp_up() {
     local zone="$GCP_ZONE"
     ssh-keygen -q -t ed25519 -N '' -C "rooms-box-$name" -f "$dir/id_ed25519"
     printf 'rooms:%s\n' "$(cat "$dir/id_ed25519.pub")" >"$dir/ssh-keys"
-    # Recorded before creation so `down` can clean up a half-created box.
-    record "$dir" BOX_PROJECT "$project" BOX_ZONE "$zone"
+    # Project, zone and token were atomically recorded before any creation.
     gcloud compute instances create "$name" \
         --project="$project" --zone="$zone" \
         --machine-type="${ROOMS_BOX_GCP_MACHINE:-n2-standard-4}" \
@@ -221,7 +224,7 @@ gcp_down() {
 # --- commands ---
 
 cmd_up() {
-    local name="${1:-}" backend="" project="${ROOMS_BOX_GCP_PROJECT:-}" dir token
+    local name="${1:-}" backend="" project="${ROOMS_BOX_GCP_PROJECT:-}" dir token pending
     [[ -n "$name" ]] || usage
     shift
     while [[ $# -gt 0 ]]; do
@@ -242,13 +245,23 @@ cmd_up() {
         *) fatal "--backend must be lima or gcp" ;;
     esac
     dir="$(box_dir "$name")"
-    [[ ! -e "$dir" ]] || fatal "box '$name' already exists ($dir); run 'box.sh down $name' first"
+    [[ ! -e "$dir/box.env" ]] || fatal "box '$name' already exists ($dir); run 'box.sh down $name' first"
     "${backend}_check_free" "$name" "$project"
     token="$(new_token)"
     [[ "$token" =~ ^[0-9a-f]{16}$ ]] || fatal "could not generate a box token"
     mkdir -p "$dir"
     chmod 700 "$dir"
-    record "$dir" BOX_BACKEND "$backend" BOX_TOKEN "$token"
+    # Empty directories are harmless interrupted reservations. The complete
+    # manifest's exclusive hard link, not mkdir -p, arbitrates concurrent up.
+    # Both files are on the same filesystem; ln refuses an existing box.env.
+    pending="$(mktemp "$STATE_ROOT/.claim.XXXXXX")"
+    printf 'BOX_BACKEND=%q\nBOX_TOKEN=%q\nBOX_PROJECT=%q\nBOX_ZONE=%q\n' \
+        "$backend" "$token" "$project" "$GCP_ZONE" >"$pending"
+    if ! ln "$pending" "$dir/box.env" 2>/dev/null; then
+        rm -f "$pending"
+        fatal "box '$name' already exists ($dir); run 'box.sh down $name' first"
+    fi
+    rm -f "$pending"
     log "creating $backend box $name"
     "${backend}_up" "$name" "$dir" "$project" "$token"
     load_box "$name"

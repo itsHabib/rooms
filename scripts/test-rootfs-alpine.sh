@@ -120,6 +120,7 @@ log "sshd reachable in ${booted}ms"
 log "checking guest user + tooling"
 ssh_guest "set -e
     [ \"\$(id -un)\" = '${GUEST_USER}' ] || { echo \"wrong user: \$(id -un)\"; exit 1; }
+    ssh -V || { echo 'SSH client failed'; exit 1; }
     command -v git    >/dev/null || { echo 'git missing';    exit 1; }
     command -v claude >/dev/null || { echo 'claude missing'; exit 1; }"
 
