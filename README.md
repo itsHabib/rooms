@@ -31,8 +31,8 @@ workload, retain its receipts, measure memory and inspect cleanup. The runner is
 Rust (`cargo build --release --example cloud-lab`) and uses the same Rooms CLI as
 an agent or CI consumer. It records exact input hashes and keeps failed runs.
 
-The [ten-experiment tracker](docs/experiments/ten-experiments.md) separates
-measurements from unfinished work. So far, the disposable GCP lab has run the
+The [experiment tracker](docs/experiments/ten-experiments.md) separates
+measurements from unfinished work. It now includes three planned additions: [NVMe/LVM storage, eBPF tracing and deployment telemetry/UI](docs/experiments/storage-observability-deployments.md). So far, the disposable GCP lab has run the
 8–128 clone ramp, a shared-store cache probe, mixed hostile workloads and
 snapshot transfer through object storage to a second host. These are experiments,
 not production capacity or multi-tenant security guarantees. The 128-clone runs
