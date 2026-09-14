@@ -67,11 +67,14 @@ without such a rule `up` stops when SSH does not answer in time.
   GCP instance. `down` deletes only a VM that carries its box's token, so a
   failed `up` can never lead `down` to a same-named VM it did not create, such
   as the long-lived `rooms-host`.
-- The state file (backend and token) is written right after the state
-  directory, and tool and name checks run before either, so a failed `up`
-  never strands a directory that `up` refuses and `down` cannot remove. GCP's
-  project and zone are recorded before the instance is created, so `down` can
-  clean up a half-created box.
+- A complete private manifest (backend, token, project and zone) is prepared
+  first, then published with an exclusive hard link as `box.env`. Only the
+  winning `up` can create a VM; a competing `up` cannot overwrite its token.
+  An interruption before publication may leave an empty name directory, which
+  a later `up` can reuse. After publication, `down` has the ownership needed
+  to recover a failed creation. Later record updates use atomic replacement.
+  A killed publisher can leave a `.claim.*` staging file; it is not a box or a
+  resource claim and no cloud creation happens before manifest publication.
 - No VM carrying the token means the box is already gone (Spot preemption or
   maximum run time); a failed lookup keeps the state for a retry.
 - Residual race, recorded in `docs/follow-ups.md`: the ownership lookup and the
