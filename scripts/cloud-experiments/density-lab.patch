@@ -1,0 +1,150 @@
+--- a/src/slot.rs
++++ b/src/slot.rs
+@@ -54,7 +54,7 @@
+ ///
+ /// Keeping the complete owner set in one bounded token makes each
+ /// add/remove a single atomic rewrite and prevents unbounded slot-file growth.
+-pub const MAX_CLONE_LEASES: usize = 8;
++pub const MAX_CLONE_LEASES: usize = 128;
+ 
+ /// Claim a slot for `room_id`, whose identity the caller pre-minted.
+ ///
+--- a/src/clonenet.rs
++++ b/src/clonenet.rs
+@@ -25,7 +25,7 @@
+ 
+ pub const CLONENETS_DIR: &str = "clonenets";
+ const FREE_LOCK: &str = "clonenets.lock";
+-pub const MAX_CLONENET: u8 = 63;
++pub const MAX_CLONENET: u8 = 128;
+ pub const DEFAULT_MAX_POOL: u8 = 8;
+ /// Bound every xtables lock wait rather than failing spuriously when sibling
+ /// clone setup or an external host transaction briefly owns the lock.
+@@ -60,14 +60,14 @@
+                 max: MAX_CLONENET,
+             });
+         }
+-        let base = 4 * index;
++        let base = u32::from(Ipv4Addr::new(172, 17, 0, 0)) + 4 * u32::from(index);
+         Ok(Self {
+             index,
+             netns: format!("rooms-c{index}"),
+             veth_host: format!("veth-h{index}"),
+             veth_guest: format!("veth-g{index}"),
+-            host_ip: Ipv4Addr::new(172, 17, 0, base + 1),
+-            netns_ip: Ipv4Addr::new(172, 17, 0, base + 2),
++            host_ip: Ipv4Addr::from(base + 1),
++            netns_ip: Ipv4Addr::from(base + 2),
+             prefix: 30,
+         })
+     }
+@@ -1529,8 +1529,8 @@
+         assert!(first.veth_guest.len() <= 15);
+ 
+         let top = CloneNet::derive(MAX_CLONENET).unwrap();
+-        assert_eq!(top.host_ip, Ipv4Addr::new(172, 17, 0, 253));
+-        assert_eq!(top.netns_ip, Ipv4Addr::new(172, 17, 0, 254));
++        assert_eq!(top.host_ip, Ipv4Addr::new(172, 17, 2, 1));
++        assert_eq!(top.netns_ip, Ipv4Addr::new(172, 17, 2, 2));
+         assert!(top.veth_host.len() <= 15);
+         assert!(top.veth_guest.len() <= 15);
+     }
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -71,7 +71,7 @@
+             state_base: None,
+             min_firecracker_version: (1, 7),
+             min_rootfs_bytes: 64 * 1024 * 1024,
+-            max_pool: crate::slot::DEFAULT_MAX_POOL,
++            max_pool: 128,
+         }
+     }
+ }
+@@ -141,7 +141,7 @@
+     pub fn effective_max_pool(&self, flag: Option<u8>) -> u8 {
+         flag.unwrap_or(self.max_pool)
+             .min(self.max_pool)
+-            .min(crate::slot::MAX_SLOT)
++            .min(crate::clonenet::MAX_CLONENET)
+     }
+ 
+     /// Jailer chroot base: the `jailer_chroot_base` override, else
+@@ -242,10 +242,10 @@
+     fn effective_max_pool_defaults_to_the_host_cap() {
+         // No flag → the host cap (default 8) is walked as-is.
+         let c = RoomsConfig::default();
+-        assert_eq!(c.max_pool, crate::slot::DEFAULT_MAX_POOL);
++        assert_eq!(c.max_pool, 128);
+         assert_eq!(
+             c.effective_max_pool(None),
+-            crate::slot::DEFAULT_MAX_POOL,
++            128,
+             "with no override the effective cap is the host cap"
+         );
+     }
+@@ -261,7 +261,7 @@
+     fn max_pool_flag_only_lowers_never_raises() {
+         // Host cap 8: a lower flag wins; a higher flag clamps back down to it —
+         // the cap is a host fact, a per-caller flag can't raise it.
+-        let c = with_base("/s");
++        let c = RoomsConfig { max_pool: 8, ..with_base("/s") };
+         assert_eq!(c.max_pool, 8);
+         assert_eq!(
+             c.effective_max_pool(Some(3)),
+@@ -283,8 +283,8 @@
+             max_pool: 200,
+             ..RoomsConfig::default()
+         };
+-        assert_eq!(c.effective_max_pool(None), crate::slot::MAX_SLOT);
+-        assert_eq!(c.effective_max_pool(Some(u8::MAX)), crate::slot::MAX_SLOT);
++        assert_eq!(c.effective_max_pool(None), crate::clonenet::MAX_CLONENET);
++        assert_eq!(c.effective_max_pool(Some(u8::MAX)), crate::clonenet::MAX_CLONENET);
+     }
+ 
+     #[test]
+--- a/src/matrix.rs
++++ b/src/matrix.rs
+@@ -13,8 +13,8 @@
+ 
+ /// The only matrix manifest schema accepted by this binary.
+ pub const SCHEMA: &str = "rooms.matrix.v1";
+-const MAX_MANIFEST_BYTES: usize = 128 * 1024;
+-const MAX_CASES: usize = 8;
++const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
++const MAX_CASES: usize = 128;
+ const MAX_CASE_ID_BYTES: usize = 64;
+ const MAX_COMMAND_BYTES: usize = 16 * 1024;
+ 
+@@ -298,14 +298,14 @@
+ 
+     #[test]
+     fn rejects_case_command_and_manifest_bounds() {
+-        let cases = (0..9)
++        let cases = (0..129)
+             .map(|index| format!(r#"{{"id":"case-{index}","command":"true"}}"#))
+             .collect::<Vec<_>>()
+             .join(",");
+         let too_many = manifest(&format!(r#"{{"schema":"{SCHEMA}","cases":[{cases}]}}"#));
+         assert!(matches!(
+             load(too_many.path()),
+-            Err(MatrixError::CaseCount { actual: 9 })
++            Err(MatrixError::CaseCount { actual: 129 })
+         ));
+ 
+         let command = "x".repeat(MAX_COMMAND_BYTES + 1);
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -5500,10 +5500,11 @@
+     }
+ 
+     #[test]
+-    fn clone_count_accepts_one_through_eight_only() {
++    fn clone_count_accepts_one_through_128_only() {
+         assert_eq!(parse_clone_count("1"), Ok(1));
+         assert_eq!(parse_clone_count("8"), Ok(8));
+-        for bad in ["0", "9", "abc", ""] {
++        assert_eq!(parse_clone_count("128"), Ok(128));
++        for bad in ["0", "129", "abc", ""] {
+             assert!(
+                 parse_clone_count(bad).is_err(),
+                 "clone count {bad:?} should be rejected"

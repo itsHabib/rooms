@@ -1,0 +1,298 @@
+{
+  "density": [
+    {
+      "name": "density-8-0",
+      "requested": 8,
+      "completed": 8,
+      "cli_exit": 0,
+      "elapsed_seconds": 7.436,
+      "started_unix": 1789408670.162,
+      "completed_per_minute": 64.55083378160302,
+      "identities_unique": true,
+      "count": 8,
+      "command_p50_seconds": 4.674269,
+      "command_p99_seconds": 4.764899,
+      "command_max_seconds": 4.764899,
+      "full_density_samples": 11,
+      "peak_full_density_pss_kib": 419567,
+      "peak_full_density_rss_kib": 865564
+    },
+    {
+      "name": "density-8-1",
+      "requested": 8,
+      "completed": 8,
+      "cli_exit": 0,
+      "elapsed_seconds": 7.466,
+      "started_unix": 1789408677.687,
+      "completed_per_minute": 64.29145459416019,
+      "identities_unique": true,
+      "count": 8,
+      "command_p50_seconds": 4.686152,
+      "command_p99_seconds": 4.867927,
+      "command_max_seconds": 4.867927,
+      "full_density_samples": 11,
+      "peak_full_density_pss_kib": 427194,
+      "peak_full_density_rss_kib": 868556
+    },
+    {
+      "name": "density-16-0",
+      "requested": 16,
+      "completed": 16,
+      "cli_exit": 0,
+      "elapsed_seconds": 8.835,
+      "started_unix": 1789408685.246,
+      "completed_per_minute": 108.65874363327673,
+      "identities_unique": true,
+      "count": 16,
+      "command_p50_seconds": 5.533915,
+      "command_p99_seconds": 5.75904,
+      "command_max_seconds": 5.75904,
+      "full_density_samples": 13,
+      "peak_full_density_pss_kib": 729111,
+      "peak_full_density_rss_kib": 1682288
+    },
+    {
+      "name": "density-16-1",
+      "requested": 16,
+      "completed": 16,
+      "cli_exit": 0,
+      "elapsed_seconds": 8.737,
+      "started_unix": 1789408694.182,
+      "completed_per_minute": 109.87753233375301,
+      "identities_unique": true,
+      "count": 16,
+      "command_p50_seconds": 5.548486,
+      "command_p99_seconds": 5.934576,
+      "command_max_seconds": 5.934576,
+      "full_density_samples": 12,
+      "peak_full_density_pss_kib": 743587,
+      "peak_full_density_rss_kib": 1695996
+    },
+    {
+      "name": "density-32-0",
+      "requested": 32,
+      "completed": 32,
+      "cli_exit": 0,
+      "elapsed_seconds": 15.64,
+      "started_unix": 1789408703.021,
+      "completed_per_minute": 122.7621483375959,
+      "identities_unique": true,
+      "count": 32,
+      "command_p50_seconds": 10.666665,
+      "command_p99_seconds": 11.055995,
+      "command_max_seconds": 11.055995,
+      "full_density_samples": 20,
+      "peak_full_density_pss_kib": 1896679,
+      "peak_full_density_rss_kib": 3846836
+    },
+    {
+      "name": "density-32-1",
+      "requested": 32,
+      "completed": 32,
+      "cli_exit": 0,
+      "elapsed_seconds": 15.733,
+      "started_unix": 1789408718.772,
+      "completed_per_minute": 122.03648382380982,
+      "identities_unique": true,
+      "count": 32,
+      "command_p50_seconds": 10.775499,
+      "command_p99_seconds": 11.169942,
+      "command_max_seconds": 11.169942,
+      "full_density_samples": 21,
+      "peak_full_density_pss_kib": 1867928,
+      "peak_full_density_rss_kib": 3819676
+    },
+    {
+      "name": "density-64-0",
+      "requested": 64,
+      "completed": 64,
+      "cli_exit": 0,
+      "elapsed_seconds": 36.884,
+      "started_unix": 1789408734.617,
+      "completed_per_minute": 104.11018327730181,
+      "identities_unique": true,
+      "count": 64,
+      "command_p50_seconds": 27.970979,
+      "command_p99_seconds": 29.26923,
+      "command_max_seconds": 29.26923,
+      "full_density_samples": 33,
+      "peak_full_density_pss_kib": 3970883,
+      "peak_full_density_rss_kib": 7910548
+    },
+    {
+      "name": "density-64-1",
+      "requested": 64,
+      "completed": 64,
+      "cli_exit": 0,
+      "elapsed_seconds": 35.633,
+      "started_unix": 1789408771.624,
+      "completed_per_minute": 107.76527376308478,
+      "identities_unique": true,
+      "count": 64,
+      "command_p50_seconds": 27.340001,
+      "command_p99_seconds": 29.885755,
+      "command_max_seconds": 29.885755,
+      "full_density_samples": 31,
+      "peak_full_density_pss_kib": 3930195,
+      "peak_full_density_rss_kib": 7872004
+    },
+    {
+      "name": "density-128-0",
+      "requested": 128,
+      "completed": 128,
+      "cli_exit": 0,
+      "elapsed_seconds": 75.596,
+      "started_unix": 1789408807.381,
+      "completed_per_minute": 101.59267686120958,
+      "identities_unique": true,
+      "count": 128,
+      "command_p50_seconds": 56.80005,
+      "command_p99_seconds": 61.285169,
+      "command_max_seconds": 61.459323,
+      "full_density_samples": 33,
+      "peak_full_density_pss_kib": 7758849,
+      "peak_full_density_rss_kib": 15716788
+    },
+    {
+      "name": "density-128-1",
+      "requested": 128,
+      "completed": 128,
+      "cli_exit": 0,
+      "elapsed_seconds": 77.124,
+      "started_unix": 1789408883.132,
+      "completed_per_minute": 99.57989730823091,
+      "identities_unique": true,
+      "count": 128,
+      "command_p50_seconds": 57.486832,
+      "command_p99_seconds": 59.759478,
+      "command_max_seconds": 59.774434,
+      "full_density_samples": 33,
+      "peak_full_density_pss_kib": 7788682,
+      "peak_full_density_rss_kib": 15741732
+    }
+  ],
+  "shared_store": [
+    {
+      "sampling_errors": [],
+      "sample_count": 23,
+      "n": 16,
+      "elapsed_seconds": 24.72,
+      "cli_exit": 0,
+      "receipt_count": 16,
+      "unique_store_digests": [
+        "93e409a455bad10c453dd9b8e7a0037ccecfb2ec4c2fa65f3316937b25950ef7"
+      ],
+      "peak_full_density_pss_kib": 10871235,
+      "host_cache_at_peak": {
+        "fincore": [
+          {
+            "res": "182.5M",
+            "pages": 46718,
+            "size": "182.5M",
+            "file": "/home/rooms/lab/python/toolstore.sqfs"
+          }
+        ]
+      }
+    },
+    {
+      "sampling_errors": [],
+      "sample_count": 30,
+      "n": 32,
+      "elapsed_seconds": 36.814,
+      "cli_exit": 0,
+      "receipt_count": 32,
+      "unique_store_digests": [
+        "93e409a455bad10c453dd9b8e7a0037ccecfb2ec4c2fa65f3316937b25950ef7"
+      ],
+      "peak_full_density_pss_kib": 21731679,
+      "host_cache_at_peak": {
+        "fincore": [
+          {
+            "res": "182.5M",
+            "pages": 46718,
+            "size": "182.5M",
+            "file": "/home/rooms/lab/python/toolstore.sqfs"
+          }
+        ]
+      }
+    },
+    {
+      "sampling_errors": [],
+      "sample_count": 39,
+      "n": 64,
+      "elapsed_seconds": 67.451,
+      "cli_exit": 0,
+      "receipt_count": 64,
+      "unique_store_digests": [
+        "93e409a455bad10c453dd9b8e7a0037ccecfb2ec4c2fa65f3316937b25950ef7"
+      ],
+      "peak_full_density_pss_kib": 43326827,
+      "host_cache_at_peak": {
+        "fincore": [
+          {
+            "res": "182.5M",
+            "pages": 46718,
+            "size": "182.5M",
+            "file": "/home/rooms/lab/python/toolstore.sqfs"
+          }
+        ]
+      }
+    }
+  ],
+  "hostile": {
+    "normal_count": 32,
+    "normal_command_p50_seconds": 19.411596,
+    "normal_command_p99_seconds": 21.398905
+  },
+  "backings": {
+    "backing-v3-disk": {
+      "trials_seconds": [
+        9.08,
+        8.951,
+        9.055
+      ],
+      "median_seconds": 9.055
+    },
+    "backing-v3-tmpfs-never": {
+      "trials_seconds": [
+        8.798,
+        8.715,
+        8.941
+      ],
+      "median_seconds": 8.798
+    },
+    "backing-v3-tmpfs-always": {
+      "trials_seconds": [
+        8.826,
+        8.729,
+        8.707
+      ],
+      "median_seconds": 8.729
+    },
+    "uffd-v3-disk": {
+      "trials_seconds": [
+        9.964,
+        9.743,
+        9.918
+      ],
+      "median_seconds": 9.918
+    },
+    "uffd-v3-tmpfs-never": {
+      "trials_seconds": [
+        9.868,
+        9.746,
+        9.731
+      ],
+      "median_seconds": 9.746
+    },
+    "uffd-v3-tmpfs-always": {
+      "trials_seconds": [
+        9.959,
+        10.003,
+        9.873
+      ],
+      "median_seconds": 9.959
+    }
+  },
+  "interpretation": "p99 is nearest-rank within this small batch of guest COMMAND durations, not admission-to-ready latency or a stable tail estimate."
+}

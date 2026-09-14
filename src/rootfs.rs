@@ -523,6 +523,33 @@ mod tests {
             .expect("run provisioning-agent shell test")
     }
 
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn warm_output_is_not_provisioning_protocol() {
+        for status in [0, 17] {
+            let output = run_agent_shell(&format!(
+                r#"
+                ROOMS_AGENT_LIBRARY_ONLY=1 . "$AGENT"
+                WARM=$(mktemp)
+                trap 'rm -f "$WARM"' EXIT
+                printf 'nonempty' > "$WARM"
+                chown() {{ :; }}
+                chmod() {{ :; }}
+                su() {{ printf 'ACK warm\nordinary output\n'; printf 'warm stderr\n' >&2; return {status}; }}
+                run_warm
+                "#
+            ));
+            assert_eq!(output.status.code(), Some(status));
+            assert!(
+                output.stdout.is_empty(),
+                "warm output escaped into protocol"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("ACK warm\nordinary output\n"));
+            assert!(stderr.contains("warm stderr\n"));
+        }
+    }
+
     #[cfg(unix)]
     fn compile_resume_helper() -> (tempfile::TempDir, std::path::PathBuf) {
         let directory = tempfile::tempdir().expect("resume-helper build directory");

@@ -20,8 +20,29 @@ sudo -E rooms run --image ~/rooms/images/rootfs.ext4 \
 The image must be rebuilt with the current Alpine builder's boot hook. Nix runs
 only on the Linux host; its sealed squashfs carries the tools and their runtime
 closure into the guest. See [Nix toolstores](docs/features/nix-toolstores/spec.md)
-for host prerequisites, scope, and validation. Snapshot attachment and cached
+for host prerequisites, scope, and validation. A neutral base can carry the
+toolstore into its snapshot; restore requires the matching sealed store. Cached
 project environments remain separate work.
+
+## Cloud experiments you can reproduce
+
+The [cloud lab guide](docs/experiments/cloud-lab.md) explains how to repeat a
+workload, retain its receipts, measure memory and inspect cleanup. The runner is
+Rust (`cargo build --release --example cloud-lab`) and uses the same Rooms CLI as
+an agent or CI consumer. It records exact input hashes and keeps failed runs.
+
+The [experiment tracker](docs/experiments/ten-experiments.md) separates
+measurements from unfinished work. It now includes three planned additions: [NVMe/LVM storage, eBPF tracing and deployment telemetry/UI](docs/experiments/storage-observability-deployments.md). So far, the disposable GCP lab has run the
+8–128 clone ramp, a shared-store cache probe, mixed hostile workloads and
+snapshot transfer through object storage to a second host. These are experiments,
+not production capacity or multi-tenant security guarantees. The 128-clone runs
+use retained lab patches; the normal CLI still caps clone batches at eight.
+
+See the [cloud results, charts and receipts](docs/experiments/cloud-results/README.md)
+and the [first cold/restore pilot](docs/experiments/snapshot-pilot/README.md).
+The guide covers the source and evidence needed to reproduce them,
+and the failures that changed the implementation. Cloud provisioning remains an
+explicit operator step; the harness does not silently rent machines.
 
 ## Status
 

@@ -1,0 +1,16 @@
+{
+  "attempt": "chaos-c-v1",
+  "host": "rooms-exp-0914-c",
+  "project": "rooms-lab-20260914",
+  "observation_time": "2026-09-14T18:49:35.846016+00:00",
+  "before_loss": "SSH read observed patch-applied-before-tests marker and verified result.json absent",
+  "failure_injection": "operator-authorized Compute Engine instance deletion on Spot VM",
+  "provider_deletion_confirmed": true,
+  "ssh_exit": 255,
+  "completion_receipt_received": false,
+  "status": "interrupted",
+  "success": false,
+  "checkpoint": "chaos-fleet-checkpoint.json",
+  "recovery_attempt": "replacement-d-replay",
+  "natural_preemption": false
+}

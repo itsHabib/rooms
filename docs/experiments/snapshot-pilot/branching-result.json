@@ -1,0 +1,22 @@
+{
+  "interpretation": "Fixed original and seeded mutant; not generated candidate quality or an LLM review.",
+  "candidate_matrix_cli_exit": 1,
+  "selected_patch_sha256": "83da8be43c9032f1e44bceeae7a3af135ffe7934ec722963c6d99031feac6c87",
+  "original_exit": 0,
+  "mutant_exit": 1,
+  "verifier_cli_exit": 0,
+  "independent_status_cases": 341,
+  "candidate_seconds": 6.532,
+  "verifier_seconds": 6.428,
+  "final_host": {
+    "firecracker_processes": "",
+    "jailer_mounts": "",
+    "netns": "",
+    "taps": "",
+    "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+    "restore_intents": "",
+    "snapshot_intents": "01m2gfa349je6h232jabhabadz.lock\nout-8552568657dde3beb2eebbc017e45c7ebb3f846c20ccce6ab015e70d6e529cb0.lock",
+    "meminfo": "MemAvailable:   64419124 kB\nShmem:              1060 kB\nShmemHugePages:        0 kB\nFileHugePages:    645120 kB",
+    "thp_vmstat": "thp_file_alloc 0\nthp_file_mapped 9973\nthp_split_pmd 0"
+  }
+}

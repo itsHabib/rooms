@@ -1,0 +1,38 @@
+--- a/src/slot.rs
++++ b/src/slot.rs
+@@ -1525,7 +1525,7 @@
+ 
+         // Insert all eight members out of order. Every rewrite must converge on
+         // the same canonical sorted representation.
+-        for n in [9, 2, 8, 3, 7, 4, 6, 5] {
++        for n in (2..=129).rev() {
+             assert_eq!(
+                 lease_clone(dir.path(), 5, &snap, &room_id(n))
+                     .unwrap()
+@@ -1535,7 +1535,7 @@
+         }
+         let expected = format!(
+             "@clone-leases {snap} {}\n",
+-            (2..=9).map(room_id).collect::<Vec<_>>().join(" ")
++            (2..=129).map(room_id).collect::<Vec<_>>().join(" ")
+         );
+         assert_eq!(
+             std::fs::read_to_string(slot_path(dir.path(), 5)).unwrap(),
+@@ -1549,7 +1549,7 @@
+             "retrying an existing clone lease must not rewrite membership"
+         );
+         assert!(matches!(
+-            lease_clone(dir.path(), 5, &snap, &room_id(10)),
++            lease_clone(dir.path(), 5, &snap, &room_id(130)),
+             Err(SlotError::LeaseHeld { index: 5 })
+         ));
+         assert_eq!(
+@@ -2047,7 +2047,7 @@
+                 std::fs::read_to_string(slot_path(&state, 5)).unwrap(),
+                 format!(
+                     "@clone-leases {snap} {}\n",
+-                    (2..=9).map(room_id).collect::<Vec<_>>().join(" ")
++                    (2..=129).map(room_id).collect::<Vec<_>>().join(" ")
+                 )
+             );
+         }

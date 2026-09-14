@@ -1,0 +1,19 @@
+{
+  "instances": [],
+  "disks": [],
+  "addresses": [],
+  "snapshots": [],
+  "buckets": [],
+  "project": "rooms-lab-20260914",
+  "observed_at": "2026-09-14T19:23:07.250857+00:00",
+  "deleted_instances": [
+    "rooms-exp-0914-a",
+    "rooms-exp-0914-b",
+    "rooms-exp-0914-c",
+    "rooms-exp-0914-d",
+    "rooms-exp-0914-gpu"
+  ],
+  "temporary_transfer_service_account_present": false,
+  "deleted_subnet": "rooms-exp-east",
+  "subnet_delete_confirmed": true
+}

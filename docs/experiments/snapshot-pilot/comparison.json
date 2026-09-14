@@ -1,0 +1,74 @@
+[
+  {
+    "run": "cold-0",
+    "count": 1,
+    "elapsed_seconds": 13.295,
+    "completed_per_minute": 4.512974802557353
+  },
+  {
+    "run": "cold-1",
+    "count": 1,
+    "elapsed_seconds": 12.973,
+    "completed_per_minute": 4.6249903646034065
+  },
+  {
+    "run": "cold-2",
+    "count": 1,
+    "elapsed_seconds": 12.931,
+    "completed_per_minute": 4.640012373366329
+  },
+  {
+    "run": "restore-0",
+    "count": 1,
+    "elapsed_seconds": 6.287,
+    "completed_per_minute": 9.543502465404803
+  },
+  {
+    "run": "restore-1",
+    "count": 1,
+    "elapsed_seconds": 6.296,
+    "completed_per_minute": 9.529860228716645
+  },
+  {
+    "run": "restore-2",
+    "count": 1,
+    "elapsed_seconds": 6.481,
+    "completed_per_minute": 9.257830581700356
+  },
+  {
+    "run": "clone-2-0",
+    "count": 2,
+    "elapsed_seconds": 6.423,
+    "completed_per_minute": 18.682858477347033
+  },
+  {
+    "run": "clone-2-1",
+    "count": 2,
+    "elapsed_seconds": 6.553,
+    "completed_per_minute": 18.31222340912559
+  },
+  {
+    "run": "clone-4-0",
+    "count": 4,
+    "elapsed_seconds": 6.689,
+    "completed_per_minute": 35.879802661085364
+  },
+  {
+    "run": "clone-4-1",
+    "count": 4,
+    "elapsed_seconds": 6.851,
+    "completed_per_minute": 35.03138227995913
+  },
+  {
+    "run": "clone-8-0",
+    "count": 8,
+    "elapsed_seconds": 7.491,
+    "completed_per_minute": 64.07689227072487
+  },
+  {
+    "run": "clone-8-1",
+    "count": 8,
+    "elapsed_seconds": 7.422,
+    "completed_per_minute": 64.6725949878739
+  }
+]
