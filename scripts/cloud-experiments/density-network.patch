@@ -1,0 +1,397 @@
+--- a/src/veth_isolation.rs
++++ b/src/veth_isolation.rs
+@@ -8,7 +8,7 @@
+ 
+ macro_rules! veth_supernet {
+     () => {
+-        "172.17.0.0/24"
++        "172.17.0.0/22"
+     };
+ }
+ 
+@@ -32,7 +32,7 @@
+ const VETH_TAIL_DROP: &str = concat!("-A ROOMS_VETH_FWD -s ", veth_supernet!(), " -j DROP");
+ const CLONE_EGRESS_CHAIN_PREFIX: &str = "ROOMS_CEG_";
+ const CLONE_VETH_PREFIX: &str = "veth-h";
+-const MAX_CLONE_VETH_INDEX: u8 = 63;
++const MAX_CLONE_VETH_INDEX: u8 = 128;
+ const PRIVATE_DROPS: [&str; 3] = [
+     concat!(
+         "-A ROOMS_VETH_FWD -s ",
+@@ -207,7 +207,7 @@
+     };
+     let (interface, source) = parsed?;
+     let index = clone_veth_index(interface)?;
+-    (source == format!("172.17.0.{}/32", 4 * index + 2)).then_some(index)
++    (source == format!("{}/32", std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(172, 17, 0, 0)) + 4 * u32::from(index) + 2))).then_some(index)
+ }
+ 
+ /// Whether the shared chain contains one canonical binding for this clone veth.
+@@ -401,30 +401,30 @@
+ 
+     const GOOD_CHAIN: &str = concat!(
+         "-N ROOMS_VETH_FWD\n",
+-        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24 -i veth-h+ -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 192.168.0.0/16 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.16.0.0/12 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -o eth0 -j ACCEPT\n",
+-        "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP",
++        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/22 -i veth-h+ -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.17.0.0/22 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 192.168.0.0/16 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.16.0.0/12 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -o eth0 -j ACCEPT\n",
++        "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP",
+     );
+ 
+     const GOOD_CHAIN_WITH_CLONE_EGRESS: &str = concat!(
+         "-N ROOMS_VETH_FWD\n",
+         "-A ROOMS_VETH_FWD ! -s 172.17.0.34/32 -i veth-h8 -j DROP\n",
+         "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP\n",
+-        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24 -i veth-h+ -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 192.168.0.0/16 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.16.0.0/12 -j DROP\n",
++        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/22 -i veth-h+ -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.17.0.0/22 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 192.168.0.0/16 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.16.0.0/12 -j DROP\n",
+         "-A ROOMS_VETH_FWD -i veth-h8 -j ROOMS_CEG_8\n",
+         "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_3\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -o eth0 -j ACCEPT\n",
+-        "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -o eth0 -j ACCEPT\n",
++        "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP",
+     );
+ 
+     #[test]
+@@ -432,11 +432,11 @@
+         assert!(rooms_veth_fwd_isolates(GOOD_CHAIN));
+         assert!(rooms_veth_fwd_isolates(GOOD_CHAIN_WITH_CLONE_EGRESS));
+         let with_bindings = GOOD_CHAIN.replacen(
+-            "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24",
++            "-A ROOMS_VETH_FWD ! -s 172.17.0.0/22",
+             concat!(
+                 "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP\n",
+                 "-A ROOMS_VETH_FWD ! -s 172.17.0.34/32 -i veth-h8 -j DROP\n",
+-                "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24"
++                "-A ROOMS_VETH_FWD ! -s 172.17.0.0/22"
+             ),
+             1,
+         );
+@@ -459,7 +459,7 @@
+         assert_eq!(clone_veth_index("veth-h63"), Some(63));
+         assert_eq!(clone_egress_chain(3), "ROOMS_CEG_3");
+         for invalid in [
+-            "veth-h", "veth-h0", "veth-h03", "veth-h64", "veth-h+", "veth-g3", "veth-h3 ",
++            "veth-h", "veth-h0", "veth-h03", "veth-h129", "veth-h+", "veth-g3", "veth-h3 ",
+         ] {
+             assert_eq!(clone_veth_index(invalid), None, "accepted {invalid}");
+         }
+@@ -525,8 +525,8 @@
+         assert!(!rooms_veth_fwd_isolates(&before_private));
+ 
+         let after_accept = GOOD_CHAIN_WITH_CLONE_EGRESS.replace(jump, "").replace(
+-            "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0",
+-            &format!("{jump}-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0"),
++            "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0",
++            &format!("{jump}-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0"),
+         );
+         assert!(!rooms_veth_fwd_isolates(&after_accept));
+     }
+@@ -540,8 +540,8 @@
+             "-A ROOMS_VETH_FWD -s 172.17.0.14/32 -i veth-h3 -j DROP",
+         ] {
+             let broken = GOOD_CHAIN.replacen(
+-                "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24",
+-                &format!("{rule}\n-A ROOMS_VETH_FWD ! -s 172.17.0.0/24"),
++                "-A ROOMS_VETH_FWD ! -s 172.17.0.0/22",
++                &format!("{rule}\n-A ROOMS_VETH_FWD ! -s 172.17.0.0/22"),
+                 1,
+             );
+             assert!(!rooms_veth_fwd_isolates(&broken));
+@@ -552,7 +552,7 @@
+     fn flat_chain_terminators_that_can_match_veth_traffic_are_caught() {
+         for rule in [
+             "-A ROOMS_FWD -j ACCEPT",
+-            "-A ROOMS_FWD -s 172.17.0.0/24 -j DROP",
++            "-A ROOMS_FWD -s 172.17.0.0/22 -j DROP",
+             "-A ROOMS_FWD ! -s 172.16.0.0/24 -j ACCEPT",
+             "-A ROOMS_FWD -j TRUSTED",
+         ] {
+@@ -597,7 +597,7 @@
+     #[test]
+     fn missing_cross_clone_drop_is_caught() {
+         let broken = GOOD_CHAIN.replace(
+-            "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n",
++            "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.17.0.0/22 -j DROP\n",
+             "",
+         );
+         assert!(!rooms_veth_fwd_isolates(&broken));
+@@ -621,7 +621,7 @@
+     fn supernet_accept_above_drop_is_caught() {
+         let broken = GOOD_CHAIN.replacen(
+             "-N ROOMS_VETH_FWD\n",
+-            "-N ROOMS_VETH_FWD\n-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j ACCEPT\n",
++            "-N ROOMS_VETH_FWD\n-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j ACCEPT\n",
+             1,
+         );
+         assert!(!rooms_veth_fwd_isolates(&broken));
+@@ -655,7 +655,7 @@
+ 
+     #[test]
+     fn accept_between_cross_clone_and_private_drops_is_caught() {
+-        let private = "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP";
++        let private = "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP";
+         let broken =
+             GOOD_CHAIN.replace(private, &format!("-A ROOMS_VETH_FWD -j ACCEPT\n{private}"));
+         assert!(!rooms_veth_fwd_isolates(&broken));
+@@ -663,12 +663,12 @@
+ 
+     #[test]
+     fn drop_after_egress_is_caught() {
+-        let drop = "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n";
++        let drop = "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.17.0.0/22 -j DROP\n";
+         let broken = GOOD_CHAIN.replace(drop, "").replacen(
+-            "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0",
++            "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0",
+             concat!(
+-                "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n",
+-                "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0"
++                "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.17.0.0/22 -j DROP\n",
++                "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0"
+             ),
+             1,
+         );
+@@ -678,9 +678,9 @@
+     #[test]
+     fn missing_egress_return_or_private_drop_is_caught() {
+         for missing in [
+-            "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -o eth0 -j ACCEPT\n",
+-            "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
+-            "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP\n",
++            "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -o eth0 -j ACCEPT\n",
++            "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
++            "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP\n",
+         ] {
+             assert!(!rooms_veth_fwd_isolates(&GOOD_CHAIN.replace(missing, "")));
+         }
+@@ -688,10 +688,10 @@
+ 
+     #[test]
+     fn narrowed_or_inverted_private_drop_is_caught() {
+-        let private = "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP";
++        let private = "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP";
+         for replacement in [
+-            "-A ROOMS_VETH_FWD -s 172.17.0.0/24 ! -d 10.0.0.0/8 -j DROP",
+-            "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -p tcp -j DROP",
++            "-A ROOMS_VETH_FWD -s 172.17.0.0/22 ! -d 10.0.0.0/8 -j DROP",
++            "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -p tcp -j DROP",
+         ] {
+             assert!(!rooms_veth_fwd_isolates(
+                 &GOOD_CHAIN.replace(private, replacement)
+@@ -701,16 +701,16 @@
+ 
+     #[test]
+     fn private_drops_below_egress_and_missing_or_early_tail_are_caught() {
+-        let private = "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP\n";
++        let private = "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP\n";
+         let below = GOOD_CHAIN.replace(private, "").replace(
+-            "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP",
+-            &format!("{private}-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP"),
++            "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP",
++            &format!("{private}-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP"),
+         );
+         assert!(!rooms_veth_fwd_isolates(&below));
+         assert!(!rooms_veth_fwd_isolates(
+-            &GOOD_CHAIN.replace("-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP", "",)
+-        ));
+-        let tail = "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP";
++            &GOOD_CHAIN.replace("-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP", "",)
++        ));
++        let tail = "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP";
+         let early = GOOD_CHAIN.replace(tail, "").replacen(
+             VETH_ISOLATION_DROP,
+             &format!("{VETH_ISOLATION_DROP}\n{tail}"),
+--- a/src/egress.rs
++++ b/src/egress.rs
+@@ -1174,15 +1174,15 @@
+     const CLONE_FORWARD: &str = concat!(
+         "-N ROOMS_VETH_FWD\n",
+         "-A ROOMS_VETH_FWD ! -s 172.17.0.14/32 -i veth-h3 -j DROP\n",
+-        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/24 -i veth-h+ -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.17.0.0/24 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 10.0.0.0/8 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 192.168.0.0/16 -j DROP\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -d 172.16.0.0/12 -j DROP\n",
++        "-A ROOMS_VETH_FWD ! -s 172.17.0.0/22 -i veth-h+ -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.17.0.0/22 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 10.0.0.0/8 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 192.168.0.0/16 -j DROP\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -d 172.16.0.0/12 -j DROP\n",
+         "-A ROOMS_VETH_FWD -i veth-h3 -j ROOMS_CEG_3\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -o eth0 -j ACCEPT\n",
+-        "-A ROOMS_VETH_FWD -d 172.17.0.0/24 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
+-        "-A ROOMS_VETH_FWD -s 172.17.0.0/24 -j DROP",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -o eth0 -j ACCEPT\n",
++        "-A ROOMS_VETH_FWD -d 172.17.0.0/22 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT\n",
++        "-A ROOMS_VETH_FWD -s 172.17.0.0/22 -j DROP",
+     );
+ 
+     const CLONE_NONE_EG: &str = concat!(
+@@ -1402,7 +1402,7 @@
+             ]
+         );
+ 
+-        for invalid in ["veth-h", "veth-h0", "veth-h03", "veth-h64", "veth-h+"] {
++        for invalid in ["veth-h", "veth-h0", "veth-h03", "veth-h129", "veth-h+"] {
+             assert_eq!(clone_chain_for_veth(invalid), None, "accepted {invalid}");
+             assert_eq!(clone_jump_rule(7, invalid), None, "jumped {invalid}");
+         }
+--- a/src/clonenet.rs
++++ b/src/clonenet.rs
+@@ -2,7 +2,7 @@
+ //!
+ //! Every clone reuses its snapshot's frozen guest `/30` inside a private
+ //! network namespace. This allocator supplies the independent host-side axis:
+-//! one namespace and one veth `/30` from `172.17.0.0/24` per live clone. Claim
++//! one namespace and one veth `/30` from `172.17.0.0/22` per live clone. Claim
+ //! files share the slot allocator's crash-safe indexed-claim engine; allocation
+ //! of the namespace and veth mechanism is layered on that durable ownership.
+ //!
+@@ -819,7 +819,7 @@
+ #[cfg(any(target_os = "linux", test))]
+ fn host_create_plan(net: &CloneNet) -> Vec<CommandSpec> {
+     let host_cidr = format!("{}/{}", net.host_ip, net.prefix);
+-    let route_cidr = format!("172.17.0.{}/{}", 4 * net.index, net.prefix);
++    let route_cidr = format!("{}/{}", Ipv4Addr::from(u32::from(net.host_ip) & !3), net.prefix);
+     vec![
+         CommandSpec::new("ip", vec!["netns".into(), "add".into(), net.netns.clone()]),
+         CommandSpec::new(
+@@ -1282,7 +1282,7 @@
+     let mask = cidr_mask(prefix);
+     let route_end = network | !mask;
+     let clone_start = u32::from(Ipv4Addr::new(172, 17, 0, 0));
+-    let clone_end = u32::from(Ipv4Addr::new(172, 17, 0, 255));
++    let clone_end = u32::from(Ipv4Addr::new(172, 17, 3, 255));
+     network <= clone_end && clone_start <= route_end
+ }
+ 
+@@ -1615,18 +1615,18 @@
+         );
+         for route in [
+             "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1",
+-            "172.17.0.0/24 dev bridge0 proto kernel scope link src 172.17.0.1",
++            "172.17.0.0/22 dev bridge0 proto kernel scope link src 172.17.0.1",
+             "172.17.0.6 dev bridge0 scope link",
+             "172.16.0.0/12 dev vpn0",
+             "local 172.17.0.6 dev bridge0 table local proto kernel scope host src 172.17.0.6",
+-            "blackhole 172.17.0.0/24 table 100",
++            "blackhole 172.17.0.0/22 table 100",
+             "172.17.0.4/30 via 192.0.2.1 dev eth0",
+             "172.17.0.4/30 dev veth-h2 scope link src 172.17.0.5",
+             "172.17.0.4/30 dev veth-h1 scope link src 172.17.0.9",
+             // Route types whose keyword we must not mistake for a destination;
+             // the local table they live in is consulted before main.
+             "anycast 172.17.0.6 dev eth0 table local",
+-            "multicast 172.17.0.0/24 dev eth0 table local",
++            "multicast 172.17.0.0/22 dev eth0 table local",
+             "someday-new-type 172.17.0.6 dev eth0",
+             // A catch-all is only harmless after `main`. In `local` it ends RPDB
+             // processing first, so it shadows the /30 however long that prefix is.
+@@ -1673,7 +1673,7 @@
+             // found, so the priority-0 local table always continues to `main`,
+             // regardless of the throw prefix.
+             "throw default table local",
+-            "throw 172.17.0.0/24 table local",
++            "throw 172.17.0.0/22 table local",
+             "throw 172.17.0.6/32 table local",
+             // An explicit table overrides the default table implied by the
+             // local route type. `default` is consulted after `main`.
+@@ -1709,8 +1709,8 @@
+             assert!(default_policy_rule(rule));
+         }
+         for rule in [
+-            "100: from all to 172.17.0.0/24 lookup 100",
+-            "100: from 172.17.0.0/24 lookup vpn",
++            "100: from all to 172.17.0.0/22 lookup 100",
++            "100: from 172.17.0.0/22 lookup vpn",
+             "100: from all fwmark 0x1 lookup 100",
+             "100: from all iif veth-h1 lookup 100",
+             "32766: from all lookup 100",
+--- a/scripts/setup-tap.sh
++++ b/scripts/setup-tap.sh
+@@ -22,7 +22,7 @@
+ FWD_CHAIN="${ROOMS_FWD_CHAIN:-ROOMS_FWD}"
+ SUPERNET="${ROOMS_SUPERNET:-172.16.0.0/24}"
+ VETH_FWD_CHAIN="ROOMS_VETH_FWD"
+-VETH_SUPERNET="172.17.0.0/24"
++VETH_SUPERNET="172.17.0.0/22"
+ CLONENET_OWNER_DIR="/run/rooms/clonenet-owners"
+ # Marker doctor keys on: version + supernet. Bump the version when the chain's
+ # rule shape changes so `rooms doctor` flags hosts still on the old layout.
+@@ -101,8 +101,8 @@
+ active_rooms_veth() {
+     local interface="$1" index="$2"
+     local subnet source route
+-    subnet="172.17.0.$((4 * index))/30"
+-    source="172.17.0.$((4 * index + 1))"
++    subnet="172.17.$((4 * index / 256)).$((4 * index % 256))/30"
++    source="172.17.$((4 * index / 256)).$((4 * index % 256 + 1))"
+     [[ -L "$CLONENET_OWNER_DIR/$index" ]] || return 1
+     sudo ip netns exec "rooms-c$index" true >/dev/null 2>&1 || return 1
+     while IFS= read -r route; do
+@@ -119,7 +119,7 @@
+         interface="${path##*/}"
+         index="${interface#veth-h}"
+         [[ "$index" =~ ^[0-9]+$ ]] || continue
+-        (( index >= 1 && index <= 63 )) || continue
++        (( index >= 1 && index <= 128 )) || continue
+         "$callback" "$interface" "$index"
+     done
+ }
+@@ -135,7 +135,7 @@
+ # not just the ones whose suffix happens to parse as an index in 1..63. Skipping
+ # the rest, as for_each_numeric_veth does, lets a foreign `veth-h64`, a
+ # zero-padded `veth-h08` (which bash reads as invalid octal and drops), or any
+-# `veth-hxyz` reach that path with an overlapping 172.17.0.0/24 source and no
++# `veth-hxyz` reach that path with an overlapping 172.17.0.0/22 source and no
+ # marker/netns/route preflight. Anything matched by the jump must be accounted
+ # for here, so a name outside the rooms shape is fatal rather than skipped.
+ validate_active_veths() {
+@@ -144,7 +144,7 @@
+         [[ -e "$path" ]] || continue
+         interface="${path##*/}"
+         index="${interface#veth-h}"
+-        [[ "$index" =~ ^[1-9][0-9]*$ ]] && (( index <= 63 )) \
++        [[ "$index" =~ ^[1-9][0-9]*$ ]] && (( index <= 128 )) \
+             || fatal "$interface is matched by the FORWARD jump into $VETH_FWD_CHAIN (veth-h+) but is not a rooms clone network name; refusing to change firewall state"
+         validate_active_veth "$interface" "$index"
+     done
+@@ -152,7 +152,7 @@
+ 
+ restore_active_veth_binding() {
+     local interface="$1" index="$2" source
+-    source="172.17.0.$((4 * index + 2))/32"
++    source="172.17.$((4 * index / 256)).$((4 * index % 256 + 2))/32"
+     sudo iptables -I "$VETH_FWD_CHAIN" 1 -i "$interface" ! -s "$source" -j DROP
+ }
+ 
+@@ -205,7 +205,7 @@
+ 
+     # Clone veth traffic is a separate, additive path. Keep the flat chain at
+     # position 1; scoped ingress/egress jumps occupy positions 2 and 3 so an
+-    # unrelated host network that overlaps 172.17.0.0/24 never enters it.
++    # unrelated host network that overlaps 172.17.0.0/22 never enters it.
+     sudo iptables -N "$VETH_FWD_CHAIN" 2>/dev/null || true
+     sudo iptables -F "$VETH_FWD_CHAIN"
+     # Traffic arriving from clone namespaces must have crossed their first-hop

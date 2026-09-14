@@ -299,9 +299,11 @@ run_warm() {
     [ -s "$WARM" ] || return 0
     chown rooms:rooms "$WARM"
     chmod 0500 "$WARM"
+    # Stdout is the framed provisioning protocol, not the workload log. Keep
+    # arbitrary warm output (including strings that look like ACKs) off it.
     su rooms -s /bin/sh -c \
         "exec env -i HOME=/home/rooms USER=rooms LOGNAME=rooms \
-         PATH=/usr/local/bin:/usr/bin:/bin ROOMS_NEUTRAL_WARM=1 /bin/sh '$WARM'"
+         PATH=/usr/local/bin:/usr/bin:/bin ROOMS_NEUTRAL_WARM=1 /bin/sh '$WARM'" >&2
 }
 
 ipv6_is_disabled() {

@@ -1,0 +1,172 @@
+--- a/src/restore_exec.rs
++++ b/src/restore_exec.rs
+@@ -62,6 +62,7 @@
+ /// What a completed restore hands back to the orchestration layer: a live,
+ /// acked room whose teardown must end in [`finish_teardown`].
+ pub struct Restored {
++    pub lab_uffd: Option<LabUffd>,
+     pub vm: firecracker::BootedVm,
+     pub slot: room::Slot,
+     pub room_id: String,
+@@ -450,6 +451,7 @@
+     if !crate::registry::is_valid_room_id(req.room_id) {
+         anyhow::bail!("restore room id is invalid");
+     }
++    anyhow::ensure!(!req.keep, "lab UFFD supports command lifecycle only");
+     validate_prepared_request_paths(config, &req, prepared)?;
+ 
+     let slot_index = prepared
+@@ -544,7 +546,8 @@
+     )
+     .await
+     {
+-        Ok((slot, witness_capture)) => Ok(Restored {
++        Ok((slot, witness_capture, lab_uffd)) => Ok(Restored {
++            lab_uffd,
+             vm: launch.into_booted(witness_capture),
+             slot,
+             room_id,
+@@ -569,7 +572,7 @@
+     launch: &mut RestoreLaunch,
+     clone_net: Option<&clonenet::CloneNet>,
+     prepared: &PreparedRestoreSource,
+-) -> anyhow::Result<(room::Slot, Option<witness::Capture>)> {
++) -> anyhow::Result<(room::Slot, Option<witness::Capture>, Option<LabUffd>)> {
+     let slot = establish_lease(config, intent, launch, clone_net).await?;
+ 
+     let jail_root = config
+@@ -582,6 +585,7 @@
+ 
+     let mut witness_capture = None;
+     let mut resume_delivery = None;
++    let mut lab_uffd = None;
+     for op in prepared.ops.clone() {
+         match op {
+             RestoreOp::InstallCustody => {
+@@ -610,7 +614,7 @@
+             }
+             RestoreOp::LoadSnapshot {
+                 snapshot_path,
+-                mem_backend_path,
++                mem_backend_path: _,
+             } => {
+                 // The nudge listener binds before the guest can resume: the
+                 // polling agent must never find the port unbound after resume.
+@@ -619,14 +623,15 @@
+                     resume_payload(&intent.room_id, req.secrets.as_ref())?,
+                     Some((fc_uid, fc_gid)),
+                 )?);
++                lab_uffd = Some(LabUffd::start(&jail_root, fc_uid, fc_gid).await?);
+                 transport::api_put(
+                     launch.socket(),
+                     "/snapshot/load",
+                     &serde_json::json!({
+                         "snapshot_path": snapshot_path,
+                         "mem_backend": {
+-                            "backend_type": "File",
+-                            "backend_path": mem_backend_path,
++                            "backend_type": "Uffd",
++                            "backend_path": "uffd.sock",
+                         },
+                         "resume_vm": false,
+                     }),
+@@ -669,7 +674,7 @@
+             }
+         }
+     }
+-    Ok((slot, witness_capture))
++    Ok((slot, witness_capture, lab_uffd))
+ }
+ 
+ /// Publish process identity, cross the launch barrier, and take the exact
+@@ -1925,3 +1930,38 @@
+             .expect("a disjoint absent output is fine");
+     }
+ }
++
++// Disposable lab variant: no production switch or public API.
++pub struct LabUffd(std::process::Child);
++impl LabUffd {
++    async fn start(jail: &Path, uid: u32, gid: u32) -> anyhow::Result<Self> {
++        std::fs::copy(
++            "/usr/local/libexec/rooms-lab-uffd",
++            jail.join("uffd-handler"),
++        )?;
++        let child = std::process::Command::new("/usr/sbin/chroot")
++            .arg(format!("--userspec={uid}:{gid}"))
++            .arg(format!("--groups={gid}"))
++            .arg(jail)
++            .args(["/uffd-handler", "/uffd.sock", "/snapshot.mem"])
++            .env_clear()
++            .spawn()?;
++        let mut guard = Self(child);
++        for _ in 0..200 {
++            if let Some(status) = guard.0.try_wait()? {
++                anyhow::bail!("lab UFFD handler exited before readiness: {status}");
++            }
++            if jail.join("uffd.sock").exists() {
++                return Ok(guard);
++            }
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++        anyhow::bail!("lab UFFD socket readiness timed out")
++    }
++}
++impl Drop for LabUffd {
++    fn drop(&mut self) {
++        let _ = self.0.kill();
++        let _ = self.0.wait();
++    }
++}
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -2045,7 +2045,10 @@
+             RoomsError::Internal("clone restore custody was already consumed".to_owned())
+         })?;
+         let rooms::restore_exec::Restored {
+-            mut vm, room_id, ..
++            lab_uffd: _lab_uffd,
++            mut vm,
++            room_id,
++            ..
+         } = restored;
+         vm.guard_mut().dismiss();
+         std::mem::forget(vm);
+@@ -2112,6 +2115,7 @@
+             return;
+         };
+         let rooms::restore_exec::Restored {
++            lab_uffd: _lab_uffd,
+             vm,
+             slot,
+             room_id,
+@@ -2686,6 +2690,7 @@
+ 
+     emit_restored(&restored, args.json);
+     let rooms::restore_exec::Restored {
++        lab_uffd: _lab_uffd,
+         mut vm,
+         slot,
+         room_id,
+@@ -3768,6 +3773,7 @@
+     config: &RoomsConfig,
+ ) -> Result<(), RoomsError> {
+     let rooms::restore_exec::Restored {
++        lab_uffd: _lab_uffd,
+         vm,
+         slot,
+         room_id,
+@@ -5500,10 +5506,11 @@
+     }
+ 
+     #[test]
+-    fn clone_count_accepts_one_through_eight_only() {
++    fn clone_count_accepts_one_through_128_only() {
+         assert_eq!(parse_clone_count("1"), Ok(1));
+         assert_eq!(parse_clone_count("8"), Ok(8));
+-        for bad in ["0", "9", "abc", ""] {
++        assert_eq!(parse_clone_count("128"), Ok(128));
++        for bad in ["0", "129", "abc", ""] {
+             assert!(
+                 parse_clone_count(bad).is_err(),
+                 "clone count {bad:?} should be rejected"

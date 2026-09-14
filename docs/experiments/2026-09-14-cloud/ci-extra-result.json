@@ -1,0 +1,18 @@
+{
+  "base": "1c0ba652dfc62ae4687d431581d96ece59b314cb",
+  "cli_exit": 0,
+  "elapsed_seconds": 60.529,
+  "receipts": 7,
+  "successful": 7,
+  "host_after": {
+    "firecracker_processes": "",
+    "jailer_mounts": "",
+    "netns": "",
+    "taps": "",
+    "rooms_ls": "{\n  \"schema_version\": 1,\n  \"rooms\": []\n}",
+    "restore_intents": "",
+    "snapshot_intents": "01m2ggn1n5ss99rcmrnmjf77mf.lock\n01m2gh1zqwxw26ymb1j1cz5zbe.lock\n01m2gkt1jstwspabfmyjz9ehpz.lock\n01m2gmbqt95606vpkjze8fqenk.lock\n01m2gnc4m36cd4e0q4g5zw27wp.lock\nout-01faaaf11f09e4045f1206faf5a4c541b4ca7f37a2e6ea02ad2dc384fb7e756e.lock\nout-1f430d08744915f1afcbd26391c40aea29d4474b9e07ed12be503021e7d74043.lock\nout-515e9028a2242d930aad8f703d4ff4ebe4a87993f503092374b1b3f385d28847.lock\nout-8e767d5d493d7fd3ea7c518ac86aaf9519eb9c3283fb29b8174f21603ac35a6f.lock\nout-f246a63bcb0ece71ec4a30f3d01009ff6e9f75220828a024de2e0a3222c1a87a.lock",
+    "meminfo": "MemAvailable:   127445140 kB\nShmem:           2102396 kB\nShmemHugePages:  1052672 kB\nFileHugePages:    964608 kB",
+    "thp_vmstat": "thp_file_alloc 514\nthp_file_mapped 37974\nthp_split_pmd 266"
+  }
+}

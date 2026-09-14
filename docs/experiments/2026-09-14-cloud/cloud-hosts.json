@@ -1,0 +1,107 @@
+[
+  {
+    "name": "rooms-exp-0914-a",
+    "creationTimestamp": "2026-09-14T10:22:02.798-07:00",
+    "machineType": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b/machineTypes/n2-standard-16",
+    "cpuPlatform": "Intel Cascade Lake",
+    "zone": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b",
+    "scheduling": {
+      "automaticRestart": false,
+      "instanceTerminationAction": "DELETE",
+      "maxRunDuration": {
+        "nanos": 0,
+        "seconds": "10800"
+      },
+      "onHostMaintenance": "TERMINATE",
+      "preemptible": false,
+      "provisioningModel": "STANDARD"
+    },
+    "advancedMachineFeatures": {
+      "enableNestedVirtualization": true
+    }
+  },
+  {
+    "name": "rooms-exp-0914-b",
+    "creationTimestamp": "2026-09-14T10:42:22.296-07:00",
+    "machineType": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b/machineTypes/n2-standard-32",
+    "cpuPlatform": "Intel Cascade Lake",
+    "zone": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b",
+    "scheduling": {
+      "automaticRestart": false,
+      "instanceTerminationAction": "DELETE",
+      "maxRunDuration": {
+        "nanos": 0,
+        "seconds": "10800"
+      },
+      "onHostMaintenance": "TERMINATE",
+      "preemptible": false,
+      "provisioningModel": "STANDARD"
+    },
+    "advancedMachineFeatures": {
+      "enableNestedVirtualization": true
+    }
+  },
+  {
+    "name": "rooms-exp-0914-c",
+    "creationTimestamp": "2026-09-14T11:15:09.711-07:00",
+    "machineType": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b/machineTypes/n2-standard-8",
+    "cpuPlatform": "Intel Cascade Lake",
+    "zone": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b",
+    "scheduling": {
+      "automaticRestart": false,
+      "instanceTerminationAction": "DELETE",
+      "maxRunDuration": {
+        "nanos": 0,
+        "seconds": "7200"
+      },
+      "onHostMaintenance": "TERMINATE",
+      "preemptible": true,
+      "provisioningModel": "SPOT"
+    },
+    "advancedMachineFeatures": {
+      "enableNestedVirtualization": true
+    }
+  },
+  {
+    "name": "rooms-exp-0914-d",
+    "creationTimestamp": "2026-09-14T11:48:06.038-07:00",
+    "machineType": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b/machineTypes/n2-standard-8",
+    "cpuPlatform": "Intel Cascade Lake",
+    "zone": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b",
+    "scheduling": {
+      "automaticRestart": false,
+      "instanceTerminationAction": "DELETE",
+      "maxRunDuration": {
+        "nanos": 0,
+        "seconds": "3600"
+      },
+      "onHostMaintenance": "TERMINATE",
+      "preemptible": true,
+      "provisioningModel": "SPOT"
+    },
+    "advancedMachineFeatures": {
+      "enableNestedVirtualization": true
+    }
+  },
+  {
+    "name": "rooms-exp-0914-gpu",
+    "creationTimestamp": "2026-09-14T10:58:18.437-07:00",
+    "machineType": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b/machineTypes/g2-standard-4",
+    "cpuPlatform": "Intel Cascade Lake",
+    "zone": "https://www.googleapis.com/compute/v1/projects/rooms-lab-20260914/zones/us-east1-b",
+    "scheduling": {
+      "automaticRestart": false,
+      "instanceTerminationAction": "DELETE",
+      "maxRunDuration": {
+        "nanos": 0,
+        "seconds": "7200"
+      },
+      "onHostMaintenance": "TERMINATE",
+      "preemptible": false,
+      "provisioningModel": "STANDARD"
+    },
+    "advancedMachineFeatures": {
+      "enableNestedVirtualization": true
+    }
+  }
+]

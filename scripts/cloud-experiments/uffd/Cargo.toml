@@ -1,0 +1,15 @@
+[package]
+name = "rooms-lab-uffd"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rooms-lab-uffd"
+path = "on_demand_handler.rs"
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+libc = "=0.2.180"
+userfaultfd = "=0.9.0"
+vmm-sys-util = { version = "=0.15.0", features = ["with-serde"] }
