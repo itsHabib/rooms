@@ -24,6 +24,7 @@ class ReportTests(unittest.TestCase):
             events = [{'seq': i + 1, 'room_id': name, 'ts': f'2026-09-14T00:00:0{i}Z', 'event': event}
                       for i, event in enumerate(['slot_allocated', 'workload_started',
                                                 'workload_exited', 'collection_done', 'cleanup_done'])]
+            events[2].update(status='succeeded', exit_code=0)
             (root / 'lifecycle.ndjson').write_text('\n'.join(json.dumps(e) for e in events))
         self.manifest = {'schema_version': 1, 'label': 'fixture', 'preparation_seconds': 20,
                          'estimated_total_cost_usd': 3,
@@ -49,6 +50,29 @@ class ReportTests(unittest.TestCase):
     def test_cleanup_failure_is_not_pass(self):
         path = self.base / 'a/lifecycle.ndjson'
         path.write_text(path.read_text().replace('cleanup_done', 'cleanup_failed'))
+        self.assertFalse(REPORT.inspect_attempt(self.base / 'a')['execution_complete'])
+
+    def test_lifecycle_outcome_must_agree_with_result(self):
+        path = self.base / 'a/lifecycle.ndjson'
+        original = [json.loads(line) for line in path.read_text().splitlines()]
+        for outcome in [{'status': 'failed', 'exit_code': 17},
+                        {'status': 'succeeded', 'exit_code': 17},
+                        {'status': 'failed', 'exit_code': 0},
+                        {'status': 'succeeded', 'exit_code': False}, {}]:
+            events = json.loads(json.dumps(original))
+            events[2].pop('status')
+            events[2].pop('exit_code')
+            events[2].update(outcome)
+            path.write_text('\n'.join(json.dumps(event) for event in events))
+            with self.subTest(outcome=outcome):
+                self.assertFalse(REPORT.inspect_attempt(self.base / 'a')['execution_complete'])
+
+    def test_collection_before_workload_exit_is_incomplete(self):
+        path = self.base / 'a/lifecycle.ndjson'
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+        events[2]['event'], events[3]['event'] = events[3]['event'], events[2]['event']
+        events[3].update(status='succeeded', exit_code=0)
+        path.write_text('\n'.join(json.dumps(event) for event in events))
         self.assertFalse(REPORT.inspect_attempt(self.base / 'a')['execution_complete'])
 
     def test_duplicate_attempts_cannot_inflate_throughput(self):

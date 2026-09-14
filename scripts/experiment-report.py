@@ -51,6 +51,16 @@ def inspect_attempt(directory):
             or type(result.get('exit_code')) is not int or result['exit_code'] != 0):
         problems.append('guest result did not succeed')
     names = [event['event'] for event in events]
+    exits = [event for event in events if event['event'] == 'workload_exited']
+    if (len(exits) != 1 or exits[0].get('status') != 'succeeded'
+            or type(exits[0].get('exit_code')) is not int or exits[0]['exit_code'] != 0
+            or exits[0].get('status') != result.get('status')
+            or exits[0].get('exit_code') != result.get('exit_code')):
+        problems.append('lifecycle workload outcome missing or contradicts successful result')
+    phases = ['workload_started', 'workload_exited', 'collection_done', 'cleanup_done']
+    if (any(names.count(phase) != 1 for phase in phases)
+            or [names.index(phase) for phase in phases] != sorted(names.index(phase) for phase in phases)):
+        problems.append('lifecycle workload/collection/cleanup sequence incomplete or out of order')
     if names.count('collection_done') != 1 or names.count('cleanup_done') != 1:
         problems.append('collection/cleanup completion missing or duplicated')
     if not names or names[-1] != 'cleanup_done':

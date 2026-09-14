@@ -43,10 +43,14 @@ fn field<'a>(value: &'a Value, name: &str) -> &'a Value {
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<()> {
-    let mut file = File::create(path)?;
-    serde_json::to_writer_pretty(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
+    let parent = path.parent().context("JSON output has no parent")?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(pending.as_file_mut(), value)?;
+    pending.write_all(b"\n")?;
+    pending.as_file().sync_all()?;
+    pending.persist(path).context("publish JSON evidence")?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -334,6 +338,20 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_a_report_preserves_existing_readers() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("summary.json");
+        let old = json!({"batches": ["first"]});
+        write_json(&path, &old)?;
+        let previous_reader = File::open(&path)?;
+        let new = json!({"batches": ["first", "second"]});
+        write_json(&path, &new)?;
+        assert_eq!(serde_json::from_reader::<_, Value>(previous_reader)?, old);
+        assert_eq!(serde_json::from_reader::<_, Value>(File::open(path)?)?, new);
+        Ok(())
+    }
 
     #[test]
     fn missing_result_is_not_success() -> Result<()> {
