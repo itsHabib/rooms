@@ -27,6 +27,14 @@ struct Cli {
     command: Command,
 }
 
+fn parse_cpus(value: &str) -> Result<u8, String> {
+    let cpus = value.parse::<u8>().map_err(|e| e.to_string())?;
+    if !(1..=32).contains(&cpus) || (cpus > 1 && !cpus.is_multiple_of(2)) {
+        return Err("CPUs must be 1 or an even number from 2 to 32".to_owned());
+    }
+    Ok(cpus)
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(
     clippy::large_enum_variant,
@@ -38,12 +46,22 @@ enum Command {
         /// Path to the rootfs image (ext4).
         #[arg(long)]
         image: PathBuf,
+        /// Number of virtual CPUs for this cold room.
+        #[arg(long, default_value_t = 1, value_parser = parse_cpus)]
+        cpus: u8,
+        /// Guest RAM in MiB.
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u32).range(128..=65536))]
+        memory: u32,
+        /// Private sparse ext4 overlay in GiB. Requires an updated Alpine image;
+        /// implies --readonly-rootfs. Removed after output collection.
+        #[arg(long, conflicts_with = "keep", value_parser = clap::value_parser!(u32).range(1..=1024))]
+        disk: Option<u32>,
         /// Keep the room alive until Ctrl-C instead of the default 3s auto-shutdown.
         /// Mutually exclusive with the exec paths. Suppresses cleanup for debugging.
         #[arg(long, conflicts_with_all = ["command", "task"])]
         keep: bool,
-        /// Run a single command in the guest via SSH, capture its stdout/stderr on
-        /// host stdout/stderr, propagate its exit code, then shut down.
+        /// Run a command in the guest via SSH, record stdout/stderr under
+        /// /workspace/out/logs (collect with --out), return its exit code, and shut down.
         ///
         /// `conflicts_with task` also makes `--runner cursor --command` invalid:
         /// `cursor` requires `--task` (below), which `--command` excludes.
@@ -53,7 +71,7 @@ enum Command {
         /// path); `cursor` clones `--repo` and drives the baked cursor-runner.js.
         #[arg(long, value_enum, default_value = "command")]
         runner: RunnerKind,
-        /// Git URL cloned into `/workspace/repo` for `--runner cursor`.
+        /// Git URL cloned into `/workspace/repo`; commands run there when supplied.
         #[arg(long, required_if_eq("runner", "cursor"))]
         repo: Option<String>,
         /// Path to the task prompt (markdown) for `--runner cursor`.
@@ -62,8 +80,8 @@ enum Command {
         /// Model id for `--runner cursor` (e.g. "composer-2.5").
         #[arg(long, required_if_eq("runner", "cursor"))]
         model: Option<String>,
-        /// Base git sha for `--runner cursor`; checked out before the run and
-        /// used as the `result.patch` diff base.
+        /// Base git revision checked out before a repository run and used as
+        /// the result.patch diff base. Command runs default to HEAD.
         #[arg(long = "base-sha", required_if_eq("runner", "cursor"))]
         base_sha: Option<String>,
         /// Branch to push the agent's changes to (cursor only); requires `GH_TOKEN`
@@ -75,9 +93,8 @@ enum Command {
         #[arg(long = "out", conflicts_with = "keep")]
         out_dir: Option<PathBuf>,
         /// Mount the rootfs read-only with a tmpfs overlay (needs an image
-        /// carrying `/sbin/overlay-init`). Auto-enabled for `--runner cursor`;
-        /// set it on a `--command` run to make the change set visible to
-        /// `rooms diff`.
+        /// carrying `/sbin/overlay-init`). Auto-enabled for --repo, --disk,
+        /// and --runner cursor. --disk uses ext4 in place of tmpfs.
         #[arg(long = "readonly-rootfs")]
         readonly_rootfs: bool,
         /// Hard wall-clock cap on the run: when reached, the exec is aborted, a
@@ -382,6 +399,7 @@ enum RunnerKind {
     reason = "a flat DTO mirroring independent, orthogonal CLI flags 1:1 — not a state machine to fold into enums"
 )]
 struct RunArgs {
+    resources: firecracker::Resources,
     image: PathBuf,
     keep: bool,
     command: Option<String>,
@@ -757,6 +775,9 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
     let config = RoomsConfig::default();
     match cli.command {
         Command::Run {
+            cpus,
+            memory,
+            disk,
             image,
             keep,
             command,
@@ -778,6 +799,11 @@ async fn dispatch(cli: Cli, secrets: Option<vsock::SecretsPayload>) -> Result<u8
         } => {
             run_room(
                 RunArgs {
+                    resources: firecracker::Resources {
+                        cpus,
+                        memory_mib: memory,
+                        disk_gib: disk,
+                    },
                     image,
                     keep,
                     command,
@@ -1146,6 +1172,12 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
             ))
         })?;
     rootfs::validate_kernel(&kernel).map_err(RoomsError::Rootfs)?;
+    if args.resources.disk_gib.is_some() {
+        rootfs::validate_scratch_image(&args.image).map_err(RoomsError::Internal)?;
+    }
+    if args.repo.is_some() && args.resources.disk_gib.is_none() {
+        rootfs::validate_overlay_image(&args.image).map_err(RoomsError::Internal)?;
+    }
     // `--secret` admission, part two (values were harvested pre-runtime in
     // `main`): prove the guest kernel can even open a vsock, before any slot
     // is claimed or VM booted.
@@ -1178,11 +1210,15 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
     // slot.
     let key = key_path()?;
     let action = resolve_action(&args).await?;
-    // Read-only rootfs + tmpfs overlay on the cursor agent path (it runs
-    // untrusted code) or when the operator opts in with --readonly-rootfs; a
-    // plain `rooms run --command` otherwise keeps a writable rootfs so any
-    // image — including ones without /sbin/overlay-init — still boots.
-    let readonly_rootfs = args.readonly_rootfs || matches!(args.runner, RunnerKind::Cursor);
+    let mut cancellation = matches!(action, Action::Exec(_))
+        .then(CloneSignalSource::arm)
+        .transpose()?;
+    // Repository and disk-backed runs share the immutable image. Bare commands
+    // retain compatibility with older images that lack overlay-init.
+    let readonly_rootfs = args.readonly_rootfs
+        || args.resources.disk_gib.is_some()
+        || args.repo.is_some()
+        || matches!(args.runner, RunnerKind::Cursor);
 
     // Mint the room id before the claim so it stays the canonical identity; then
     // derive the guest network from it.
@@ -1214,6 +1250,7 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         keep: args.keep,
     };
     let boot_req = firecracker::BootRequest {
+        resources: args.resources,
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -1227,12 +1264,24 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         egress: &egress_plan,
         base: false,
     };
-    let mut vm = match firecracker::boot(&boot_req, config).await {
+    let cancelled = async {
+        let Some(source) = &cancellation else {
+            return std::future::pending::<()>().await;
+        };
+        wait_for_clone_termination(&mut source.receiver()).await;
+    };
+    let mut vm = match firecracker::boot_with_cancellation(&boot_req, config, cancelled).await {
         Ok(vm) => vm,
         Err(e) => {
             lifecycle.emit(&Event::BootFailed {
                 error: e.to_string(),
             });
+            if let Some(signal) = cancellation
+                .as_ref()
+                .and_then(|source| observed_clone_termination(&source.receiver))
+            {
+                return Ok(signal.exit_code());
+            }
             return Err(e.into());
         }
     };
@@ -1255,14 +1304,29 @@ async fn run_room_inner(args: RunArgs, config: &RoomsConfig) -> Result<u8, Rooms
         egress: &egress_plan,
     };
     let secrets_delivery = vm.take_secrets_delivery();
-    let outcome = post_boot(&env, &action, &mut vm, secrets_delivery, None).await;
-    warn_legacy_artifact_failure(
-        collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await,
-        "run",
-    );
+    let outcome = post_boot(
+        &env,
+        &action,
+        &mut vm,
+        secrets_delivery,
+        cancellation.as_ref().map(CloneSignalSource::receiver),
+    )
+    .await;
+    let collection =
+        collect_run_artifacts(&env, &action, &claimed, args.out_dir.as_deref(), &mut vm).await;
     let residue = CleanupResidue::for_room(config, &state_base, &claimed, &room_id);
     teardown(vm, args.keep, &lifecycle, &residue).await;
-    outcome
+    // Complete cleanup before acknowledging a signal received during collection.
+    // The retained result.json still describes the already-finished guest command.
+    if let Some(source) = cancellation.as_mut() {
+        if let Some(signal) = source.commit_terminal_handoff().await? {
+            return Ok(signal.exit_code());
+        }
+    }
+    let code = outcome?;
+    // Missing requested output is a run failure even when the guest succeeded.
+    collection?;
+    Ok(code)
 }
 
 fn ensure_witness_available(requested: bool) -> Result<(), RoomsError> {
@@ -1340,6 +1404,7 @@ async fn base_create_inner(args: BaseCreateArgs, config: &RoomsConfig) -> Result
     };
     let egress_plan = egress::resolve(&egress::Policy::None).map_err(RoomsError::Internal)?;
     let boot_req = firecracker::BootRequest {
+        resources: firecracker::Resources::default(),
         kernel: &kernel,
         rootfs: &args.image,
         network: Some(&network),
@@ -3824,9 +3889,18 @@ async fn collect_run_artifacts(
     out_dir: Option<&Path>,
     vm: &mut firecracker::BootedVm,
 ) -> Result<(), RoomsError> {
+    let mut created = Vec::new();
     let collection = match out_dir {
         Some(out_dir) => {
-            collect_and_record(env.guest_target(), env.key, action, out_dir, env.lifecycle).await
+            collect_and_record(
+                env.guest_target(),
+                env.key,
+                action,
+                out_dir,
+                env.lifecycle,
+                &mut created,
+            )
+            .await
         }
         None => Ok(()),
     };
@@ -3835,10 +3909,14 @@ async fn collect_run_artifacts(
         None => None,
     };
     let witness = match (&witnessed, out_dir) {
-        (Some(w), Some(out_dir)) => persist_witness(w, out_dir).await,
+        (Some(w), Some(out_dir)) => persist_witness(w, out_dir, &mut created).await,
         _ => Ok(()),
     };
-    let errors = [collection.err(), witness.err()]
+    let recursive_root = out_dir.filter(|dir| {
+        dir.is_dir() && matches!(action, Action::Exec(_)) && created.iter().any(|path| path == *dir)
+    });
+    let ownership = bounded_artifact_ownership(recursive_root, &created).await;
+    let errors = [collection.err(), witness.err(), ownership.err()]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
@@ -3849,6 +3927,29 @@ async fn collect_run_artifacts(
         "artifact finalization failed: {}",
         errors.join("; ")
     )))
+}
+
+async fn bounded_artifact_ownership(
+    root: Option<&Path>,
+    created: &[PathBuf],
+) -> Result<(), String> {
+    // Parents are repaired without recursion. Command output has its own tree;
+    // both operations share one deadline, so a stalled child cannot stack grace windows.
+    let remaining: Vec<_> = created
+        .iter()
+        .filter(|path| !root.is_some_and(|root| path.starts_with(root)))
+        .cloned()
+        .collect();
+    let repair = async {
+        if let Some(root) = root {
+            runner::return_artifact_ownership(&[root.to_path_buf()], true).await?;
+        }
+        runner::return_artifact_ownership(&remaining, false).await
+    };
+    tokio::time::timeout(PRE_TEARDOWN_GRACE, repair)
+        .await
+        .map_err(|_| "artifact ownership repair timed out".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn warn_legacy_artifact_failure(result: Result<(), RoomsError>, operation: &'static str) {
@@ -3932,27 +4033,25 @@ fn egress_record(plan: &egress::Plan) -> (artifacts::EgressPolicy, Vec<String>) 
 /// gets its witness. Failures are returned after logging so matrix callers can
 /// treat missing evidence as terminal while legacy run/restore behavior stays
 /// best-effort at their call sites.
-async fn persist_witness(w: &Witnessed, out_dir: &Path) -> Result<(), String> {
-    tokio::fs::create_dir_all(out_dir).await.map_err(|error| {
-        warn!(out = %out_dir.display(), %error, "failed to create --out for the witness");
-        format!("create witness output {}: {error}", out_dir.display())
-    })?;
-    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| {
-        warn!(%error, "failed to serialize witness.json");
-        format!("serialize witness.json: {error}")
-    })?;
-    write_out_atomic(out_dir, artifacts::WITNESS_JSON, &bytes)
+async fn persist_witness(
+    w: &Witnessed,
+    out_dir: &Path,
+    written: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    runner::create_output_directory(out_dir, written)
         .await
-        .map_err(|error| {
-            warn!(%error, "failed to write witness.json");
-            format!("write witness.json: {error}")
-        })?;
-    write_out_atomic(out_dir, artifacts::WITNESS_PCAP, &w.raw)
-        .await
-        .map_err(|error| {
-            warn!(%error, "failed to write witness.pcap into --out");
-            format!("write witness.pcap: {error}")
-        })
+        .map_err(|error| error.to_string())?;
+    let bytes = serde_json::to_vec_pretty(&w.summary).map_err(|error| error.to_string())?;
+    for (name, data) in [
+        (artifacts::WITNESS_JSON, bytes.as_slice()),
+        (artifacts::WITNESS_PCAP, w.raw.as_slice()),
+    ] {
+        write_out_atomic(out_dir, name, data)
+            .await
+            .map_err(|error| format!("write {name}: {error}"))?;
+        written.push(out_dir.join(name));
+    }
+    Ok(())
 }
 
 /// Atomic artifact write into `--out`: temp file in the same dir, then rename,
@@ -3977,6 +4076,7 @@ async fn collect_and_record(
     action: &Action,
     out_dir: &Path,
     lifecycle: &Lifecycle,
+    created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     // No-op for Action::Idle (--command/--runner omitted); Action::Keep is
     // already excluded by clap's --out/--keep conflict.
@@ -3984,7 +4084,7 @@ async fn collect_and_record(
         return Ok(());
     }
     lifecycle.emit(&Event::CollectionStarted);
-    let collect = collect_to_host(target, key, out_dir);
+    let collect = collect_to_host(target, key, out_dir, created);
     match tokio::time::timeout(PRE_TEARDOWN_GRACE, collect).await {
         Ok(Ok(())) => {
             lifecycle.emit(&Event::CollectionDone);
@@ -4015,8 +4115,9 @@ async fn collect_to_host(
     target: runner::GuestTarget<'_>,
     key: &Path,
     out_dir: &Path,
+    created: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    let primary = runner::collect_out_to_host(target, key, out_dir).await;
+    let primary = runner::collect_out_to_host_observed(target, key, out_dir, created).await;
     match runner::collect_changeset_to_host(target, key, out_dir).await {
         Ok(()) => info!(out = %out_dir.display(), "collected overlay changeset"),
         Err(e) => warn!(error = %e, "collect overlay changeset failed"),
@@ -4033,6 +4134,25 @@ async fn collect_to_host(
 /// file for the cursor path. clap's `required_if_eq` guarantees the cursor
 /// flags are present, so the `ok_or_else` arms are defensive.
 async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
+    if args
+        .repo
+        .as_deref()
+        .is_some_and(runner::repo_url_has_userinfo)
+    {
+        return Err(RoomsError::Internal(
+            "--repo URL must not embed credentials".to_owned(),
+        ));
+    }
+    if args.base_sha.is_some() && args.repo.is_none() {
+        return Err(RoomsError::Internal(
+            "--base-sha requires --repo".to_owned(),
+        ));
+    }
+    if args.repo.is_some() && matches!(args.runner, RunnerKind::Command) && args.command.is_none() {
+        return Err(RoomsError::Internal(
+            "--repo requires --command or --runner cursor".to_owned(),
+        ));
+    }
     if args.keep {
         return Ok(Action::Keep);
     }
@@ -4074,7 +4194,14 @@ async fn resolve_action(args: &RunArgs) -> Result<Action, RoomsError> {
                 ));
             }
             let action = args.command.clone().map_or(Action::Idle, |command| {
-                Action::Exec(runner::Runner::Command(command))
+                let Some(repo_url) = args.repo.clone() else {
+                    return Action::Exec(runner::Runner::Command(command));
+                };
+                Action::Exec(runner::Runner::RepositoryCommand {
+                    command,
+                    repo_url,
+                    base_sha: args.base_sha.clone().unwrap_or_else(|| "HEAD".to_owned()),
+                })
             });
             Ok(action)
         }
@@ -4251,13 +4378,20 @@ async fn exec_workload(
     // `work` cascades through each child future — kill_on_drop fires on every
     // spawned ssh client — so a Ctrl-C at any point still lets run_room's
     // vm.shutdown() run cleanly.
-    let work = run_workload(env, run, secrets, started_at);
+    let mut completed = None;
+    let work = run_workload(env, run, secrets, started_at, &mut completed);
     let raced = match clone_cancellation {
         Some(cancellation) => {
             race_workload_with_clone_cancellation(work, env.max_wall, Some(cancellation)).await
         }
         None => race_workload(work, env.max_wall).await,
     };
+    if let Some(outcome) = completed
+        .as_ref()
+        .filter(|_| !matches!(raced, ExecRace::Completed(_)))
+    {
+        return record_interrupted_finalization(env, run, outcome, raced).await;
+    }
     match raced {
         ExecRace::Completed(res) => res,
         // The abort outcome is decided the instant the arm fires; the stream
@@ -4302,6 +4436,41 @@ async fn exec_workload(
     }
 }
 
+/// Cancellation after the command exited interrupts finalization, not the command.
+async fn record_interrupted_finalization(
+    env: &PostBootEnv<'_>,
+    run: &runner::Runner,
+    outcome: &runner::GuestExecOutcome,
+    raced: ExecRace,
+) -> Result<u8, RoomsError> {
+    let exit_code = match raced {
+        ExecRace::Cancelled(code) => code,
+        ExecRace::TimedOut => 124,
+        ExecRace::Completed(result) => return result,
+    };
+    env.lifecycle.emit(&Event::WorkloadExited {
+        exit_code: outcome.exit_code,
+        status: workload_status(outcome.status),
+    });
+    env.lifecycle.emit(&Event::WorkloadFailed {
+        error: format!("post-run finalization interrupted (CLI exit {exit_code})"),
+    });
+    let result = ResultJson::from_exec(
+        outcome.exit_code,
+        outcome.status,
+        outcome.started_at,
+        outcome.ended_at,
+        run.command_argv(),
+    );
+    let write = runner::write_guest_result_json(env.guest_target(), env.key, &result);
+    match tokio::time::timeout(PRE_TEARDOWN_GRACE, write).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "failed to retain completed-run result"),
+        Err(_) => warn!("completed-run result write timed out"),
+    }
+    Ok(exit_code)
+}
+
 /// Wait for the workload channel, pass the secrets gate when one is armed,
 /// then run the workload, recording each transition on the lifecycle stream.
 /// Returns the resolved exit code; a post-run push failure fails the run
@@ -4312,6 +4481,7 @@ async fn run_workload(
     run: &runner::Runner,
     secrets: Option<vsock::Delivery>,
     started_at: DateTime<Utc>,
+    completed: &mut Option<runner::GuestExecOutcome>,
 ) -> Result<u8, RoomsError> {
     let lifecycle = env.lifecycle;
     wait_for_channel(env).await?;
@@ -4321,9 +4491,23 @@ async fn run_workload(
     lifecycle.emit(&Event::WorkloadStarted {
         command: run.command_argv(),
     });
-    let outcome = match runner::exec(env.guest_target(), env.key, run, env.config).await {
+    let outcome = match runner::exec_observed(
+        env.guest_target(),
+        env.key,
+        run,
+        env.config,
+        completed,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => {
+            if let Some(outcome) = completed {
+                lifecycle.emit(&Event::WorkloadExited {
+                    exit_code: outcome.exit_code,
+                    status: workload_status(outcome.status),
+                });
+            }
             lifecycle.emit(&Event::WorkloadFailed {
                 error: e.to_string(),
             });
@@ -4334,11 +4518,11 @@ async fn run_workload(
         exit_code: outcome.exit_code,
         status: workload_status(outcome.status),
     });
-    if let Some(push_error) = outcome.push_error {
+    if let Some(post_run_error) = outcome.post_run_error {
         lifecycle.emit(&Event::WorkloadFailed {
-            error: push_error.clone(),
+            error: post_run_error.clone(),
         });
-        return Err(RoomsError::Internal(push_error));
+        return Err(RoomsError::Internal(post_run_error));
     }
     Ok(u8::try_from(outcome.exit_code).unwrap_or(2))
 }
@@ -4629,7 +4813,9 @@ fn room_label(action: &Action) -> String {
     match action {
         Action::Keep => "(keep)".to_owned(),
         Action::Idle => "(idle)".to_owned(),
-        Action::Exec(runner::Runner::Command(cmd)) => cmd.clone(),
+        Action::Exec(
+            runner::Runner::Command(cmd) | runner::Runner::RepositoryCommand { command: cmd, .. },
+        ) => cmd.clone(),
         Action::Exec(runner::Runner::Cursor(req)) => format!("cursor:{}", req.repo_url),
     }
 }
@@ -6101,6 +6287,7 @@ mod tests {
         // Covers the resolve-time guard (the clap conflict can't catch the bare
         // default-command case: `rooms run --image x --push-branch foo`).
         let args = RunArgs {
+            resources: rooms::firecracker::Resources::default(),
             image: PathBuf::from("x"),
             keep: false,
             command: None,
@@ -6237,5 +6424,34 @@ mod tests {
         let long = truncate_label(Some("abcdefghijklmnop"), 5);
         assert_eq!(long.chars().count(), 5, "truncated to max display width");
         assert!(long.ends_with('…'), "elision marker present: {long}");
+    }
+    #[test]
+    fn cold_room_resource_limits_are_enforced() {
+        for (flag, value) in [
+            ("--cpus", "0"),
+            ("--cpus", "33"),
+            ("--cpus", "3"),
+            ("--cpus", "31"),
+            ("--memory", "127"),
+            ("--disk", "0"),
+        ] {
+            assert!(Cli::try_parse_from(["rooms", "run", "--image", "x", flag, value]).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "rooms", "run", "--image", "x", "--cpus", "2", "--memory", "2048", "--disk", "8",
+        ])
+        .expect("valid resources");
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                cpus: 2,
+                memory: 2048,
+                disk: Some(8),
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["rooms", "run", "--image", "x", "--disk", "8", "--keep"]).is_err()
+        );
     }
 }

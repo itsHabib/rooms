@@ -86,6 +86,7 @@ async fn firecracker_exits_early_is_caught() {
     let id = firecracker::mint_room_id();
     let descriptor = rooms::room::RoomDescriptor::default();
     let req = firecracker::BootRequest {
+        resources: firecracker::Resources::default(),
         kernel: &kernel,
         rootfs: &rootfs,
         network: None,
@@ -141,6 +142,7 @@ async fn api_socket_never_appears() {
     let id = firecracker::mint_room_id();
     let descriptor = rooms::room::RoomDescriptor::default();
     let req = firecracker::BootRequest {
+        resources: firecracker::Resources::default(),
         kernel: &kernel,
         rootfs: &rootfs,
         network: None,
@@ -186,6 +188,7 @@ async fn guest_unreachable() {
     let id = firecracker::mint_room_id();
     let descriptor = rooms::room::RoomDescriptor::default();
     let req = firecracker::BootRequest {
+        resources: firecracker::Resources::default(),
         kernel: &kernel,
         rootfs: &rootfs,
         network: None,

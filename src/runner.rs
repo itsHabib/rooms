@@ -51,6 +51,12 @@ const WORKSPACE_UNWRITABLE_MARKER: &str = "ROOMS_WORKSPACE_UNWRITABLE";
 pub enum Runner {
     /// Run the operator's literal command (the existing `--command` path).
     Command(String),
+    /// Clone a repository, run a command at its pinned base, and export edits.
+    RepositoryCommand {
+        command: String,
+        repo_url: String,
+        base_sha: String,
+    },
     /// Drive the baked `cursor-runner.js` one-shot against `/workspace/repo`.
     Cursor(CursorRequest),
 }
@@ -59,7 +65,9 @@ impl Runner {
     /// The argv recorded in `result.json`'s `command` field.
     pub fn command_argv(&self) -> Vec<String> {
         match self {
-            Self::Command(command) => guest_command_argv(command),
+            Self::Command(command) | Self::RepositoryCommand { command, .. } => {
+                guest_command_argv(command)
+            }
             Self::Cursor(_) => cursor_command_argv(),
         }
     }
@@ -304,10 +312,10 @@ pub struct GuestExecOutcome {
     pub status: RunStatus,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
-    /// A post-run branch-push failure (cursor + `--push-branch` only). The
+    /// A post-run patch-export or branch-push failure. The
     /// workload finished and `exit_code`/`result.json` are real; the caller
     /// decides whether the persist failure fails the run.
-    pub push_error: Option<String>,
+    pub post_run_error: Option<String>,
 }
 
 /// Drive `runner` in the guest, writing `result.json` per the runner contract.
@@ -322,9 +330,41 @@ pub async fn exec(
     runner: &Runner,
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
+    exec_observed(target, key_path, runner, config, &mut None).await
+}
+
+/// Like [`exec`], retaining the actual command exit before fallible post-run I/O.
+/// The caller keeps this value when cancellation drops patch export or result writing.
+pub async fn exec_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    runner: &Runner,
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
+    *completed = None;
     match runner {
-        Runner::Command(command) => exec_in_guest(target, key_path, command, config).await,
-        Runner::Cursor(request) => exec_cursor_in_guest(target, key_path, request, config).await,
+        Runner::Command(command) => {
+            exec_in_guest_observed(target, key_path, command, config, completed).await
+        }
+        Runner::RepositoryCommand {
+            command,
+            repo_url,
+            base_sha,
+        } => {
+            exec_repository_command(
+                target,
+                key_path,
+                command,
+                (repo_url, base_sha),
+                config,
+                completed,
+            )
+            .await
+        }
+        Runner::Cursor(request) => {
+            exec_cursor_in_guest_observed(target, key_path, request, config, completed).await
+        }
     }
 }
 
@@ -334,20 +374,42 @@ pub async fn collect_out_to_host(
     key_path: &Path,
     host_dir: &Path,
 ) -> Result<()> {
+    let mut created = Vec::new();
+    let result = collect_out_to_host_observed(target, key_path, host_dir, &mut created).await;
+    let ownership = async {
+        if created.iter().any(|path| path == host_dir) {
+            return_artifact_ownership(&[host_dir.to_path_buf()], true).await?;
+        }
+        created.retain(|path| path != host_dir);
+        return_artifact_ownership(&created, false).await
+    }
+    .await;
+    result?;
+    ownership
+}
+
+/// Collect output while retaining created directories for the caller's finalizer.
+pub async fn collect_out_to_host_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    host_dir: &Path,
+    created: &mut Vec<PathBuf>,
+) -> Result<()> {
     // Fresh dir per collection; a missing dir is fine, any other remove failure is fatal.
     match tokio::fs::remove_dir_all(host_dir).await {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("clear --out dir {}", host_dir.display())),
     }
-    tokio::fs::create_dir_all(host_dir)
-        .await
-        .with_context(|| format!("create --out dir {}", host_dir.display()))?;
+    create_output_directory(host_dir, created).await?;
     // Empty stream (not a `cd` error) when /workspace/out is absent; `.output()` drains both pipes.
     let ssh_out = ssh_command(
         target,
         key_path,
-        "if [ -d /workspace/out ]; then tar cf - -C /workspace/out .; else exit 0; fi",
+        "if [ ! -d /workspace/out ]; then exit 0; fi; \
+         if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then \
+             exec sudo -n tar cf - -C /workspace/out .; fi; \
+         exec tar cf - -C /workspace/out .",
         false,
         SSH_AUXILIARY_CONNECT_TIMEOUT,
     )?
@@ -367,13 +429,27 @@ pub async fn collect_out_to_host(
     }
     // The archive is guest-controlled: reject unsafe members before extracting.
     ensure_tar_regular_only(&ssh_out.stdout).await?;
-    let extract = run_host_tar(&ssh_out.stdout, &["-xf", "-", "-C"], Some(host_dir)).await?;
+    let extract = run_host_tar(
+        &ssh_out.stdout,
+        &["--no-same-owner", "--no-same-permissions", "-xf", "-", "-C"],
+        Some(host_dir),
+    )
+    .await?;
     if !extract.status.success() {
         let stderr = String::from_utf8_lossy(&extract.stderr);
         anyhow::bail!(
             "host tar extract failed (exit {}): {stderr}",
             extract.status
         );
+    }
+    let modes = Command::new("chmod")
+        .args(["-R", "u+rwX,a-s", "--"])
+        .arg(host_dir)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !modes.status.success() {
+        anyhow::bail!("normalize collected artifact permissions failed");
     }
     Ok(())
 }
@@ -400,6 +476,50 @@ find "$UP" \( -type f -o -type l -o -type b -o -type p -o -type s -o -type c \) 
   elif [ -e "$LOW/$rel" ] || [ -L "$LOW/$rel" ]; then printf "M\t%s\0" "$rel"
   else printf "A\t%s\0" "$rel"; fi
 done'"#;
+
+/// Create an output path, retaining only directories this invocation created.
+/// Callers can repair ownership even when creation fails partway through.
+pub async fn create_output_directory(path: &Path, created: &mut Vec<PathBuf>) -> Result<()> {
+    let ancestors: Vec<_> = path
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect();
+    for dir in ancestors.into_iter().rev() {
+        match tokio::fs::create_dir(dir).await {
+            Ok(()) => created.push(dir.to_path_buf()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("create output {}", dir.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return finalized output to the invoking sudo user, without following links.
+/// Direct root invocations retain root ownership.
+pub async fn return_artifact_ownership(paths: &[PathBuf], recursive: bool) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let (Ok(uid), Ok(gid)) = (std::env::var("SUDO_UID"), std::env::var("SUDO_GID")) else {
+        return Ok(());
+    };
+    let owner = format!("{}:{}", uid.parse::<u32>()?, gid.parse::<u32>()?);
+    let output = Command::new("chown")
+        .args([if recursive { "-hR" } else { "-h" }, "--", &owner])
+        .args(paths)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "return --out ownership: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
 
 /// Enumerate the overlay change set in the guest and write `changeset.json` into
 /// `host_dir`. Best-effort and read-only: callers run this after
@@ -537,8 +657,18 @@ pub async fn exec_in_guest(
     command: &str,
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
+    exec_in_guest_observed(target, key_path, command, config, &mut None).await
+}
+
+async fn exec_in_guest_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    command: &str,
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
     let connect_timeout = config.guest_reach_timeout;
-    let run = run_wrapped(target, key_path, command, connect_timeout).await?;
+    let run = run_wrapped(target, key_path, command, connect_timeout, completed).await?;
     let status = ResultJson::status_from_exit_code(run.exit_code);
     let result = ResultJson::from_exec(
         run.exit_code,
@@ -554,7 +684,44 @@ pub async fn exec_in_guest(
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
-        push_error: None,
+        post_run_error: None,
+    })
+}
+
+async fn exec_repository_command(
+    target: GuestTarget<'_>,
+    key: &Path,
+    command: &str,
+    source: (&str, &str),
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
+    let (repo, base) = source;
+    let timeout = config.guest_reach_timeout;
+    let pinned_base = clone_repo_in_guest(target, key, repo, base, timeout).await?;
+    let inner = format!(
+        "cd /workspace/repo && bash -c {}",
+        shell_single_quote(command)
+    );
+    let run = run_wrapped(target, key, &inner, timeout, completed).await?;
+    let patch = generate_result_patch(target, key, &pinned_base, timeout).await;
+    let status = ResultJson::status_from_exit_code(run.exit_code);
+    let mut result = ResultJson::from_exec(
+        run.exit_code,
+        status,
+        run.started_at,
+        run.ended_at,
+        guest_command_argv(command),
+    );
+    result.patch_path = patch.as_ref().ok().map(|()| "result.patch".to_owned());
+    write_guest_result_json_with_timeout(target, key, &result, timeout).await?;
+    // Return the real exit alongside export failure so lifecycle records both.
+    Ok(GuestExecOutcome {
+        exit_code: run.exit_code,
+        status,
+        started_at: run.started_at,
+        ended_at: run.ended_at,
+        post_run_error: patch.err().map(|error| error.to_string()),
     })
 }
 
@@ -572,8 +739,18 @@ pub async fn exec_cursor_in_guest(
     request: &CursorRequest,
     config: &RoomsConfig,
 ) -> Result<GuestExecOutcome> {
+    exec_cursor_in_guest_observed(target, key_path, request, config, &mut None).await
+}
+
+async fn exec_cursor_in_guest_observed(
+    target: GuestTarget<'_>,
+    key_path: &Path,
+    request: &CursorRequest,
+    config: &RoomsConfig,
+    completed: &mut Option<GuestExecOutcome>,
+) -> Result<GuestExecOutcome> {
     let connect_timeout = config.guest_reach_timeout;
-    clone_repo_in_guest(
+    let pinned_base = clone_repo_in_guest(
         target,
         key_path,
         &request.repo_url,
@@ -595,16 +772,18 @@ pub async fn exec_cursor_in_guest(
         key_path,
         &format!("node {CURSOR_RUNNER_JS} < /dev/null"),
         connect_timeout,
+        completed,
     )
     .await?;
 
-    let patch_written = match generate_result_patch(target, key_path, connect_timeout).await {
-        Ok(()) => true,
-        Err(err) => {
-            warn!(error = %err, "failed to generate result.patch; omitting patch_path");
-            false
-        }
-    };
+    let patch_written =
+        match generate_result_patch(target, key_path, &pinned_base, connect_timeout).await {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(error = %err, "failed to generate result.patch; omitting patch_path");
+                false
+            }
+        };
 
     // Self-persist: if a push branch was requested AND the agent succeeded,
     // commit the agent's changes and push them (mirrors cursor cloud). A failed
@@ -614,8 +793,15 @@ pub async fn exec_cursor_in_guest(
     let mut push_err: Option<anyhow::Error> = None;
     let pushed_branch = match (&request.push_branch, run.exit_code) {
         (Some(branch), 0) => {
-            match push_branch_in_guest(target, key_path, &request.repo_url, branch, connect_timeout)
-                .await
+            match push_branch_in_guest(
+                target,
+                key_path,
+                &request.repo_url,
+                branch,
+                &pinned_base,
+                connect_timeout,
+            )
+            .await
             {
                 Ok(true) => Some(branch.clone()),
                 Ok(false) => None,
@@ -667,7 +853,7 @@ pub async fn exec_cursor_in_guest(
         status,
         started_at: run.started_at,
         ended_at: run.ended_at,
-        push_error: push_err.map(|e| e.to_string()),
+        post_run_error: push_err.map(|e| e.to_string()),
     })
 }
 
@@ -695,6 +881,7 @@ async fn run_wrapped(
     key_path: &Path,
     inner: &str,
     connect_timeout: Duration,
+    completed: &mut Option<GuestExecOutcome>,
 ) -> Result<WrappedRun> {
     let started_at = Utc::now();
     let quoted_command = shell_single_quote(inner);
@@ -740,6 +927,13 @@ async fn run_wrapped(
     }
 
     let exit_code = parse_remote_exit_code(&output.stdout)?;
+    *completed = Some(GuestExecOutcome {
+        exit_code,
+        status: ResultJson::status_from_exit_code(exit_code),
+        started_at,
+        ended_at,
+        post_run_error: None,
+    });
     Ok(WrappedRun {
         exit_code,
         started_at,
@@ -747,37 +941,51 @@ async fn run_wrapped(
     })
 }
 
-/// Clone `repo_url` into `/workspace/repo`, check out `base_sha`, and pin the
-/// resolved base commit as `refs/rooms/base`.
-///
-/// Pinning a ref (rather than re-resolving `base_sha` later) keeps the patch and
-/// push steps comparing against a concrete commit even when `base_sha` is
-/// symbolic (e.g. `HEAD`) — otherwise it would re-resolve to the agent's tip and
-/// look like "no changes". A hard error: the cursor runner can't run without a
-/// populated repo. The URL and sha are single-quoted into the remote shell so
-/// neither can inject.
+fn resolve_base_command(repo: &str, revision: &str) -> String {
+    let repo = shell_single_quote(repo);
+    let direct = shell_single_quote(&format!("{revision}^{{commit}}"));
+    let remote = shell_single_quote(&format!("refs/remotes/origin/{revision}^{{commit}}"));
+    format!(
+        "git -C {repo} rev-parse --verify --end-of-options {direct} 2>/dev/null || \
+         git -C {repo} rev-parse --verify --end-of-options {remote}"
+    )
+}
+
+/// Clone and resolve the requested base before running guest code. Keep the
+/// resolved object ID in host memory so guest ref edits cannot change the diff base.
 async fn clone_repo_in_guest(
     target: GuestTarget<'_>,
     key_path: &Path,
     repo_url: &str,
     base_sha: &str,
     connect_timeout: Duration,
-) -> Result<()> {
+) -> Result<String> {
     let url = shell_single_quote(repo_url);
-    let sha = shell_single_quote(base_sha);
+    let resolve = resolve_base_command("/workspace/repo", base_sha);
     let remote = format!(
-        "rm -rf /workspace/repo && git clone {url} /workspace/repo && \
-         git -C /workspace/repo checkout {sha} && \
-         git -C /workspace/repo update-ref refs/rooms/base HEAD"
+        "rm -rf /workspace/repo && git clone -- {url} /workspace/repo && \
+         base=$({resolve}) && \
+         git -C /workspace/repo checkout --detach \"$base\" && \
+         git -C /workspace/repo rev-parse HEAD"
     );
-    run_setup_ssh(
-        target,
-        key_path,
-        &remote,
-        "clone repo in guest",
-        connect_timeout,
-    )
-    .await
+    let output = ssh_command(target, key_path, &remote, false, connect_timeout)?
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "clone repo in guest failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let base = String::from_utf8(output.stdout)?.trim().to_owned();
+    if !matches!(base.len(), 40 | 64) || !base.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid resolved repository base");
+    }
+    Ok(base)
 }
 
 /// Resolve the optional repository entirely on the host and build the
@@ -871,7 +1079,7 @@ fn run_git(cwd: &Path, args: &[&str], action: &str) -> Result<(), FirecrackerErr
     )))
 }
 
-fn repo_url_has_userinfo(repo: &str) -> bool {
+pub fn repo_url_has_userinfo(repo: &str) -> bool {
     repo.split_once("://")
         .and_then(|(_, rest)| rest.split('/').next())
         .is_some_and(|authority| authority.contains('@'))
@@ -915,7 +1123,7 @@ async fn stage_cursor_input(
 }
 
 /// Generate `/workspace/out/result.patch` from `git diff` against the pinned
-/// `refs/rooms/base`, capturing both committed and working-tree changes.
+/// host-retained base object ID, capturing committed and working-tree changes.
 ///
 /// Best effort: a git error still leaves an (empty) patch file via the `>`
 /// redirect, but a transport failure propagates so the caller can omit
@@ -923,14 +1131,18 @@ async fn stage_cursor_input(
 async fn generate_result_patch(
     target: GuestTarget<'_>,
     key_path: &Path,
+    pinned_base: &str,
     connect_timeout: Duration,
 ) -> Result<()> {
-    let remote = "mkdir -p /workspace/out && cd /workspace/repo && git add -A 2>/dev/null; \
-         git diff --cached refs/rooms/base > /workspace/out/result.patch 2>/dev/null || true";
+    let base = shell_single_quote(pinned_base);
+    let remote = format!(
+        "mkdir -p /workspace/out && cd /workspace/repo && git add -A && \
+         git diff --binary --cached {base} > /workspace/out/result.patch"
+    );
     run_setup_ssh(
         target,
         key_path,
-        remote,
+        &remote,
         "generate result.patch",
         connect_timeout,
     )
@@ -948,25 +1160,20 @@ async fn push_branch_in_guest(
     key_path: &Path,
     repo_url: &str,
     branch: &str,
+    pinned_base: &str,
     connect_timeout: Duration,
 ) -> Result<bool> {
     let url = shell_single_quote(repo_url);
     let branch_q = shell_single_quote(branch);
-    // Commit any working-tree changes the agent left, then push iff HEAD has
-    // moved past the pinned base (`refs/rooms/base`, set at clone). Comparing the
-    // pinned ref — not a re-resolved base_sha — covers BOTH a working-tree edit
-    // committed just now AND the cursor SDK committing internally (clean tree,
-    // HEAD already ahead), and stays correct when base_sha was symbolic. `exit 3`
-    // marks "nothing to push"; `set -e` maps real git failures to Err. The
-    // credential helper echoes `$GH_TOKEN` at git-invoke time; the single quotes
-    // keep the guest shell from expanding it into argv.
+    let base = shell_single_quote(pinned_base);
+    // Compare against the object ID retained by the host before guest execution.
     let remote = format!(
         "set -e; cd /workspace/repo; git checkout -B {branch_q}; git add -A; \
          if ! git diff --cached --quiet; then \
              git -c user.email=cursor@rooms.local -c user.name='rooms cursor agent' \
              commit -q -m 'rooms cursor agent run' -m 'Co-authored-by: Cursor <cursoragent@cursor.com>'; \
          fi; \
-         if [ \"$(git rev-parse HEAD)\" = \"$(git rev-parse refs/rooms/base)\" ]; then exit 3; fi; \
+         if [ \"$(git rev-parse HEAD)\" = {base} ]; then exit 3; fi; \
          git -c credential.helper='!f(){{ echo username=x-access-token; echo \"password=$GH_TOKEN\"; }}; f' \
              push {url} HEAD:{branch_q}"
     );
@@ -1000,8 +1207,7 @@ pub async fn ensure_guest_artifact_skeleton(
     key_path: &Path,
 ) -> Result<()> {
     let remote = "mkdir -p /workspace/out/logs \
-         && : > /workspace/out/logs/stdout.log \
-         && : > /workspace/out/logs/stderr.log";
+         && touch /workspace/out/logs/stdout.log /workspace/out/logs/stderr.log";
     run_setup_ssh(
         target,
         key_path,
@@ -1239,6 +1445,53 @@ mod tests {
         reason = "test module: panicky lints are noise in tests"
     )]
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires sudo and ROOMS_TEST_COLLECT_FIXTURE ssh tar fixture on PATH"]
+    async fn direct_collection_returns_restrictive_output_to_caller() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        assert_eq!(
+            std::env::var("ROOMS_TEST_COLLECT_FIXTURE").as_deref(),
+            Ok("1")
+        );
+        let uid: u32 = std::env::var("SUDO_UID").unwrap().parse().unwrap();
+        assert_ne!(uid, 0, "requires a non-root invoking user");
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            directory.path().metadata().unwrap().uid(),
+            0,
+            "requires root"
+        );
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = directory.path().join("created-parent/run");
+        super::collect_out_to_host(
+            GuestTarget::flat("127.0.0.1"),
+            std::path::Path::new("/unused-test-key"),
+            &out,
+        )
+        .await
+        .unwrap();
+        for path in [
+            out.parent().unwrap().to_path_buf(),
+            out.clone(),
+            out.join("private"),
+        ] {
+            assert_eq!(path.metadata().unwrap().uid(), uid, "{}", path.display());
+        }
+        assert_eq!(directory.path().metadata().unwrap().uid(), 0);
+        assert_eq!(
+            out.join("private").metadata().unwrap().mode() & 0o777,
+            0o600
+        );
+        let read = std::process::Command::new("sudo")
+            .args(["-n", "-u", &format!("#{uid}"), "cat"])
+            .arg(out.join("private"))
+            .output()
+            .unwrap();
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(read.stdout, b"private artifact\n");
+    }
+
     use std::time::Duration;
 
     use super::{
@@ -1249,6 +1502,78 @@ mod tests {
     };
     use crate::config::RoomsConfig;
     use crate::error::FirecrackerError;
+
+    #[cfg(unix)]
+    #[test]
+    fn base_revision_resolves_a_nondefault_remote_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let remote = temp.path().join("remote.git");
+        let clone = temp.path().join("clone");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            super::run_git(cwd, args, "fixture git").unwrap();
+        };
+        git(
+            temp.path(),
+            &["init", "-b", "main", source.to_str().unwrap()],
+        );
+        let commit = [
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@rooms.local",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ];
+        git(&source, &commit);
+        git(&source, &["checkout", "-b", "feature"]);
+        git(&source, &commit);
+        let feature = std::process::Command::new("git")
+            .current_dir(&source)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
+        git(&source, &["checkout", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            temp.path(),
+            &["clone", remote.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(super::resolve_base_command(
+                clone.to_str().unwrap(),
+                "feature",
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, feature);
+        let missing = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(super::resolve_base_command(
+                clone.to_str().unwrap(),
+                "does-not-exist",
+            ))
+            .output()
+            .unwrap();
+        assert!(!missing.status.success());
+    }
 
     #[test]
     fn shell_single_quote_handles_meta_and_embedded_quotes() {

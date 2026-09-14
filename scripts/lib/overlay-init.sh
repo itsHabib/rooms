@@ -6,7 +6,14 @@ mount -t proc     none /proc
 mount -t sysfs    none /sys
 mount -t devtmpfs none /dev 2>/dev/null || true
 
-mount -t tmpfs tmpfs /mnt            # /mnt exists in the image; holds upper+work+newroot
+# A cold room may supply a private second virtio drive. Fail the boot if it
+# cannot mount: falling back to RAM would silently violate the requested capacity.
+if grep -qw 'rooms.scratch=1' /proc/cmdline; then
+  mount -t ext4 /dev/vdb /mnt
+fi
+if ! grep -qw 'rooms.scratch=1' /proc/cmdline; then
+  mount -t tmpfs tmpfs /mnt
+fi
 mkdir -p /mnt/upper /mnt/work /mnt/newroot
 mount -t overlay overlay \
   -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work \

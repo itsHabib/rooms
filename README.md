@@ -42,6 +42,26 @@ The rest is another layer's job, on purpose — `rooms` stays focused on the mic
 
 Where the focus ends today (full list + rationale in [`docs/vision.md`](docs/vision.md)): not Codespaces-but-local, no persistent dev workspace or interactive shell-as-product, no web preview / port forwarding, no Docker / devcontainer / generic container runtime, no multi-tenant control plane, no cross-host orchestration. Those are layers other tools own, or that `rooms` adds when a real need shows up — not permanent vetoes. Rooms are ephemeral — a room dies when the command finishes.
 
+## Repository commands with private storage
+
+Rebuild the Alpine image with the current `scripts/build-rootfs-alpine.sh`, then:
+
+```sh
+sudo -E rooms run --image ~/rooms/images/agent-alpine.ext4 \
+  --repo https://github.com/itsHabib/rooms --base-sha HEAD \
+  --cpus 2 --memory 1024 --disk 8 \
+  --command 'bash -n scripts/lib/overlay-init.sh' \
+  --max-wall 120s --out /tmp/rooms-check
+cat /tmp/rooms-check/logs/stdout.log
+```
+
+`--memory` is MiB; `--disk` is GiB. Repository commands run in `/workspace/repo`
+and export edits as `result.patch`, including on a nonzero command exit. The disk
+backs a private writable overlay over the read-only image and is discarded after
+collection. Logs survive timeout/SIGTERM when the guest remains reachable. These
+flags configure cold rooms; prepared snapshots keep their recorded machine shape.
+See the [scope and acceptance contract](docs/features/usable-command-rooms/spec.md).
+
 ## CLI surface
 
 `run` remains the cold create → exec → collect → destroy path. `base-create` → `snapshot` produces a reusable warm source; `restore` consumes it one room at a time, while `clone` fans it out concurrently.
