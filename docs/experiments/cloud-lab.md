@@ -58,13 +58,21 @@ Each run writes:
   source data. A process that disappears during sampling is marked unavailable.
 - `host-*.json`: live Room/VMM inventory, namespaces, interfaces and mounts.
 - `summary.json`: CLI status, actual receipt count, expected-patch checks,
-  sampling errors, batch wall time and useful completions per minute.
+  sampling errors, batch wall time and useful completions per minute; per-clone
+  dispatch-to-resume-ack and dispatch-to-SSH samples, with missing counts.
 
 Keep preparation separate from reuse. Batch wall time is not per-job p99.
 Guest `started_at` to `ended_at` measures command execution, not host admission
 or guest readiness. A Firecracker resume log occurs before the hygiene handshake;
 it must not be labeled workload-ready. Small repeat counts are descriptive, not
 stable tail-latency estimates. Record missing measurements explicitly.
+
+Clone JSON now includes `readiness.dispatch_to_resume_ack_seconds` and
+`readiness.dispatch_to_ssh_ready_seconds`. These monotonic clocks start after
+shared preparation and network allocation; SSH includes the batch restore barrier.
+Missing milestones remain null. Measurement alone enables no extra ping probes.
+See [the local readiness experiment](readiness-results/README.md) for raw samples,
+failure controls and the costs still excluded.
 
 The harness verifies that no live Rooms/VMMs or lab network/jail remnants remain.
 Snapshot reservations are intentionally durable and do not mean a VM is running.
