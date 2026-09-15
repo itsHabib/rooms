@@ -411,6 +411,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn replacing_a_report_preserves_existing_readers() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -422,6 +423,36 @@ mod tests {
         write_json(&path, &new)?;
         assert_eq!(serde_json::from_reader::<_, Value>(previous_reader)?, old);
         assert_eq!(serde_json::from_reader::<_, Value>(File::open(path)?)?, new);
+        Ok(())
+    }
+
+    #[test]
+    fn replacing_a_closed_report_publishes_complete_json() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("summary.json");
+        write_json(&path, &json!({"batches": ["first"]}))?;
+        let new = json!({"batches": ["first", "second"]});
+        write_json(&path, &new)?;
+        assert_eq!(serde_json::from_reader::<_, Value>(File::open(path)?)?, new);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_reader_blocking_replacement_preserves_the_previous_report() -> Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("summary.json");
+        let old = json!({"batches": ["first"]});
+        write_json(&path, &old)?;
+        // Deny delete sharing explicitly: Windows must refuse replacement.
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)?;
+        assert!(write_json(&path, &json!({"batches": ["second"]})).is_err());
+        assert_eq!(serde_json::from_reader::<_, Value>(reader)?, old);
+        assert_eq!(serde_json::from_reader::<_, Value>(File::open(path)?)?, old);
         Ok(())
     }
 
