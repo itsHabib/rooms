@@ -1,0 +1,11 @@
+{
+  "code_head": "180aa087fef961b634a4af06dc83e9572f7d1680",
+  "sha256": {
+    "src/lifecycle.rs": "c5d5dbf1f80cfe6436341adb78afbba9530df42e5f41cac9da097f0bccfab3fc",
+    "src/main.rs": "5955f0f2fdabce97a1a8617ac2baf31da9a33d7357c8c27b7b612d0611e929a7",
+    "examples/cloud-lab.rs": "045414a89e3374d8e8f8de807c334694b477d2b15ec90452bbe5049aa624d46d",
+    "target/release/rooms": "ad708957fb074d119889dd95f12fb889c8aa794428d41c4d373647571f61c350",
+    "target/release/examples/cloud-lab": "1137cd73ba1bcf8fec6e970f8c978bd18e62a8436c98fbd5a382e1c1c02446fc"
+  },
+  "environment": "Existing local Lima VZ aarch64 guest, 6 vCPU, 4 GiB RAM, nested KVM. No GCP resources created."
+}

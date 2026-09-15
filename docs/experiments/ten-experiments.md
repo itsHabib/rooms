@@ -8,9 +8,9 @@ Source for experiments 1–10: PR124 at `f74955eb0a048e1230f573ac60b7644e12a893a
 
 | # | Experiment | Current evidence | Remaining execution |
 |---|---|---|---|
-|1|Density ramp|Nested GCP8/16/32/64/128 twice:496/496 passed; useful throughput peaks around32|Published memory/command distributions; bare-metal comparison and admission-to-ready distribution remain unmeasured|
+|1|Density ramp|Nested GCP8/16/32/64/128 twice:496/496 passed; useful throughput peaks around32|[Local dispatch/resume/SSH samples](readiness-results/README.md) now retained at1/2/4; full admission-to-ready and bare-metal comparison remain unmeasured|
 |2|Shared Nix memory|Fallback measured at16/32/64:112/112 passed,182.5MiB store cached once; guest cache still duplicates memory|Published retained PSS/cache samples and interpretation; no DAX result claimed|
-|3|Cold versus lazy restore|Nested cold/restore plus nine File and nine UFFD backing/trial comparisons; UFFD passed but slower|Published loader lifetime failure/fix and matched-integrity comparison; bare-metal and readiness distributions remain unmeasured|
+|3|Cold versus lazy restore|Nested cold/restore plus nine File and nine UFFD backing/trial comparisons; UFFD passed but slower|Readiness instrumentation and local File-restore smoke retained; matched cold/File/UFFD readiness distributions and bare-metal remain unmeasured|
 |4|Fork-the-world agents|Two fixed candidate patches, separate oracle verifier|4/8/16 actual decision branches, serial baseline, scoped model budget and outcome comparison|
 |5|Rooms that travel|371MB bundle through private object storage; two second-host resumes passed16tests and identical patch SHA|Receipts and reproduction guide published; measured only on matching Cascade Lake hosts|
 |6|Hostile tenants|64 mixed:32/32 normal passed;8diskENOSPC,4storeEROFS,4egress failures; memory7timeouts+1OOM; cleanup|Positive observe/none/observe endpoint control passed; normal p99 rose to21.4s vs11.1s32-normal baseline. Receipts published; no general multi-tenant qualification|

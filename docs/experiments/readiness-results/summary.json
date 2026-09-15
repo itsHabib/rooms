@@ -1,0 +1,471 @@
+{
+  "batches": [
+    {
+      "cli_exit": 0,
+      "completed_per_minute": 15.55070732996176,
+      "count": 1,
+      "elapsed_seconds": 3.858345394,
+      "execution_complete_count": 1,
+      "execution_valid": true,
+      "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately.",
+      "readiness": {
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "measured": 1,
+        "origin": "per-clone dispatch, after shared preparation and network allocation",
+        "requested": 1,
+        "samples": [
+          {
+            "resume_ack_seconds": 0.686529597,
+            "room_id": "01m2hem510h165s02k5hj5ysch",
+            "ssh_ready_seconds": 1.214501164
+          }
+        ],
+        "unavailable": 0
+      },
+      "receipts": [
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-1-trial-0/out/01m2hem510h165s02k5hj5ysch",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:07.653245768Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:06.266789957Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "61823c1e398bd6f7f79020ccbc75ac8fb9c7298a4b27f245e6c508711b20b595"
+        }
+      ],
+      "sampling_error": null,
+      "schema_version": 1,
+      "spawn_error": null,
+      "trial": 0
+    },
+    {
+      "cli_exit": 0,
+      "completed_per_minute": 15.425494166329926,
+      "count": 1,
+      "elapsed_seconds": 3.889664691,
+      "execution_complete_count": 1,
+      "execution_valid": true,
+      "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately.",
+      "readiness": {
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "measured": 1,
+        "origin": "per-clone dispatch, after shared preparation and network allocation",
+        "requested": 1,
+        "samples": [
+          {
+            "resume_ack_seconds": 0.675848734,
+            "room_id": "01m2hem8sxr72ksvcs482rhtmb",
+            "ssh_ready_seconds": 1.200452259
+          }
+        ],
+        "unavailable": 0
+      },
+      "receipts": [
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-1-trial-1/out/01m2hem8sxr72ksvcs482rhtmb",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:11.574417659Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:10.141027248Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "5fa487ffc4288d42d2fea7e6d255d720f1e314c94cc52dd509a27415cdab82ba"
+        }
+      ],
+      "sampling_error": null,
+      "schema_version": 1,
+      "spawn_error": null,
+      "trial": 1
+    },
+    {
+      "cli_exit": 0,
+      "completed_per_minute": 23.416972434987606,
+      "count": 2,
+      "elapsed_seconds": 5.124488246,
+      "execution_complete_count": 2,
+      "execution_valid": true,
+      "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately.",
+      "readiness": {
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "measured": 2,
+        "origin": "per-clone dispatch, after shared preparation and network allocation",
+        "requested": 2,
+        "samples": [
+          {
+            "resume_ack_seconds": 0.959584881,
+            "room_id": "01m2hemckvd5t8523bd92c8caw",
+            "ssh_ready_seconds": 1.660987929
+          },
+          {
+            "resume_ack_seconds": 0.950655133,
+            "room_id": "01m2hemckvw0rj0cvj38zwjc64",
+            "ssh_ready_seconds": 1.68551766
+          }
+        ],
+        "unavailable": 0
+      },
+      "receipts": [
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-2-trial-0/out/01m2hemckvd5t8523bd92c8caw",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:16.526337730Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:14.515713442Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "d34a960caaf4868e7572d2c6b4e1ae3a543b98dc485b9f8f554bd997ff5b58e3"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-2-trial-0/out/01m2hemckvw0rj0cvj38zwjc64",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:16.604994944Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:14.540265006Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "0930e9181d2826324708fca8a7584db3582bb26918961f5cb435945e767b864f"
+        }
+      ],
+      "sampling_error": null,
+      "schema_version": 1,
+      "spawn_error": null,
+      "trial": 0
+    },
+    {
+      "cli_exit": 0,
+      "completed_per_minute": 22.52604146817059,
+      "count": 2,
+      "elapsed_seconds": 5.327167677,
+      "execution_complete_count": 2,
+      "execution_valid": true,
+      "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately.",
+      "readiness": {
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "measured": 2,
+        "origin": "per-clone dispatch, after shared preparation and network allocation",
+        "requested": 2,
+        "samples": [
+          {
+            "resume_ack_seconds": 0.93977282,
+            "room_id": "01m2hemhmcd8s64d8hk3v1kqtq",
+            "ssh_ready_seconds": 1.656482877
+          },
+          {
+            "resume_ack_seconds": 0.928823229,
+            "room_id": "01m2hemhmc70we2kax3h71w34v",
+            "ssh_ready_seconds": 1.679463104
+          }
+        ],
+        "unavailable": 0
+      },
+      "receipts": [
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-2-trial-1/out/01m2hemhmc70we2kax3h71w34v",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:21.661251418Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:19.641411746Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "41efa72d11563756fe0eb7b8fe94348aebf401b5ec8ef4e0bbfc5cf4ed9251a9"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-2-trial-1/out/01m2hemhmcd8s64d8hk3v1kqtq",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:21.674829250Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:19.618456018Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "2de51b4968b7b294573aa67b5fe0225b634d620d34030039a03b27a919c1ceec"
+        }
+      ],
+      "sampling_error": null,
+      "schema_version": 1,
+      "spawn_error": null,
+      "trial": 1
+    },
+    {
+      "cli_exit": 0,
+      "completed_per_minute": 19.82359833577297,
+      "count": 4,
+      "elapsed_seconds": 12.106782832,
+      "execution_complete_count": 4,
+      "execution_valid": true,
+      "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately.",
+      "readiness": {
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "measured": 4,
+        "origin": "per-clone dispatch, after shared preparation and network allocation",
+        "requested": 4,
+        "samples": [
+          {
+            "resume_ack_seconds": 2.664045705,
+            "room_id": "01m2hempv74c2e50fdfdn4ajhs",
+            "ssh_ready_seconds": 4.673440272
+          },
+          {
+            "resume_ack_seconds": 2.631255997,
+            "room_id": "01m2hempv7wt76bvd0p8hhksep",
+            "ssh_ready_seconds": 4.477506037
+          },
+          {
+            "resume_ack_seconds": 2.647890176,
+            "room_id": "01m2hempv734dgty5eqpsrd872",
+            "ssh_ready_seconds": 4.469501688
+          },
+          {
+            "resume_ack_seconds": 2.643559491,
+            "room_id": "01m2hempv7fjpj8nmeqkqtztm2",
+            "ssh_ready_seconds": 4.62760323
+          }
+        ],
+        "unavailable": 0
+      },
+      "receipts": [
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-0/out/01m2hempv734dgty5eqpsrd872",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:32.724176576Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:27.776249590Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "f8b59c6893069b364a5e79b7b82c17dd8772971199a878418349d229d052df91"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-0/out/01m2hempv74c2e50fdfdn4ajhs",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:33.247514061Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:27.980170799Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "f4f89f71396b06c82b757f6aadce77228832c01fa9e069c5f5a52713240356b6"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-0/out/01m2hempv7fjpj8nmeqkqtztm2",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:33.230556448Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:27.934349048Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "36c8ade1ee4d67d28ded99c0142cc2d86fb3722a520047cdce74499e2f1d8740"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-0/out/01m2hempv7wt76bvd0p8hhksep",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:32.964283627Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:27.784249938Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "d46d8127c14553b22a8f8f77bf29f5b65c988fea522676b05148807e260a2da4"
+        }
+      ],
+      "sampling_error": null,
+      "schema_version": 1,
+      "spawn_error": null,
+      "trial": 0
+    },
+    {
+      "cli_exit": 0,
+      "completed_per_minute": 19.502304087649385,
+      "count": 4,
+      "elapsed_seconds": 12.306238223,
+      "execution_complete_count": 4,
+      "execution_valid": true,
+      "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately.",
+      "readiness": {
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "measured": 4,
+        "origin": "per-clone dispatch, after shared preparation and network allocation",
+        "requested": 4,
+        "samples": [
+          {
+            "resume_ack_seconds": 2.523872871,
+            "room_id": "01m2hen2nzpewky12p5pm8tekx",
+            "ssh_ready_seconds": 4.5020457050000005
+          },
+          {
+            "resume_ack_seconds": 2.600255365,
+            "room_id": "01m2hen2nz4psy53rc8c62fa1q",
+            "ssh_ready_seconds": 4.55008295
+          },
+          {
+            "resume_ack_seconds": 2.59171271,
+            "room_id": "01m2hen2nzqjer4rg7zkmsxjgn",
+            "ssh_ready_seconds": 4.453884463
+          },
+          {
+            "resume_ack_seconds": 2.580241452,
+            "room_id": "01m2hen2nzzrxnjv00zh3yywnp",
+            "ssh_ready_seconds": 4.461902969
+          }
+        ],
+        "unavailable": 0
+      },
+      "receipts": [
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-1/out/01m2hen2nz4psy53rc8c62fa1q",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:45.449311685Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:40.013665363Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "90a926af938cbd316d71ee2432fb80f87a01b7eca7d4384532f3cacc66328faa"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-1/out/01m2hen2nzpewky12p5pm8tekx",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:45.501325056Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:39.965648076Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "402c31382f0fad80f03b7e0bd1042d4316b5051834b67bb33cbfe50ca35e76a0"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-1/out/01m2hen2nzqjer4rg7zkmsxjgn",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:45.258924230Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:39.917485542Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "7c92507d143ba93c0f12d08656ddae2d9f2dc75ff5f075142102c884da98efe7"
+        },
+        {
+          "directory": "/home/mh.guest/rooms/readiness-results/clones-4-trial-1/out/01m2hen2nzzrxnjv00zh3yywnp",
+          "execution_complete": true,
+          "patch_sha256": null,
+          "result": {
+            "command": [
+              "sh",
+              "-c",
+              "set -eu\nexport PATH=/nix/var/rooms/env/bin:$PATH\npython3 -c 'assert sum(range(1000)) == 499500; print(\"readiness-smoke\")'\n"
+            ],
+            "ended_at": "2026-09-15T02:34:45.392726896Z",
+            "exit_code": 0,
+            "schema_version": 1,
+            "started_at": "2026-09-15T02:34:39.925506506Z",
+            "status": "succeeded"
+          },
+          "result_sha256": "5532e620311882ad9b83705c2a04f79fea1919331ffe3901f7e41b468c98e215"
+        }
+      ],
+      "sampling_error": null,
+      "schema_version": 1,
+      "spawn_error": null,
+      "trial": 1
+    }
+  ],
+  "schema_version": 1
+}
