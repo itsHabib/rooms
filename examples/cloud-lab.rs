@@ -212,6 +212,50 @@ fn accepted(exit: Option<i32>, expected: usize, rows: &[Value], host: &Value) ->
         && no_live_rooms(host)
 }
 
+fn readiness_report(stdout: &Path, requested: u32) -> Value {
+    let parsed = fs::read(stdout)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let Some(clones) = parsed
+        .as_ref()
+        .and_then(|value| value.get("clones"))
+        .and_then(Value::as_array)
+    else {
+        return json!({"requested": requested, "samples": [], "unavailable": requested,
+            "problem": "missing or invalid clone CLI JSON"});
+    };
+    let mut identities = std::collections::BTreeSet::new();
+    let mut samples = Vec::new();
+    if clones.len() > requested as usize {
+        return json!({"requested": requested, "samples": [], "unavailable": requested,
+            "problem": "more clone records than requested"});
+    }
+    for clone in clones {
+        let Some(id) = field(clone, "room_id").as_str() else {
+            continue;
+        };
+        if !identities.insert(id) {
+            return json!({"requested": requested, "samples": [], "unavailable": requested,
+                "problem": "duplicate clone identity"});
+        }
+        let timing = field(clone, "readiness");
+        let ack = field(timing, "dispatch_to_resume_ack_seconds").as_f64();
+        let ssh = field(timing, "dispatch_to_ssh_ready_seconds").as_f64();
+        if let (Some(ack), Some(ssh)) = (ack, ssh) {
+            if ack.is_finite() && ssh.is_finite() && ack >= 0.0 && ssh >= ack {
+                samples.push(
+                    json!({"room_id": id, "resume_ack_seconds": ack, "ssh_ready_seconds": ssh}),
+                );
+            }
+        }
+    }
+    let measured = u32::try_from(samples.len()).unwrap_or(u32::MAX);
+    json!({"origin": "per-clone dispatch, after shared preparation and network allocation",
+        "includes": "restore and batch barrier before authenticated SSH probe; excludes shared preparation and admission",
+        "requested": requested, "measured": measured, "unavailable": requested.saturating_sub(measured),
+        "samples": samples})
+}
+
 fn run_batch(args: &Args, command: &str, count: u32, trial: u32) -> Result<Value> {
     let out = args.out.join(format!("clones-{count}-trial-{trial}"));
     fs::create_dir(&out)?;
@@ -262,6 +306,7 @@ fn run_batch(args: &Args, command: &str, count: u32, trial: u32) -> Result<Value
         "elapsed_seconds": elapsed, "execution_complete_count": complete_count(&rows),
         "completed_per_minute": 60.0 * f64::from(u32::try_from(complete_count(&rows))?) / elapsed,
         "execution_valid": valid, "receipts": rows,
+        "readiness": readiness_report(&out.join("stdout.json"), count),
         "interpretation": "Execution and exact-patch evidence; no semantic or security qualification inferred. Inspect retained network/mount audits separately."});
     write_json(&out.join("summary.json"), &row)?;
     Ok(row)
@@ -338,6 +383,33 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_keeps_missing_attempts_in_denominator_and_rejects_fake_samples() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("stdout.json");
+        assert_eq!(readiness_report(&path, 2)["unavailable"], 2);
+        let ready = json!({"room_id":"a", "readiness":{
+            "dispatch_to_resume_ack_seconds":1.0, "dispatch_to_ssh_ready_seconds":2.0}});
+        write_json(&path, &json!({"clones":[ready]}))?;
+        let report = readiness_report(&path, 2);
+        assert_eq!(report["measured"], 1);
+        assert_eq!(report["unavailable"], 1);
+        write_json(&path, &json!({"clones":[ready, ready]}))?;
+        assert_eq!(readiness_report(&path, 2)["unavailable"], 2);
+        write_json(
+            &path,
+            &json!({"clones":[{"room_id":"a", "readiness":{
+            "dispatch_to_resume_ack_seconds":2.0, "dispatch_to_ssh_ready_seconds":1.0}}]}),
+        )?;
+        assert_eq!(readiness_report(&path, 1)["unavailable"], 1);
+        write_json(
+            &path,
+            &json!({"clones":[{"room_id":"a", "status":"exited", "exit_code":0}]}),
+        )?;
+        assert_eq!(readiness_report(&path, 1)["unavailable"], 1);
+        Ok(())
+    }
 
     #[test]
     fn replacing_a_report_preserves_existing_readers() -> Result<()> {
