@@ -156,6 +156,8 @@ limit) · [run2](run2.summary.json) (cold scan, 460 s limit) ·
 [Raw evidence](evidence.tar.xz), SHA-256
 `49ffc29faf18d7c8b35abf4c1dd5ca33581ab70fb056af9a9f26326262b6fe7a`: every
 invocation, CLI output, host log, per-second memory samples and the two warmed
-bases' receipts. It excludes VM memory, disk images and credentials. No cloud
+bases' receipts, for the five runs up to `subset-warm`. The two `pytask` runs were
+made later and are retained as summaries only; their raw samples were not
+archived. It excludes VM memory, disk images and credentials. No cloud
 resources or model calls were used; the final host inventory had no Rooms or
 VMMs and KSM off.
