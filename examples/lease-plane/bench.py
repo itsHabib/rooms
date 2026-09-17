@@ -171,9 +171,22 @@ class Swarm:
         events = []
         folder = os.path.join(self.scratch, "peers")
         for name in sorted(n for n in os.listdir(folder) if n.endswith(".ndjson")):
-            with open(os.path.join(folder, name), encoding="utf-8") as fh:
-                events.extend(json.loads(line) for line in fh if line.endswith("\n"))
+            events.extend(read_ndjson(os.path.join(folder, name)))
         return events
+
+
+def read_ndjson(path):
+    """Every line that parses. A last line without its newline still counts if it is
+    whole JSON; a torn line, from a writer killed mid-write, is skipped."""
+    with open(path, encoding="utf-8") as fh:
+        return [record for record in map(_parse_line, fh) if record is not None]
+
+
+def _parse_line(line):
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
 
 
 def percentiles(values):

@@ -55,25 +55,54 @@ def start_server(opts, port, scratch):
             return server
         except OSError:
             time.sleep(0.1)
+    probe.close()
     server.kill()
     raise OSError("redis-server did not start on %s:%d" % (opts.host_ip, port))
 
 
-def running_rooms(opts):
-    listed = subprocess.run([opts.rooms, "ls"], capture_output=True, text=True, check=False).stdout
-    return [line.split()[0] for line in listed.splitlines() if " running" in line]
+def rooms_cli(opts, *args):
+    """stdout of one rooms command; empty if it hangs, so the injector cannot block on it."""
+    try:
+        done = subprocess.run([opts.rooms] + list(args), capture_output=True, text=True,
+                              check=False, timeout=30)
+    except subprocess.TimeoutExpired:
+        return ""
+    return done.stdout
 
 
-def inject(opts, port, scratch, holder, log):
-    """Once a quarter of the tasks are done, kill one clone, then take the store away for two seconds."""
+def running_rooms(listing):
+    return [line.split()[0] for line in listing.splitlines() if " running" in line]
+
+
+def quarter_done(probe, tasks):
+    """A store that does not answer is "not there yet": the poll outlives a store hiccup."""
+    try:
+        return probe.call("HLEN", "swarm:done") >= tasks // 4
+    except OSError:
+        return False
+
+
+def await_progress(opts, port, stop):
+    """Block until a quarter of the tasks are done, the wall deadline passes, or `stop` is set."""
     probe = RespStore(opts.host_ip, port)
     deadline = time.monotonic() + opts.wall_s
-    while probe.call("HLEN", "swarm:done") < opts.tasks // 4 and time.monotonic() < deadline:
-        time.sleep(0.05)
-    probe.close()
-    rooms = running_rooms(opts)
+    try:
+        while time.monotonic() < deadline and not quarter_done(probe, opts.tasks):
+            if stop.wait(0.05):
+                return
+    finally:
+        probe.close()
+
+
+def inject(opts, port, scratch, holder, log, stop):
+    """Once a quarter of the tasks are done, kill one clone, then take the store away for
+    two seconds. Does nothing if the run ended first."""
+    await_progress(opts, port, stop)
+    if stop.is_set():
+        return
+    rooms = running_rooms(rooms_cli(opts, "ls"))
     if rooms:
-        subprocess.run([opts.rooms, "kill", rooms[0]], capture_output=True, check=False)
+        rooms_cli(opts, "kill", rooms[0])
         log.append({"t": time.time(), "fault": "kill-room", "room": rooms[0]})
     holder["server"].kill()
     holder["server"].wait()
@@ -86,11 +115,31 @@ def inject(opts, port, scratch, holder, log):
 def peer_events(out_dir):
     events = []
     for folder, _dirs, files in os.walk(out_dir):
-        if "peer.ndjson" not in files:
-            continue
-        with open(os.path.join(folder, "peer.ndjson"), encoding="utf-8") as fh:
-            events.extend(json.loads(line) for line in fh if line.endswith("\n"))
+        if "peer.ndjson" in files:
+            events.extend(bench.read_ndjson(os.path.join(folder, "peer.ndjson")))
     return events
+
+
+def finish_injector(injector, stop):
+    """Safe to call twice, and on a thread that was never started."""
+    stop.set()
+    if injector.is_alive():
+        injector.join()
+
+
+def read_history(opts, port):
+    reader = RespStore(opts.host_ip, port)
+    try:
+        return reader.history()
+    finally:
+        reader.close()
+
+
+def run_ok(row, tasks):
+    """A run passes only if it did the work: invariants hold, every task was accepted, and at
+    least one peer reported. A clone that never started must not pass on an empty history."""
+    verdict = row["invariants"]
+    return bool(verdict["ok"] and verdict["accepted"] == tasks and row["peers_reporting"] > 0)
 
 
 def run_once(opts, count, faulted):
@@ -101,6 +150,8 @@ def run_once(opts, count, faulted):
     port = bench.free_port()
     holder = {"server": start_server(opts, port, scratch)}
     fault_log = []
+    stop = threading.Event()
+    injector = threading.Thread(target=inject, args=(opts, port, scratch, holder, fault_log, stop))
     try:
         seeder = RespStore(opts.host_ip, port)
         seeder.seed(task_ids(opts.tasks))
@@ -110,18 +161,15 @@ def run_once(opts, count, faulted):
         argv = [opts.rooms, "clone", opts.snapshot, "--image", opts.image, "--toolstore", opts.toolstore,
                 "-n", str(count), "--command", command, "--max-wall", "%ds" % opts.wall_s,
                 "--out", os.path.join(run_dir, "out"), "--json"]
-        injector = threading.Thread(target=inject, args=(opts, port, scratch, holder, fault_log))
         if faulted:
             injector.start()
         started = time.monotonic()
         done = subprocess.run(argv, capture_output=True, text=True, check=False)
         wall_s = time.monotonic() - started
-        if faulted:
-            injector.join()
-        reader = RespStore(opts.host_ip, port)
-        history = reader.history()
-        reader.close()
+        finish_injector(injector, stop)
+        history = read_history(opts, port)
     finally:
+        finish_injector(injector, stop)
         holder["server"].kill()
         holder["server"].wait()
     with open(os.path.join(run_dir, "clone-stdout.json"), "w", encoding="utf-8") as fh:
@@ -161,12 +209,13 @@ def main(argv=None):
     try:
         for count in (int(c) for c in opts.counts.split(",")):
             for faulted in ([False, True] if opts.faults else [False]):
-                rows.append(run_once(opts, count, faulted))
+                row = run_once(opts, count, faulted)
+                rows.append(dict(row, ok=run_ok(row, opts.tasks)))
                 print(json.dumps(rows[-1], sort_keys=True), flush=True)
     finally:
         with open(os.path.join(opts.out, "summary.json"), "w", encoding="utf-8") as fh:
             json.dump(rows, fh, indent=1, sort_keys=True)
-    return 0 if all(r["invariants"]["ok"] for r in rows) else 1
+    return 0 if rows and all(r["ok"] for r in rows) else 1
 
 
 if __name__ == "__main__":
