@@ -61,6 +61,21 @@ jobs:
           name: payment-rehearsal
           path: ${{ runner.temp }}/payment-rehearsal
 
+  chunkstore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: make test-chunkstore
+      - run: python3 examples/chunkstore/bench.py --size-mib 64 --out "${{ runner.temp }}/chunkstore-bench"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chunkstore-bench
+          path: ${{ runner.temp }}/chunkstore-bench
+
   audit:
     runs-on: ubuntu-latest
     permissions:

@@ -1,0 +1,365 @@
+{
+  "fetches": [
+    {
+      "bytes_fetched": 354449462,
+      "chunks_fetched": 340,
+      "chunks_local": 0,
+      "chunks_total": 340,
+      "corrupt_seed": null,
+      "fetch_seconds": 0.486,
+      "kind": "fetch",
+      "name": "snap-b",
+      "ok": true,
+      "rate_mbps": 0,
+      "retries": 0,
+      "run": "unthrottled-1-seed",
+      "seed_count": 1,
+      "seeds": [
+        {
+          "bad_chunks": 0,
+          "bytes": 354449462,
+          "chunks": 340,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58960"
+        }
+      ],
+      "wall_seconds": 1.339,
+      "workers": 8
+    },
+    {
+      "bytes_fetched": 354449462,
+      "chunks_fetched": 340,
+      "chunks_local": 0,
+      "chunks_total": 340,
+      "corrupt_seed": null,
+      "fetch_seconds": 17.731,
+      "kind": "fetch",
+      "name": "snap-b",
+      "ok": true,
+      "rate_mbps": 20,
+      "retries": 0,
+      "run": "cold-1-seed",
+      "seed_count": 1,
+      "seeds": [
+        {
+          "bad_chunks": 0,
+          "bytes": 354449462,
+          "chunks": 340,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58970"
+        }
+      ],
+      "wall_seconds": 18.56,
+      "workers": 8
+    },
+    {
+      "bytes_fetched": 354449462,
+      "chunks_fetched": 340,
+      "chunks_local": 0,
+      "chunks_total": 340,
+      "corrupt_seed": null,
+      "fetch_seconds": 8.865,
+      "kind": "fetch",
+      "name": "snap-b",
+      "ok": true,
+      "rate_mbps": 20,
+      "retries": 0,
+      "run": "cold-2-seed",
+      "seed_count": 2,
+      "seeds": [
+        {
+          "bad_chunks": 0,
+          "bytes": 177209398,
+          "chunks": 170,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58980"
+        },
+        {
+          "bad_chunks": 0,
+          "bytes": 177240064,
+          "chunks": 170,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58981"
+        }
+      ],
+      "wall_seconds": 9.397,
+      "workers": 8
+    },
+    {
+      "bytes_fetched": 354449462,
+      "chunks_fetched": 340,
+      "chunks_local": 0,
+      "chunks_total": 340,
+      "corrupt_seed": null,
+      "fetch_seconds": 5.928,
+      "kind": "fetch",
+      "name": "snap-b",
+      "ok": true,
+      "rate_mbps": 20,
+      "retries": 0,
+      "run": "cold-3-seed",
+      "seed_count": 3,
+      "seeds": [
+        {
+          "bad_chunks": 0,
+          "bytes": 118489088,
+          "chunks": 113,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58992"
+        },
+        {
+          "bad_chunks": 0,
+          "bytes": 118489142,
+          "chunks": 114,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58993"
+        },
+        {
+          "bad_chunks": 0,
+          "bytes": 117471232,
+          "chunks": 113,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:58994"
+        }
+      ],
+      "wall_seconds": 6.538,
+      "workers": 8
+    },
+    {
+      "bytes_fetched": 249561088,
+      "chunks_fetched": 238,
+      "chunks_local": 102,
+      "chunks_total": 340,
+      "corrupt_seed": null,
+      "fetch_seconds": 12.483,
+      "kind": "fetch",
+      "name": "snap-b",
+      "ok": true,
+      "rate_mbps": 20,
+      "retries": 0,
+      "run": "warm-1-seed",
+      "seed_count": 1,
+      "seeds": [
+        {
+          "bad_chunks": 0,
+          "bytes": 249561088,
+          "chunks": 238,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:59014"
+        }
+      ],
+      "wall_seconds": 13.187,
+      "workers": 8
+    },
+    {
+      "bytes_fetched": 354449462,
+      "chunks_fetched": 340,
+      "chunks_local": 0,
+      "chunks_total": 340,
+      "corrupt_seed": 0,
+      "fetch_seconds": 8.868,
+      "kind": "fetch",
+      "name": "snap-b",
+      "ok": true,
+      "rate_mbps": 20,
+      "retries": 3,
+      "run": "corrupt-1-of-3",
+      "seed_count": 3,
+      "seeds": [
+        {
+          "bad_chunks": 3,
+          "bytes": 0,
+          "chunks": 0,
+          "dropped": "served bad bytes for chunk b998c4dbce8a086edaf69773933eb2e2d3ae0bea9540b02485c7ed859e8f6c9b",
+          "errors": 3,
+          "url": "http://127.0.0.1:59024"
+        },
+        {
+          "bad_chunks": 0,
+          "bytes": 177240118,
+          "chunks": 171,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:59025"
+        },
+        {
+          "bad_chunks": 0,
+          "bytes": 177209344,
+          "chunks": 169,
+          "dropped": null,
+          "errors": 0,
+          "url": "http://127.0.0.1:59026"
+        }
+      ],
+      "wall_seconds": 9.92,
+      "workers": 8
+    }
+  ],
+  "machine": {
+    "cpu_count": 10,
+    "machine": "arm64",
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python": "3.14.6"
+  },
+  "ok": true,
+  "params": {
+    "fetch_chunk_kib": 1024,
+    "out": "docs/experiments/chunkstore-results/run-1",
+    "rate_mbps": 20,
+    "seed": 1,
+    "size_mib": 512,
+    "sizes_kib": [
+      64,
+      256,
+      1024,
+      4096
+    ],
+    "workers": 8
+  },
+  "transfers": [
+    {
+      "cold_bytes": 536901686,
+      "kind": "transfer",
+      "sparse_aware_bytes": 270846006,
+      "strategy": "whole-file",
+      "warm_bytes": 536901686
+    },
+    {
+      "chunker": {
+        "kind": "fixed",
+        "size": 65536
+      },
+      "chunking_seconds": 0.796,
+      "cold_bytes": 200177718,
+      "cold_chunks": 3056,
+      "data_chunks": 4330,
+      "hole_bytes": 253231104,
+      "kind": "transfer",
+      "strategy": "fixed-64k",
+      "warm_bytes": 90570752,
+      "warm_chunks": 1382
+    },
+    {
+      "chunker": {
+        "kind": "fixed",
+        "size": 262144
+      },
+      "chunking_seconds": 0.395,
+      "cold_bytes": 244873270,
+      "cold_chunks": 936,
+      "data_chunks": 1196,
+      "hole_bytes": 223870976,
+      "kind": "transfer",
+      "strategy": "fixed-256k",
+      "warm_bytes": 137101312,
+      "warm_chunks": 523
+    },
+    {
+      "chunker": {
+        "kind": "fixed",
+        "size": 1048576
+      },
+      "chunking_seconds": 0.436,
+      "cold_bytes": 354449462,
+      "cold_chunks": 340,
+      "data_chunks": 372,
+      "hole_bytes": 148897792,
+      "kind": "transfer",
+      "strategy": "fixed-1024k",
+      "warm_bytes": 249561088,
+      "warm_chunks": 238
+    },
+    {
+      "chunker": {
+        "kind": "fixed",
+        "size": 4194304
+      },
+      "chunking_seconds": 0.49,
+      "cold_bytes": 515930166,
+      "cold_chunks": 125,
+      "data_chunks": 125,
+      "hole_bytes": 20971520,
+      "kind": "transfer",
+      "strategy": "fixed-4096k",
+      "warm_bytes": 482344960,
+      "warm_chunks": 115
+    },
+    {
+      "chunker": {
+        "avg": 65536,
+        "kind": "cdc",
+        "max": 262144,
+        "min": 16384
+      },
+      "chunking_seconds": 2.931,
+      "cold_bytes": 210815029,
+      "cold_chunks": 3893,
+      "data_chunks": 4243,
+      "hole_bytes": 262852609,
+      "kind": "transfer",
+      "strategy": "cdc-64k",
+      "warm_bytes": 73603712,
+      "warm_chunks": 1101
+    },
+    {
+      "chunker": {
+        "avg": 262144,
+        "kind": "cdc",
+        "max": 1048576,
+        "min": 65536
+      },
+      "chunking_seconds": 2.915,
+      "cold_bytes": 243640373,
+      "cold_chunks": 1060,
+      "data_chunks": 1089,
+      "hole_bytes": 262852609,
+      "kind": "transfer",
+      "strategy": "cdc-256k",
+      "warm_bytes": 111749181,
+      "warm_chunks": 422
+    },
+    {
+      "chunker": {
+        "avg": 1048576,
+        "kind": "cdc",
+        "max": 4194304,
+        "min": 262144
+      },
+      "chunking_seconds": 2.916,
+      "cold_bytes": 274049077,
+      "cold_chunks": 386,
+      "data_chunks": 386,
+      "hole_bytes": 262852609,
+      "kind": "transfer",
+      "strategy": "cdc-1024k",
+      "warm_bytes": 181536481,
+      "warm_chunks": 247
+    },
+    {
+      "chunker": {
+        "avg": 4194304,
+        "kind": "cdc",
+        "max": 16777216,
+        "min": 1048576
+      },
+      "chunking_seconds": 2.651,
+      "cold_bytes": 274049077,
+      "cold_chunks": 211,
+      "data_chunks": 211,
+      "hole_bytes": 262852609,
+      "kind": "transfer",
+      "strategy": "cdc-4096k",
+      "warm_bytes": 223138650,
+      "warm_chunks": 177
+    }
+  ]
+}
