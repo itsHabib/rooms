@@ -170,6 +170,7 @@ class FileStore(Store):
         if self._slots(task)[-1] != token:
             return False
         os.replace(self._temp(dict(slot, **change)), self._slot_path(task, token))
+        # Re-read: a takeover can win the next slot between the check above and the replace.
         return self._slots(task)[-1] == token
 
     def _mark_done(self, task):
