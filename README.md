@@ -33,7 +33,8 @@ an agent or CI consumer. It records exact input hashes and keeps failed runs.
 The [readiness experiment](docs/experiments/readiness-results/README.md) separates
 resume acknowledgement, authenticated SSH and workload completion with retained samples.
 
-The [experiment tracker](docs/experiments/ten-experiments.md) separates
+[What the experiments have taught us so far](docs/experiments/README.md) indexes every
+result, the lessons and what is next. The [experiment tracker](docs/experiments/ten-experiments.md) separates
 measurements from unfinished work. It now includes three planned additions: [NVMe/LVM storage, eBPF tracing and deployment telemetry/UI](docs/experiments/storage-observability-deployments.md). So far, the disposable GCP lab has run the
 8–128 clone ramp, a shared-store cache probe, mixed hostile workloads and
 snapshot transfer through object storage to a second host. These are experiments,

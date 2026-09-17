@@ -2,7 +2,8 @@
 
 Added at Michael's request on 2026-09-16. These extend the
 [experiment list](ten-experiments.md) and [experiments 11–13](storage-observability-deployments.md);
-all are planned, not implemented or measured. The earlier experiments and their
+2b, 15 and the local half of 2d and 17 have been measured; the rest are planned.
+Results and lessons are indexed in [README.md](README.md). The earlier experiments and their
 remaining work stay in scope. Each entry should produce a working prototype, a
 reproducible comparison, receipts and a short lesson.
 
