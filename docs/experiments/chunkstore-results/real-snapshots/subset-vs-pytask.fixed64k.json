@@ -1,0 +1,38 @@
+{
+  "subset": {
+    "logical_bytes": 536877648,
+    "hole_bytes": 179896320,
+    "data_chunks": 5448,
+    "unique_chunks": 5390,
+    "unique_bytes": 353180240,
+    "needed_chunks": 5390,
+    "needed_bytes": 353180240
+  },
+  "pytask": {
+    "logical_bytes": 536877648,
+    "hole_bytes": 423952384,
+    "data_chunks": 1724,
+    "unique_chunks": 1724,
+    "unique_bytes": 112925264,
+    "needed_chunks": 1724,
+    "needed_bytes": 112925264
+  },
+  "pytask_given_subset": {
+    "logical_bytes": 536877648,
+    "hole_bytes": 423952384,
+    "data_chunks": 1724,
+    "unique_chunks": 1724,
+    "unique_bytes": 112925264,
+    "needed_chunks": 1405,
+    "needed_bytes": 92019280
+  },
+  "subset_given_pytask": {
+    "logical_bytes": 536877648,
+    "hole_bytes": 179896320,
+    "data_chunks": 5448,
+    "unique_chunks": 5390,
+    "unique_bytes": 353180240,
+    "needed_chunks": 5071,
+    "needed_bytes": 332274256
+  }
+}

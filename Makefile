@@ -1,8 +1,8 @@
-.PHONY: check fmt fmt-check lint test test-rehearsal test-lease-plane e2e build release clean
+.PHONY: check fmt fmt-check lint test test-rehearsal test-lease-plane test-chunkstore e2e build release clean
 
 # `make check` is the single command CI runs and you run before commit.
 # Same matrix locally and in CI so failures are reproducible.
-check: fmt-check lint test test-rehearsal test-lease-plane
+check: fmt-check lint test test-rehearsal test-lease-plane test-chunkstore
 
 fmt:
 	cargo fmt --all
@@ -25,6 +25,9 @@ test-rehearsal:
 
 test-lease-plane:
 	python3 -m unittest discover -s examples/lease-plane -p 'test_*.py'
+
+test-chunkstore:
+	python3 -m unittest discover -s examples/chunkstore -p 'test_*.py'
 
 e2e:
 	# Host-e2e harness (rooms-host only): preflight → build → run e2e →

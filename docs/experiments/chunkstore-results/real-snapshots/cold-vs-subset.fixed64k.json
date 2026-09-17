@@ -1,0 +1,38 @@
+{
+  "cold": {
+    "logical_bytes": 536877654,
+    "hole_bytes": 478806016,
+    "data_chunks": 887,
+    "unique_chunks": 887,
+    "unique_bytes": 58071638,
+    "needed_chunks": 887,
+    "needed_bytes": 58071638
+  },
+  "subset": {
+    "logical_bytes": 536877648,
+    "hole_bytes": 179896320,
+    "data_chunks": 5448,
+    "unique_chunks": 5390,
+    "unique_bytes": 353180240,
+    "needed_chunks": 5390,
+    "needed_bytes": 353180240
+  },
+  "subset_given_cold": {
+    "logical_bytes": 536877648,
+    "hole_bytes": 179896320,
+    "data_chunks": 5448,
+    "unique_chunks": 5390,
+    "unique_bytes": 353180240,
+    "needed_chunks": 5080,
+    "needed_bytes": 332864080
+  },
+  "cold_given_subset": {
+    "logical_bytes": 536877654,
+    "hole_bytes": 478806016,
+    "data_chunks": 887,
+    "unique_chunks": 887,
+    "unique_bytes": 58071638,
+    "needed_chunks": 577,
+    "needed_bytes": 37755478
+  }
+}
