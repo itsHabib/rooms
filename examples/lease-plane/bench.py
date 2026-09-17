@@ -214,12 +214,17 @@ def run_once(out, name, backend, peers, tasks, peer_flags, events=None, timeout_
     write_ndjson(os.path.join(run_dir, "peers.ndjson"), seen)
     write_ndjson(os.path.join(run_dir, "history.ndjson"), history)
     shutil.rmtree(scratch)
+    return dict(score(tasks, seen, history, live, wall_s), name=name, backend=backend,
+                peers=peers, finished=stragglers == 0)
+
+
+def score(tasks, seen, history, live, wall_s):
+    """Invariant verdict plus latency and contention figures from peer events."""
     verdict = faults.check(task_ids(tasks), history, live)
     claims = [e for e in seen if e["ev"] == "claim"]
     exits = [e for e in seen if e["ev"] == "exit"]
     return {
-        "name": name, "backend": backend, "peers": peers, "tasks": tasks,
-        "finished": stragglers == 0, "live_peers": live, "wall_s": round(wall_s, 3),
+        "tasks": tasks, "live_peers": live, "wall_s": round(wall_s, 3),
         "throughput_tasks_per_s": round(verdict["accepted"] / wall_s, 2),
         "claim_ms": percentiles([e["claim_ms"] for e in claims]),
         "acquire_ms": percentiles([e["acquire_ms"] for e in claims]),
