@@ -1992,6 +1992,7 @@ fn allocated_clone_task_identity(
 /// [`CloneCustody::teardown`] or [`CloneCustody::preserve`]; an unexpected
 /// drop reaps the VM synchronously and completes the durable restore intent.
 struct CloneCustody {
+    lifecycle: Arc<Lifecycle>,
     restored: Option<rooms::restore_exec::Restored>,
     out_dir: Option<PathBuf>,
     workload: Option<CloneWorkload>,
@@ -2016,13 +2017,15 @@ impl CloneCustody {
         status: &'static str,
         exit_code: Option<u8>,
     ) -> Result<CloneRecord, RoomsError> {
-        CloneRecord::from_ready(
+        let mut record = CloneRecord::from_ready(
             self.restored()?,
             self.out_dir.clone(),
             self.workload.as_ref(),
             status,
             exit_code,
-        )
+        )?;
+        record.readiness = self.lifecycle.readiness();
+        Ok(record)
     }
 
     fn identity(&self) -> Result<(u8, String), RoomsError> {
@@ -2137,6 +2140,8 @@ impl Drop for CloneCustody {
 #[derive(Clone, Debug, serde::Serialize)]
 struct CloneRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
+    readiness: Option<rooms::lifecycle::ReadinessTiming>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     case_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     command_sha256: Option<String>,
@@ -2170,6 +2175,7 @@ impl CloneRecord {
             RoomsError::Internal("clone restore returned no clone network".to_owned())
         })?;
         Ok(Self {
+            readiness: None,
             case_id: workload.and_then(|value| value.case_id.clone()),
             command_sha256: workload.and_then(|value| value.command_sha256.clone()),
             room_id: restored.room_id.clone(),
@@ -3106,6 +3112,7 @@ async fn restore_clone_batch(
         let task_identity =
             allocated_clone_task_identity(&allocation, workload.as_ref(), out_dir.clone());
         let task_prepared = Arc::clone(&prepared);
+        let lifecycle = Arc::new(Lifecycle::measured());
         let handle = tasks.spawn(async move {
             let network = allocation
                 .network()
@@ -3147,7 +3154,9 @@ async fn restore_clone_batch(
                 .for_case(case_id.clone(), command_sha256.clone())
             })?;
             allocation.transfer();
+            lifecycle.emit(&Event::ResumeReady);
             Ok::<CloneCustody, CloneFailure>(CloneCustody {
+                lifecycle,
                 restored: Some(restored),
                 out_dir,
                 workload,
@@ -3261,6 +3270,7 @@ async fn wait_kept_clone_batch_ready(
             let namespace = clone_net.netns.clone();
             let key = key.to_path_buf();
             let config = custody.config.clone();
+            let lifecycle = Arc::clone(&custody.lifecycle);
             let future: CloneReadinessFuture = Box::pin(async move {
                 runner::wait_for_ssh(
                     runner::GuestTarget::new(&guest_ip, Some(&namespace)),
@@ -3268,7 +3278,9 @@ async fn wait_kept_clone_batch_ready(
                     &config,
                 )
                 .await
-                .map_err(RoomsError::Firecracker)
+                .map_err(RoomsError::Firecracker)?;
+                lifecycle.emit(&Event::SshReady);
+                Ok(())
             });
             Ok(CloneReadinessProbe {
                 clone_net_index,
@@ -3659,7 +3671,7 @@ async fn execute_clone_command_inner(
         .workload
         .as_ref()
         .is_some_and(|workload| workload.case_id.is_some());
-    let lifecycle = Lifecycle::disabled();
+    let lifecycle = Arc::clone(&custody.lifecycle);
     let action = Action::Exec(runner::Runner::Command(command));
     let (outcome, collection) = {
         let restored = custody
@@ -5699,6 +5711,7 @@ mod tests {
     fn clone_batch_json_propagates_non_utf8_instead_of_panicking() {
         let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'o', 0xff]));
         let record = CloneRecord {
+            readiness: None,
             case_id: None,
             command_sha256: None,
             room_id: "room-one".to_owned(),
@@ -5973,6 +5986,7 @@ mod tests {
     #[test]
     fn clone_command_failure_json_retains_successes_outputs_and_all_failures() {
         let success = CloneRecord {
+            readiness: None,
             case_id: None,
             command_sha256: None,
             room_id: "room-three".to_owned(),
@@ -6022,6 +6036,7 @@ mod tests {
 
     fn matrix_record(case_id: &str, status: &'static str, exit_code: Option<u8>) -> CloneRecord {
         CloneRecord {
+            readiness: None,
             case_id: Some(case_id.to_owned()),
             command_sha256: Some("sha256:command".to_owned()),
             room_id: "room-three".to_owned(),
