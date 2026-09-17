@@ -1,8 +1,8 @@
-.PHONY: check fmt fmt-check lint test test-rehearsal e2e build release clean
+.PHONY: check fmt fmt-check lint test test-rehearsal test-swarm e2e build release clean
 
 # `make check` is the single command CI runs and you run before commit.
 # Same matrix locally and in CI so failures are reproducible.
-check: fmt-check lint test test-rehearsal
+check: fmt-check lint test test-rehearsal test-swarm
 
 fmt:
 	cargo fmt --all
@@ -21,6 +21,9 @@ test:
 
 test-rehearsal:
 	python3 -m unittest discover -s examples/rehearsal -p 'test_*.py'
+
+test-swarm:
+	python3 -m unittest discover -s examples/swarm -p 'test_*.py'
 
 e2e:
 	# Host-e2e harness (rooms-host only): preflight → build → run e2e →

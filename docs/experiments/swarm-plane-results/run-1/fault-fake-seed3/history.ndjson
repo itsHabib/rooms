@@ -1,0 +1,102 @@
+{"holder": "peer-00", "kind": "grant", "task": "task-0006", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0008", "token": 1}
+{"holder": "peer-02", "kind": "grant", "task": "task-0001", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0044", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0025", "token": 1}
+{"holder": "peer-05", "kind": "grant", "task": "task-0043", "token": 1}
+{"holder": "peer-07", "kind": "grant", "task": "task-0007", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0006", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0040", "token": 1}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0008", "token": 1}
+{"accepted": true, "holder": "peer-02", "kind": "complete", "result": "ok", "task": "task-0001", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0042", "token": 1}
+{"holder": "peer-02", "kind": "grant", "task": "task-0043", "token": 2}
+{"accepted": false, "holder": "peer-05", "kind": "complete", "result": "ok", "task": "task-0043", "token": 1}
+{"holder": "peer-05", "kind": "grant", "task": "task-0029", "token": 1}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0044", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0023", "token": 1}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0025", "token": 1}
+{"accepted": true, "holder": "peer-07", "kind": "complete", "result": "ok", "task": "task-0007", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0030", "token": 1}
+{"holder": "peer-07", "kind": "grant", "task": "task-0019", "token": 1}
+{"holder": "peer-06", "kind": "grant", "task": "task-0035", "token": 1}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0042", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0039", "token": 1}
+{"accepted": true, "holder": "peer-02", "kind": "complete", "result": "ok", "task": "task-0043", "token": 2}
+{"holder": "peer-02", "kind": "grant", "task": "task-0010", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0040", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0041", "token": 1}
+{"accepted": true, "holder": "peer-06", "kind": "complete", "result": "ok", "task": "task-0035", "token": 1}
+{"holder": "peer-06", "kind": "grant", "task": "task-0013", "token": 1}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0039", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0034", "token": 1}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0030", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0045", "token": 1}
+{"accepted": true, "holder": "peer-05", "kind": "complete", "result": "ok", "task": "task-0029", "token": 1}
+{"holder": "peer-05", "kind": "grant", "task": "task-0022", "token": 1}
+{"accepted": true, "holder": "peer-07", "kind": "complete", "result": "ok", "task": "task-0019", "token": 1}
+{"holder": "peer-07", "kind": "grant", "task": "task-0011", "token": 1}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0023", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0009", "token": 1}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0045", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0018", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0041", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0014", "token": 1}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0034", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0038", "token": 1}
+{"accepted": true, "holder": "peer-05", "kind": "complete", "result": "ok", "task": "task-0022", "token": 1}
+{"holder": "peer-05", "kind": "grant", "task": "task-0028", "token": 1}
+{"accepted": true, "holder": "peer-02", "kind": "complete", "result": "ok", "task": "task-0010", "token": 1}
+{"holder": "peer-02", "kind": "grant", "task": "task-0012", "token": 1}
+{"accepted": true, "holder": "peer-07", "kind": "complete", "result": "ok", "task": "task-0011", "token": 1}
+{"holder": "peer-07", "kind": "grant", "task": "task-0013", "token": 2}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0018", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0021", "token": 1}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0009", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0024", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0014", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0003", "token": 1}
+{"accepted": false, "holder": "peer-06", "kind": "complete", "result": "ok", "task": "task-0013", "token": 1}
+{"holder": "peer-06", "kind": "grant", "task": "task-0017", "token": 1}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0024", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0027", "token": 1}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0038", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0047", "token": 1}
+{"accepted": true, "holder": "peer-05", "kind": "complete", "result": "ok", "task": "task-0028", "token": 1}
+{"holder": "peer-05", "kind": "grant", "task": "task-0036", "token": 1}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0021", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0046", "token": 1}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0047", "token": 1}
+{"holder": "peer-03", "kind": "grant", "task": "task-0031", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0003", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0015", "token": 1}
+{"accepted": true, "holder": "peer-07", "kind": "complete", "result": "ok", "task": "task-0013", "token": 2}
+{"holder": "peer-07", "kind": "grant", "task": "task-0037", "token": 1}
+{"accepted": true, "holder": "peer-02", "kind": "complete", "result": "ok", "task": "task-0012", "token": 1}
+{"holder": "peer-02", "kind": "grant", "task": "task-0017", "token": 2}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0027", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0002", "token": 1}
+{"accepted": false, "holder": "peer-06", "kind": "complete", "result": "ok", "task": "task-0017", "token": 1}
+{"holder": "peer-06", "kind": "grant", "task": "task-0004", "token": 1}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0046", "token": 1}
+{"holder": "peer-01", "kind": "grant", "task": "task-0005", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0015", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0033", "token": 1}
+{"accepted": true, "holder": "peer-06", "kind": "complete", "result": "ok", "task": "task-0004", "token": 1}
+{"holder": "peer-06", "kind": "grant", "task": "task-0016", "token": 1}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0002", "token": 1}
+{"holder": "peer-04", "kind": "grant", "task": "task-0026", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0033", "token": 1}
+{"holder": "peer-00", "kind": "grant", "task": "task-0032", "token": 1}
+{"accepted": true, "holder": "peer-07", "kind": "complete", "result": "ok", "task": "task-0037", "token": 1}
+{"holder": "peer-07", "kind": "grant", "task": "task-0000", "token": 1}
+{"accepted": true, "holder": "peer-05", "kind": "complete", "result": "ok", "task": "task-0036", "token": 1}
+{"holder": "peer-05", "kind": "grant", "task": "task-0020", "token": 1}
+{"accepted": true, "holder": "peer-01", "kind": "complete", "result": "ok", "task": "task-0005", "token": 1}
+{"accepted": true, "holder": "peer-02", "kind": "complete", "result": "ok", "task": "task-0017", "token": 2}
+{"accepted": true, "holder": "peer-03", "kind": "complete", "result": "ok", "task": "task-0031", "token": 1}
+{"accepted": true, "holder": "peer-00", "kind": "complete", "result": "ok", "task": "task-0032", "token": 1}
+{"accepted": true, "holder": "peer-04", "kind": "complete", "result": "ok", "task": "task-0026", "token": 1}
+{"accepted": true, "holder": "peer-06", "kind": "complete", "result": "ok", "task": "task-0016", "token": 1}
+{"accepted": true, "holder": "peer-05", "kind": "complete", "result": "ok", "task": "task-0020", "token": 1}
+{"accepted": true, "holder": "peer-07", "kind": "complete", "result": "ok", "task": "task-0000", "token": 1}
