@@ -121,7 +121,7 @@ inherit from.
 - KSM timing depends on the scan rate chosen here. A slower rate would cost less
   CPU and merge later; that trade was not explored.
 - Every snapshot holds one of the host's eight room slots for good, and there is
-  no command to retire one. Seven snapshots from this work plus three older ones
+  no command to retire one. Four snapshots from this work plus four older ones
   filled the pool (`pool full: all 8 slots claimed`); see follow-ups.
 - File-backed restore only. UFFD backing was not measured.
 - PSS attributes shared pages evenly between the VMMs that map them. Host
