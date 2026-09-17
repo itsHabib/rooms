@@ -1,0 +1,218 @@
+[
+ {
+  "workload": "pytask",
+  "ksm": false,
+  "clones": 1,
+  "exit": 0,
+  "wall_seconds": 37.36506489299995,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 721136,
+    "MemAvailable": 3501264,
+    "Cached": 2847584,
+    "AnonPages": 182120
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 0.0
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 89812,
+    "Pss": 89800,
+    "Pss_Anon": 61248,
+    "Pss_File": 28540,
+    "Shared_Clean": 4,
+    "Private_Clean": 28536,
+    "Private_Dirty": 61256,
+    "Anonymous": 61248,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 666940,
+     "MemAvailable": 3450216,
+     "Cached": 2850728,
+     "AnonPages": 238552
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 0.0
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "pytask",
+  "ksm": false,
+  "clones": 2,
+  "exit": 0,
+  "wall_seconds": 41.97995154700004,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 723312,
+    "MemAvailable": 3503480,
+    "Cached": 2847572,
+    "AnonPages": 174856
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 0.0
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 179660,
+    "Pss": 153328,
+    "Pss_Anon": 122528,
+    "Pss_File": 30776,
+    "Shared_Clean": 52624,
+    "Private_Clean": 4460,
+    "Private_Dirty": 122544,
+    "Anonymous": 122528,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 602880,
+     "MemAvailable": 3389424,
+     "Cached": 2853920,
+     "AnonPages": 292376
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 0.0
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "pytask",
+  "ksm": false,
+  "clones": 4,
+  "exit": 0,
+  "wall_seconds": 57.50142396399997,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 731284,
+    "MemAvailable": 3511648,
+    "Cached": 2847680,
+    "AnonPages": 167768
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 0.0
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 359256,
+    "Pss": 280094,
+    "Pss_Anon": 244796,
+    "Pss_File": 35250,
+    "Shared_Clean": 105604,
+    "Private_Clean": 8760,
+    "Private_Dirty": 244828,
+    "Anonymous": 244796,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 479292,
+     "MemAvailable": 3272448,
+     "Cached": 2860292,
+     "AnonPages": 419536
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 0.0
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "pytask",
+  "ksm": false,
+  "clones": 6,
+  "exit": 0,
+  "wall_seconds": 73.97646485400003,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 726976,
+    "MemAvailable": 3507684,
+    "Cached": 2847712,
+    "AnonPages": 169336
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 0.0
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 538836,
+    "Pss": 406837,
+    "Pss_Anon": 367148,
+    "Pss_File": 39617,
+    "Shared_Clean": 158452,
+    "Private_Clean": 13092,
+    "Private_Dirty": 367196,
+    "Anonymous": 367148,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 306772,
+     "MemAvailable": 3106916,
+     "Cached": 2866832,
+     "AnonPages": 560168
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 0.0
+   }
+  },
+  "leftover_vmms": 0
+ }
+]

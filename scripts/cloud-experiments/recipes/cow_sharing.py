@@ -21,7 +21,14 @@ PR_SET_MEMORY_MERGE = 67
 ROLLUP_FIELDS = ("Rss", "Pss", "Pss_Anon", "Pss_File", "Shared_Clean", "Private_Clean", "Private_Dirty", "Anonymous")
 KSM_FIELDS = ("pages_shared", "pages_sharing", "pages_unshared", "pages_volatile", "full_scans")
 SUBSET = "/nix/store/*-python3-* /nix/store/*-glibc-*"  # about 185 MiB, fits beside a 512 MiB guest's kernel
+# A representative task: start the interpreter, import widely, byte-compile a package, run its tests.
+PYTASK = ("export PATH=/nix/var/rooms/env/bin:$PATH; d=$(mktemp -d); "
+          "python3 -c 'import json,sqlite3,ssl,asyncio,unittest,decimal,email,xml.dom.minidom,http.client,zipfile,csv,argparse,logging' && "
+          "cp -r $(python3 -c 'import email,os;print(os.path.dirname(email.__file__))') $d/pkg && "
+          "python3 -m compileall -q $d/pkg >/dev/null && "
+          "python3 -m unittest -q test.test_json >/dev/null 2>&1 || true")
 WORKLOADS = {
+    "pytask": "set -eu\n" + PYTASK.replace("{", "{{").replace("}", "}}") + "\nsleep {hold}\n",
     "idle": "set -eu\nsleep {hold}\n",
     "subset": "set -eu\nfind " + SUBSET + " -xdev -type f -exec cat {{}} + >/dev/null 2>&1 || true\nsleep {hold}\n",
     "scan": "set -eu\nfind /nix/store -xdev -type f -exec cat {{}} + >/dev/null 2>&1 || true\nsleep {hold}\n",

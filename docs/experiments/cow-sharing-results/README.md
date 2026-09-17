@@ -76,6 +76,28 @@ measured only in the first run: 414 MiB, exit 0.
   documented timing side channel. Use it only for same-tenant rooms on a host
   that is short of memory and has CPU to spare.
 
+## A real task, not a file read
+
+`pytask` starts the interpreter, imports fourteen standard-library packages,
+byte-compiles a copy of one and runs `test.test_json`, then holds for 30 s. The
+warmed base ran that same task once as its `--warm` command.
+
+| Base | 1 clone | 2 | 4 | 6 | Private dirty at 6 |
+|---|---:|---:|---:|---:|---:|
+| cold | 88 | 150 (75) | 274 (68) | 397 (66) | 359 |
+| warmed by running the task | 93 | 125 (62) | 188 (47) | **251 (42)** | 176 |
+
+Warming still helps, by 37% at six clones, but less than for the file read (85%).
+Warming shares what the task *reads*: interpreter, libraries, bytecode. What a
+task *allocates* is private to each clone whatever the base held, and a real
+task allocates. The warm command that works is the workload's own start-up, run
+once; listing store paths by hand is not needed.
+
+Two attempts before this one failed and are not in the table: the task first
+tried to byte-compile inside the read-only store, then reused a temp directory
+the warm user owned. Both exited non-zero within seconds. Each attempt also left
+a snapshot behind, which is how the slot limit below was found.
+
 ## What this says about Nix
 
 The duplication measured in experiment 2 does not come from Nix, and it is not
@@ -98,6 +120,9 @@ inherit from.
   memory pressure. A workload that fills guest RAM loses the benefit.
 - KSM timing depends on the scan rate chosen here. A slower rate would cost less
   CPU and merge later; that trade was not explored.
+- Every snapshot holds one of the host's eight room slots for good, and there is
+  no command to retire one. Seven snapshots from this work plus three older ones
+  filled the pool (`pool full: all 8 slots claimed`); see follow-ups.
 - File-backed restore only. UFFD backing was not measured.
 - PSS attributes shared pages evenly between the VMMs that map them. Host
   `MemAvailable` deltas in the summaries track the summed PSS to within 8% for
@@ -125,7 +150,8 @@ exits.
 Per-run summaries: [run1](run1.summary.json) (cold base, all conditions, 150 s
 limit) · [run2](run2.summary.json) (cold scan, 460 s limit) ·
 [warm1](warm1.summary.json) (scan-warmed base) ·
-[subset-cold](subset-cold.summary.json) · [subset-warm](subset-warm.summary.json)
+[subset-cold](subset-cold.summary.json) · [subset-warm](subset-warm.summary.json) ·
+[pytask-cold](pytask-cold.summary.json) · [pytask-warm](pytask-warm.summary.json)
 
 [Raw evidence](evidence.tar.xz), SHA-256
 `49ffc29faf18d7c8b35abf4c1dd5ca33581ab70fb056af9a9f26326262b6fe7a`: every

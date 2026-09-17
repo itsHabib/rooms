@@ -6,6 +6,7 @@ discovered. Per-issue depth in the linked PR; this file is just the index.
 
 ## Open
 
+- 2026-09-17 — **A snapshot holds a room slot for good and nothing retires it.** `rooms snapshot` leaves a durable `@reservation` in `slots/<n>`, the artifacts are immutable, and no verb deletes a snapshot and frees its slot, so the eighth snapshot on a host makes every later `base-create` fail with `pool full: all 8 slots claimed`. Add a `rooms snapshot-rm` (refuse while clones are live) or stop charging finished snapshots against the running-room pool. (2b warm-base runs, `docs/experiments/cow-sharing-results/`)
 - 2026-09-11 — **place work on a box through runway.** `box.sh` stops at a ready host; runway's rooms adapter shells a local `rooms` and tails a local lifecycle file, so runway has to run on the box and the SSH hop goes above it (submit bundle, `runway watch --after <seq>`, `runway result`). SSH preserves runway's exit codes and reserves 255 for its own failures. ([disposable-hosts spec](features/disposable-hosts/spec.md))
 - 2026-09-11 — **boxes stop at `rooms doctor`.** Next proof on a box: build the canonical Alpine agent image and run `make e2e` (boots real rooms, asserts isolation and zero leaks). ([disposable-hosts spec](features/disposable-hosts/spec.md))
 - 2026-09-11 — **GCP boxes trust the SSH host key on first use** (per-box `known_hosts`, `StrictHostKeyChecking accept-new`). Compute Engine publishes host keys as guest attributes; pin from there before a box carries secrets. ([disposable-hosts spec](features/disposable-hosts/spec.md))
