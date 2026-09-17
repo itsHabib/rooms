@@ -11,6 +11,7 @@ runs, schedule.json.
 
 import argparse
 import json
+import math
 import os
 import platform
 import shutil
@@ -147,14 +148,15 @@ class Swarm:
         os.replace(temp, self._offset_path(event["peer"]))
 
     def wait(self, timeout_s):
-        """True if every peer exited by itself; stragglers are killed."""
+        """Wait for the peers to exit by themselves, then kill the stragglers.
+        Returns how many were still running, which is 0 for a run that finished."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline and self._running():
             time.sleep(0.02)
-        finished = not self._running()
+        stragglers = len(self._running())
         for index in range(len(self.procs)):
             self.kill({"peer": index})
-        return finished
+        return stragglers
 
     def _running(self):
         return [proc for proc in self.procs if proc and proc.poll() is None]
@@ -179,7 +181,8 @@ def percentiles(values):
     if not ordered:
         return {"n": 0}
     def rank(q):
-        return round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 3)
+        """Nearest rank: the smallest value with at least q of the samples at or below it."""
+        return round(ordered[max(0, math.ceil(q * len(ordered)) - 1)], 3)
     return {"n": len(ordered), "p50": rank(0.50), "p95": rank(0.95), "max": round(ordered[-1], 3)}
 
 
@@ -198,9 +201,9 @@ def run_once(out, name, backend, peers, tasks, peer_flags, events=None, timeout_
     try:
         swarm.start()
         faults.replay(events or [], swarm)
-        finished = swarm.wait(timeout_s)
+        stragglers = swarm.wait(timeout_s)
         wall_s = time.monotonic() - started
-        live = sum(1 for proc in swarm.procs if proc.returncode == 0) if finished else peers
+        live = stragglers + sum(1 for proc in swarm.procs if proc.returncode == 0)
         store = swarm.store()
         history = store.history()
         store.close()
@@ -216,7 +219,7 @@ def run_once(out, name, backend, peers, tasks, peer_flags, events=None, timeout_
     exits = [e for e in seen if e["ev"] == "exit"]
     return {
         "name": name, "backend": backend, "peers": peers, "tasks": tasks,
-        "finished": finished, "wall_s": round(wall_s, 3),
+        "finished": stragglers == 0, "live_peers": live, "wall_s": round(wall_s, 3),
         "throughput_tasks_per_s": round(verdict["accepted"] / wall_s, 2),
         "claim_ms": percentiles([e["claim_ms"] for e in claims]),
         "acquire_ms": percentiles([e["acquire_ms"] for e in claims]),

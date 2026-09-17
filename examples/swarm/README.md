@@ -35,10 +35,11 @@ lease; the token is what makes the store refuse its late completion.
   each slot has one winner. Completing with token *n* means winning slot
   *n + 1*, which is impossible once token *n + 1* has been granted. Expiry is
   judged by the reader's clock.
-- **RespStore** uses `SET key holder NX PX ttl` for the lease, `INCR` for the
-  token, Lua via `EVAL` for compare-and-act `extend`, `release` and `complete`,
-  and one stream (`XADD`) for grants and completions. Expiry is judged by the
-  server, so peer clock skew does not matter.
+- **RespStore** uses `SET key holder NX PX ttl` for the lease and `INCR` for
+  the token, run together with the grant's `XADD` as one Lua script so no peer
+  can stall between them. `extend`, `release` and `complete` are compare-and-act
+  Lua scripts too, and one stream carries grants and completions. Expiry is
+  judged by the server, so peer clock skew does not matter.
 
 ## Run it
 
@@ -97,7 +98,7 @@ against each real backend.
   direction, delays them, or splits the swarm into sides that each see a store.
 - **The fake server is not Redis.** It runs the commands under a Python lock in
   a threaded server, so its latency under load measures the fake and not a
-  networked store. There is no Lua: the three scripts have Python twins matched
+  networked store. There is no Lua: the four scripts have Python twins matched
   by exact text, so a script edit that is wrong Lua but right Python passes
   here. On a machine with neither server installed, `RespStore` has only been
   exercised against the fake.
@@ -114,6 +115,9 @@ against each real backend.
 - **Latency includes paused time.** A peer stopped by `SIGSTOP` in the middle
   of a claim reports the pause as claim latency; look at p50/p95, not max, in
   fault runs.
-- `acquire` on RESP is two commands (`SET NX PX`, then `INCR`). A peer stalled
-  between them for longer than the ttl can hold the newest token without the
-  lease. That costs one wasted lease, not a double completion.
+- `acquire` on RESP was first sent as two commands (`SET NX PX`, then `INCR`).
+  A peer stalled between them past the ttl would later bump the fence counter
+  beyond the token of whoever took over, invalidating the legitimate holder,
+  and a repeat could starve a task. It is now one script. The results under
+  `docs/experiments/swarm-plane-results` were recorded with the two-command
+  version.

@@ -1,7 +1,7 @@
 """A minimal threaded RESP2 server: just the commands RespStore sends.
 
 It stands in for Redis/Valkey so the tests run with nothing installed. It is
-not Redis. There is no Lua interpreter: EVAL recognises the three scripts in
+not Redis. There is no Lua interpreter: EVAL recognises the four scripts in
 store.py by their exact text and runs a Python twin of each. Commands run one
 at a time under a lock, which mirrors Redis's single command thread.
 
@@ -15,10 +15,11 @@ log, in the way an append-only file does for the real thing.
 import argparse
 import json
 import socketserver
+import sys
 import threading
 import time
 
-from store import COMPLETE_LUA, EXTEND_LUA, RELEASE_LUA
+from store import ACQUIRE_LUA, COMPLETE_LUA, EXTEND_LUA, RELEASE_LUA
 
 WRITES = {"SET", "INCR", "SADD", "XADD", "EVAL"}
 
@@ -103,9 +104,16 @@ class Engine:
                 lines = [line for line in fh if line.endswith("\n")]
         except FileNotFoundError:
             return
-        for line in lines:
+        for number, line in enumerate(lines, 1):
+            self._replay_line(path, number, line)
+
+    def _replay_line(self, path, number, line):
+        """A corrupt line is skipped with a note: losing one write beats refusing to start."""
+        try:
             now, args = json.loads(line)
             self.execute(args, now)
+        except (ValueError, TypeError, CommandError) as err:
+            print("%s:%d: skipped corrupt journal line: %s" % (path, number, err), file=sys.stderr)
 
     def _get(self, now, key, default=None):
         if self.deadline.get(key, now + 1) <= now:
@@ -187,6 +195,17 @@ class Engine:
         return twin(self, now, rest[:count], rest[count:])
 
 
+def _acquire(engine, now, keys, argv):
+    lease, fence, log = keys
+    task, holder, ttl_ms = argv
+    if engine.cmd_set(now, lease, holder, "NX", "PX", ttl_ms) is None:
+        return None
+    token = engine.cmd_incr(now, fence)
+    engine.cmd_xadd(now, log, "*", "kind", "grant", "task", task, "holder", holder,
+                    "token", str(token))
+    return token
+
+
 def _extend(engine, now, keys, argv):
     lease, fence = keys
     holder, token, ttl_ms = argv
@@ -215,7 +234,8 @@ def _complete(engine, now, keys, argv):
     return accepted
 
 
-SCRIPTS = {EXTEND_LUA: _extend, RELEASE_LUA: _release, COMPLETE_LUA: _complete}
+SCRIPTS = {ACQUIRE_LUA: _acquire, EXTEND_LUA: _extend, RELEASE_LUA: _release,
+           COMPLETE_LUA: _complete}
 
 
 class _Handler(socketserver.StreamRequestHandler):

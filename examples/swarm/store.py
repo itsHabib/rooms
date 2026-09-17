@@ -17,6 +17,7 @@ Backend failures raise OSError so callers need a single retry path.
 
 import json
 import os
+import re
 import socket
 import tempfile
 import time
@@ -24,6 +25,9 @@ import time
 
 class StoreError(OSError):
     """The store answered with an error, or the connection to it broke."""
+
+
+SLOT_NAME = re.compile(r"^\d{8}\.json$")
 
 
 def wall_ms():
@@ -127,7 +131,9 @@ class FileStore(Store):
         return os.path.join(self._task_dir(task), "%08d.json" % n)
 
     def _slots(self, task):
-        return sorted(int(name[:8]) for name in os.listdir(self._task_dir(task)))
+        """Slot numbers in order; anything not named like a slot (.DS_Store) is ignored."""
+        names = os.listdir(self._task_dir(task))
+        return sorted(int(name[:8]) for name in names if SLOT_NAME.match(name))
 
     def _read(self, task, n):
         try:
@@ -137,8 +143,7 @@ class FileStore(Store):
             return None
 
     def _owns(self, task, holder, token):
-        slot = self._read(task, token)
-        return bool(slot) and slot["kind"] == "grant" and slot["holder"] == holder
+        return _is_grant_to(self._read(task, token), holder)
 
     def _temp(self, record):
         fd, path = tempfile.mkstemp(dir=os.path.join(self.root, "tmp"))
@@ -160,7 +165,7 @@ class FileStore(Store):
         """Only the holder rewrites its own grant slot, so a rename is enough.
         A takeover can still land between the checks; fencing covers that gap."""
         slot = self._read(task, token)
-        if not self._owns(task, holder, token) or slot.get("released"):
+        if not _is_grant_to(slot, holder) or slot.get("released"):
             return False
         if self._slots(task)[-1] != token:
             return False
@@ -173,7 +178,23 @@ class FileStore(Store):
             pass
 
 
+def _is_grant_to(slot, holder):
+    return bool(slot) and slot["kind"] == "grant" and slot["holder"] == holder
+
+
 # Lua run by the server, so each check and its write are one atomic step.
+# SET NX answers false when the lease is held, which becomes a nil reply.
+# KEYS: lease, fence, log.  ARGV: task, holder, ttl_ms.
+ACQUIRE_LUA = """
+if not redis.call('SET', KEYS[1], ARGV[2], 'NX', 'PX', ARGV[3]) then
+  return false
+end
+local token = redis.call('INCR', KEYS[2])
+redis.call('XADD', KEYS[3], '*', 'kind', 'grant', 'task', ARGV[1], 'holder', ARGV[2],
+           'token', token)
+return token
+"""
+
 # KEYS: lease, fence.  ARGV: holder, token, ttl_ms.
 EXTEND_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] and redis.call('GET', KEYS[2]) == ARGV[2] then
@@ -244,10 +265,10 @@ class RespStore(Store):
     ids give the checker a server-side total order, and completions are
     appended inside the same script that accepts or rejects them.
 
-    acquire is SET NX PX followed by INCR, which are two steps. A peer stalled
-    between them for longer than the ttl ends up with the newest token but not
-    the lease; extend and release then fail for both parties and the lease
-    lapses. Safety holds because complete compares against the fence counter.
+    acquire runs SET NX PX, INCR and the grant's XADD as one script. Sent as
+    separate commands, a peer stalled after SET for longer than the ttl would
+    later INCR past the token of whoever took over, invalidating the legitimate
+    holder; repeated, that can starve a task. One script leaves no such gap.
     """
 
     def __init__(self, host, port, prefix="swarm", timeout_s=2.0):
@@ -283,12 +304,8 @@ class RespStore(Store):
         return sorted(self.call("SMEMBERS", self._key("tasks")))
 
     def acquire(self, task, holder, ttl_ms):
-        if self.call("SET", self._key("lease", task), holder, "NX", "PX", ttl_ms) is None:
-            return None
-        token = self.call("INCR", self._key("fence", task))
-        self.call("XADD", self._key("log"), "*", "kind", "grant", "task", task,
-                  "holder", holder, "token", token)
-        return token
+        keys = (self._key("lease", task), self._key("fence", task), self._key("log"))
+        return self.call("EVAL", ACQUIRE_LUA, 3, *keys, task, holder, ttl_ms)
 
     def extend(self, task, holder, token, ttl_ms):
         keys = (self._key("lease", task), self._key("fence", task))

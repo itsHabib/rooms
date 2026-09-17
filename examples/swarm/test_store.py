@@ -76,6 +76,16 @@ class StoreContract:
         self.assertTrue(verdict["ok"], verdict)
         self.assertEqual(verdict["rejected_completions"], 1)
 
+    def test_a_refused_acquire_consumes_no_token(self):
+        first = self.store.acquire("a", "p1", 5000)
+        for _ in range(3):
+            self.assertIsNone(self.store.acquire("a", "p2", 5000))
+        self.assertTrue(self.store.extend("a", "p1", first, 5000))
+        self.store.release("a", "p1", first)
+        self.assertEqual(self.store.acquire("a", "p2", 5000), first + 1)
+        grants = [e["token"] for e in self.store.history() if e["kind"] == "grant"]
+        self.assertEqual(grants, [first, first + 1])
+
     def test_history_orders_grants_before_their_completion(self):
         token = self.store.acquire("a", "p1", 5000)
         self.store.complete("a", "p1", token, "ok")
@@ -112,6 +122,16 @@ class FileStoreTest(StoreContract, unittest.TestCase):
         self.assertEqual(taken, held + 1)
         self.assertFalse(self.store.complete("a", "p1", held, "late"))
         self.assertTrue(skewed.complete("a", "p2", taken, "ok"))
+
+    def test_stray_files_in_a_task_directory_are_not_slots(self):
+        for name in (".DS_Store", "notes.json", "00000009.json.tmp"):
+            with open(os.path.join(self.tmp.name, "tasks", "a", name), "w", encoding="utf-8"):
+                pass
+        token = self.store.acquire("a", "p1", 5000)
+        self.assertEqual(token, 1)
+        self.assertTrue(self.store.extend("a", "p1", token, 5000))
+        self.assertTrue(self.store.complete("a", "p1", token, "ok"))
+        self.assertEqual(len(self.store.history()), 2)
 
     def test_an_accepted_completion_survives_a_lost_receipt_line(self):
         token = self.store.acquire("a", "p1", 5000)

@@ -1,5 +1,6 @@
 """The fake server's wire protocol and the few Redis semantics the store leans on."""
 
+import contextlib
 import io
 import os
 import socket
@@ -7,7 +8,7 @@ import tempfile
 import unittest
 
 from fake_resp import CommandError, Engine, FakeRespServer, Simple, encode_reply, read_command
-from store import COMPLETE_LUA, StoreError, encode_command, read_reply
+from store import ACQUIRE_LUA, COMPLETE_LUA, StoreError, encode_command, read_reply
 
 
 class CommandParsingTest(unittest.TestCase):
@@ -76,6 +77,28 @@ class EngineTest(unittest.TestCase):
         args = ["4", "lease", "fence", "done", "log", "t", "p1", "1", "ok"]
         self.assertEqual(self.engine.execute(["EVAL", COMPLETE_LUA] + args), 1)
         self.assertRaises(CommandError, self.engine.execute, ["EVAL", COMPLETE_LUA + " "] + args)
+
+    def test_acquire_sets_the_lease_bumps_the_fence_and_logs_in_one_step(self):
+        args = ["3", "lease", "fence", "log", "t", "p1", "100"]
+        self.assertEqual(self.engine.execute(["EVAL", ACQUIRE_LUA] + args, 1000), 1)
+        self.assertIsNone(self.engine.execute(["EVAL", ACQUIRE_LUA] + args, 1050))
+        self.assertEqual(self.engine.execute(["GET", "fence"], 1050), "1")
+        self.assertEqual(self.engine.execute(["EVAL", ACQUIRE_LUA] + args, 1100), 2)
+        tokens = [fields[-1] for _id, fields in self.engine.execute(["XRANGE", "log", "-", "+"])]
+        self.assertEqual(tokens, ["1", "2"])
+
+    def test_a_corrupt_journal_line_is_skipped_with_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "journal")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('[1, ["INCR", "n"]]\n{not json\n[2, ["NOPE"]]\n[3, ["INCR", "n"]]\n')
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                engine = Engine(path)
+            self.addCleanup(engine.close)
+            self.assertEqual(engine.execute(["INCR", "n"]), 3)
+            self.assertEqual(stderr.getvalue().count("skipped corrupt journal line"), 2)
+            self.assertIn("journal:2:", stderr.getvalue())
 
     def test_journal_replay_rebuilds_state_with_original_timestamps(self):
         with tempfile.TemporaryDirectory() as tmp:

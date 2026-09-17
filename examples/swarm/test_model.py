@@ -1,6 +1,9 @@
 """The model's verdicts: fencing is what stops a paused holder's late completion."""
 
+import contextlib
+import io
 import unittest
+from unittest import mock
 
 import model
 from model import Config
@@ -40,6 +43,13 @@ class ModelTest(unittest.TestCase):
     def test_the_done_flag_alone_keeps_exactly_once_but_not_freshness(self):
         """It caps acceptances at one, but lets the stale holder be the one accepted."""
         self.assertTrue(model.check(Config(fencing=False, done_flag=True, stale_read=True)).holds)
+
+    def test_main_exits_zero_only_when_every_verdict_is_the_expected_one(self):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(model.main(), 0)
+            title, config, expected = model.CASES[0]
+            with mock.patch.object(model, "CASES", ((title, config, not expected),)):
+                self.assertEqual(model.main(), 1)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,8 @@ def check(tasks, history, live_peers):
     stale-token    no completion was accepted once a newer token had been granted
     lost-task      no task is left unfinished while a live peer exists
     """
+    # The stale-token rule reads `history` in order: it relies on history()
+    # returning each task's grants before the completions that followed them.
     newest = {}
     accepted = {task: 0 for task in tasks}
     violations = []

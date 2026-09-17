@@ -12,7 +12,8 @@ with working <-> paused on the side. Three switches describe the store:
     stale_read   the "is it pending?" check is not atomic with the grant, so a
                  peer may acquire on the strength of an observation made earlier
 
-    python3 model.py      # prints each configuration and any counterexample
+    python3 model.py      # prints each configuration and any counterexample;
+                          # exits 1 if a verdict is not the expected one
 """
 
 import sys
@@ -90,25 +91,31 @@ def _trace(parent, state):
     return labels[::-1]
 
 
+# (title, config, whether the invariant is expected to hold)
 CASES = (
-    ("no token check", Config(fencing=False, done_flag=False, stale_read=False)),
-    ("token check", Config(fencing=True, done_flag=False, stale_read=False)),
+    ("no token check", Config(fencing=False, done_flag=False, stale_read=False), False),
+    ("token check", Config(fencing=True, done_flag=False, stale_read=False), True),
     ("token check, pending check not atomic with the grant",
-     Config(fencing=True, done_flag=False, stale_read=True)),
+     Config(fencing=True, done_flag=False, stale_read=True), False),
     ("token check + done flag, pending check not atomic",
-     Config(fencing=True, done_flag=True, stale_read=True)),
+     Config(fencing=True, done_flag=True, stale_read=True), True),
 )
 
 
 def main():
-    for title, config in CASES:
+    """Print every verdict; exit 1 if any differs from what CASES expects."""
+    surprises = 0
+    for title, config, expected in CASES:
         result = check(config)
+        surprises += result.holds != expected
         verdict = "holds" if result.holds else "VIOLATED"
         print("%s: at most one accepted completion %s (%d states)"
               % (title, verdict, result.states))
         for number, label in enumerate(result.trace, 1):
             print("  %d. %s" % (number, label))
-    return 0
+    if surprises:
+        print("%d verdict(s) differ from the expected ones" % surprises, file=sys.stderr)
+    return 1 if surprises else 0
 
 
 if __name__ == "__main__":

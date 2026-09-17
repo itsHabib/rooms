@@ -156,3 +156,14 @@ What this does and does not show:
   outage now renames the directory away and leaves a plain file in its place.
 - Peers, store and server still share one kernel. Latency between Rooms and a
   host-side server remains unmeasured.
+
+## Changes since these runs
+
+Both runs predate two harness changes, and were not repeated:
+
+- RESP `acquire` was three commands (`SET NX PX`, `INCR`, `XADD`); it is now
+  one Lua script, so expect one round trip per acquire instead of three and
+  lower RESP `acquire` latencies than the tables show.
+- Percentiles used `sorted[int(q * n)]`, one sample above the conventional
+  nearest rank. With 640 samples per cell the difference is one position in
+  the sorted list.

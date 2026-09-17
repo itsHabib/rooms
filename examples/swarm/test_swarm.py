@@ -80,7 +80,18 @@ class BenchTest(unittest.TestCase):
     def test_percentiles(self):
         self.assertEqual(bench.percentiles([]), {"n": 0})
         self.assertEqual(bench.percentiles(list(range(1, 101))),
-                         {"n": 100, "p50": 51, "p95": 96, "max": 100})
+                         {"n": 100, "p50": 50, "p95": 95, "max": 100})
+        self.assertEqual(bench.percentiles([7]), {"n": 1, "p50": 7, "p95": 7, "max": 7})
+        self.assertEqual(bench.percentiles([1, 2, 3])["p50"], 2)
+
+    def test_a_timed_out_run_counts_only_peers_that_were_really_alive(self):
+        """peer 1 is killed and never restarted, so one straggler is the only live peer."""
+        events = [{"at_ms": 50, "action": "kill", "peer": 1}]
+        flags = ["--ttl-ms", "300", "--work-ms", "400"]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = bench.run_once(tmp, "run", "file", 2, 50, flags, events, timeout_s=0.3)
+        self.assertFalse(result["finished"])
+        self.assertEqual(result["live_peers"], 1)
 
 
 if __name__ == "__main__":
