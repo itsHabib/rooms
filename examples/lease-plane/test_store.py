@@ -198,9 +198,11 @@ class RealRespStoreTest(StoreContract, unittest.TestCase):
         super().setUp()
 
     def _await_server(self):
+        probe = RespStore("127.0.0.1", self.port)
+        self.addCleanup(probe.close)
         for _ in range(250):
             try:
-                return RespStore("127.0.0.1", self.port).call("PING")
+                return probe.call("PING")
             except OSError:
                 time.sleep(0.02)
         return self.fail("server did not start")

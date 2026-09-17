@@ -1,0 +1,260 @@
+[
+ {
+  "acquire_ms": {
+   "max": 10.695,
+   "n": 240,
+   "p50": 1.657,
+   "p95": 2.603
+  },
+  "active_s": 25.677,
+  "active_tasks_per_s": 9.35,
+  "claim_attempts_rejected": 15,
+  "claim_ms": {
+   "max": 22.724,
+   "n": 240,
+   "p50": 4.145,
+   "p95": 6.052
+  },
+  "clone_exit": 0,
+  "clones": 2,
+  "faults": [],
+  "invariants": {
+   "accepted": 240,
+   "accepted_duplicates": 0,
+   "ok": true,
+   "rejected_completions": 0,
+   "violations": []
+  },
+  "live_peers": 2,
+  "lost_leases": 0,
+  "name": "rooms-n2",
+  "peers_gave_up": 0,
+  "peers_reporting": 2,
+  "store_retries": 0,
+  "tasks": 240,
+  "throughput_tasks_per_s": 7.05,
+  "wall_s": 34.052
+ },
+ {
+  "acquire_ms": {
+   "max": 5.502,
+   "n": 211,
+   "p50": 1.689,
+   "p95": 2.353
+  },
+  "active_s": 47.971,
+  "active_tasks_per_s": 5.0,
+  "claim_attempts_rejected": 0,
+  "claim_ms": {
+   "max": 17.852,
+   "n": 211,
+   "p50": 3.989,
+   "p95": 5.06
+  },
+  "clone_exit": 124,
+  "clones": 2,
+  "faults": [
+   {
+    "fault": "kill-room",
+    "room": "01m2q09vzm0ws6q4c74gs6wbjc",
+    "t": 1789625968.0586247
+   },
+   {
+    "fault": "kill-store",
+    "t": 1789625968.0594645
+   },
+   {
+    "fault": "restart-store",
+    "t": 1789625970.167796
+   }
+  ],
+  "invariants": {
+   "accepted": 240,
+   "accepted_duplicates": 0,
+   "ok": true,
+   "rejected_completions": 0,
+   "violations": []
+  },
+  "live_peers": 1,
+  "lost_leases": 1,
+  "name": "rooms-n2-faults",
+  "peers_gave_up": 0,
+  "peers_reporting": 1,
+  "store_retries": 6,
+  "tasks": 240,
+  "throughput_tasks_per_s": 1.98,
+  "wall_s": 121.501
+ },
+ {
+  "acquire_ms": {
+   "max": 15.551,
+   "n": 240,
+   "p50": 1.635,
+   "p95": 2.346
+  },
+  "active_s": 13.189,
+  "active_tasks_per_s": 18.2,
+  "claim_attempts_rejected": 44,
+  "claim_ms": {
+   "max": 72.308,
+   "n": 240,
+   "p50": 4.231,
+   "p95": 5.773
+  },
+  "clone_exit": 0,
+  "clones": 4,
+  "faults": [],
+  "invariants": {
+   "accepted": 240,
+   "accepted_duplicates": 0,
+   "ok": true,
+   "rejected_completions": 0,
+   "violations": []
+  },
+  "live_peers": 4,
+  "lost_leases": 0,
+  "name": "rooms-n4",
+  "peers_gave_up": 0,
+  "peers_reporting": 4,
+  "store_retries": 0,
+  "tasks": 240,
+  "throughput_tasks_per_s": 7.38,
+  "wall_s": 32.542
+ },
+ {
+  "acquire_ms": {
+   "max": 7.647,
+   "n": 228,
+   "p50": 1.654,
+   "p95": 2.368
+  },
+  "active_s": 19.149,
+  "active_tasks_per_s": 12.53,
+  "claim_attempts_rejected": 31,
+  "claim_ms": {
+   "max": 2671.412,
+   "n": 228,
+   "p50": 4.149,
+   "p95": 6.016
+  },
+  "clone_exit": 124,
+  "clones": 4,
+  "faults": [
+   {
+    "fault": "kill-room",
+    "room": "01m2q0ejn5ghk7kpe54qaaavyg",
+    "t": 1789626129.4700205
+   },
+   {
+    "fault": "kill-store",
+    "t": 1789626129.4718516
+   },
+   {
+    "fault": "restart-store",
+    "t": 1789626131.5813851
+   }
+  ],
+  "invariants": {
+   "accepted": 240,
+   "accepted_duplicates": 0,
+   "ok": true,
+   "rejected_completions": 0,
+   "violations": []
+  },
+  "live_peers": 3,
+  "lost_leases": 2,
+  "name": "rooms-n4-faults",
+  "peers_gave_up": 0,
+  "peers_reporting": 3,
+  "store_retries": 18,
+  "tasks": 240,
+  "throughput_tasks_per_s": 1.95,
+  "wall_s": 123.378
+ },
+ {
+  "acquire_ms": {
+   "max": 22.008,
+   "n": 240,
+   "p50": 1.363,
+   "p95": 2.169
+  },
+  "active_s": 8.94,
+  "active_tasks_per_s": 26.85,
+  "claim_attempts_rejected": 100,
+  "claim_ms": {
+   "max": 72.617,
+   "n": 240,
+   "p50": 3.942,
+   "p95": 5.96
+  },
+  "clone_exit": 0,
+  "clones": 6,
+  "faults": [],
+  "invariants": {
+   "accepted": 240,
+   "accepted_duplicates": 0,
+   "ok": true,
+   "rejected_completions": 0,
+   "violations": []
+  },
+  "live_peers": 6,
+  "lost_leases": 0,
+  "name": "rooms-n6",
+  "peers_gave_up": 0,
+  "peers_reporting": 6,
+  "store_retries": 0,
+  "tasks": 240,
+  "throughput_tasks_per_s": 6.16,
+  "wall_s": 38.95
+ },
+ {
+  "acquire_ms": {
+   "max": 14.541,
+   "n": 234,
+   "p50": 1.38,
+   "p95": 2.473
+  },
+  "active_s": 13.014,
+  "active_tasks_per_s": 18.44,
+  "claim_attempts_rejected": 84,
+  "claim_ms": {
+   "max": 79.233,
+   "n": 234,
+   "p50": 3.948,
+   "p95": 7.164
+  },
+  "clone_exit": 124,
+  "clones": 6,
+  "faults": [
+   {
+    "fault": "kill-room",
+    "room": "01m2q0khdmfxgd4pchsyxmcfbh",
+    "t": 1789626300.2050278
+   },
+   {
+    "fault": "kill-store",
+    "t": 1789626300.2059088
+   },
+   {
+    "fault": "restart-store",
+    "t": 1789626302.325636
+   }
+  ],
+  "invariants": {
+   "accepted": 240,
+   "accepted_duplicates": 0,
+   "ok": true,
+   "rejected_completions": 0,
+   "violations": []
+  },
+  "live_peers": 5,
+  "lost_leases": 5,
+  "name": "rooms-n6-faults",
+  "peers_gave_up": 0,
+  "peers_reporting": 5,
+  "store_retries": 30,
+  "tasks": 240,
+  "throughput_tasks_per_s": 1.92,
+  "wall_s": 125.073
+ }
+]
