@@ -18,6 +18,7 @@ test:
 	# Firecracker + kernel + rootfs on the host. Run e2e tests explicitly
 	# via `cargo test --features e2e` on the rooms-host VM.
 	cargo test
+	cargo test --locked --example cloud-lab
 
 test-rehearsal:
 	python3 -m unittest discover -s examples/rehearsal -p 'test_*.py'

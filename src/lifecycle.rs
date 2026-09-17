@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -51,6 +52,9 @@ pub enum Event {
     GuestReady,
     /// The workload channel is usable: sshd accepted a pubkey connection.
     SshReady,
+    /// The restored guest acknowledged fresh resume identity and hygiene.
+    /// This does not establish that its SSH workload channel is usable.
+    ResumeReady,
     /// The guest never became usable within the reachability timeout.
     GuestUnreachable { error: String },
     /// Every requested secret was staged in the guest and acked over vsock.
@@ -124,13 +128,55 @@ struct Record<'a> {
 /// break a workload. Interior locking keeps `emit` a shared-reference call;
 /// the lock is held only across one synchronous line write.
 #[derive(Debug)]
-pub struct Lifecycle(Option<Mutex<Writer>>);
+pub struct Lifecycle {
+    writer: Option<Mutex<Writer>>,
+    readiness: Option<Mutex<ReadinessClock>>,
+}
+
+/// Monotonic seconds from clone dispatch, after shared source preparation and
+/// network allocation.
+///
+/// Missing milestones remain unknown, including failures.
+/// The SSH milestone includes time waiting for other restores in the batch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ReadinessTiming {
+    pub dispatch_to_resume_ack_seconds: Option<f64>,
+    pub dispatch_to_ssh_ready_seconds: Option<f64>,
+}
+
+#[derive(Debug)]
+struct ReadinessClock {
+    started: Instant,
+    timing: ReadinessTiming,
+}
+
+impl ReadinessClock {
+    fn observe(&mut self, event: &Event) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        match event {
+            Event::ResumeReady => {
+                self.timing
+                    .dispatch_to_resume_ack_seconds
+                    .get_or_insert(elapsed);
+            }
+            Event::SshReady => {
+                self.timing
+                    .dispatch_to_ssh_ready_seconds
+                    .get_or_insert(elapsed);
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Lifecycle {
     /// The disabled sink: every [`Self::emit`] is a no-op.
     #[must_use]
     pub const fn disabled() -> Self {
-        Self(None)
+        Self {
+            writer: None,
+            readiness: None,
+        }
     }
 
     /// Create the stream file — truncating a stale one, the stream is per-run —
@@ -144,20 +190,45 @@ impl Lifecycle {
             seq: 0,
             room_id: room_id.to_owned(),
         };
-        Ok(Self(Some(Mutex::new(writer))))
+        Ok(Self {
+            writer: Some(Mutex::new(writer)),
+            readiness: None,
+        })
     }
 
     /// Whether a stream is attached — callers can skip observation-only work
     /// (extra probes) when nothing consumes it.
     #[must_use]
     pub const fn is_enabled(&self) -> bool {
-        self.0.is_some()
+        self.writer.is_some()
+    }
+
+    /// Measure the existing readiness observations without writing a stream or
+    /// enabling extra probes. Each clone owns a separate monotonic clock.
+    pub fn measured() -> Self {
+        Self {
+            writer: None,
+            readiness: Some(Mutex::new(ReadinessClock {
+                started: Instant::now(),
+                timing: ReadinessTiming::default(),
+            })),
+        }
+    }
+
+    /// Snapshot the observed milestones; a poisoned clock is unavailable.
+    pub fn readiness(&self) -> Option<ReadinessTiming> {
+        Some(self.readiness.as_ref()?.lock().ok()?.timing.clone())
     }
 
     /// Append one event, flushed and synced before returning. A failure is
     /// logged, never propagated: the stream goes incomplete, the run goes on.
     pub fn emit(&self, event: &Event) {
-        let Some(writer) = &self.0 else {
+        if let Some(clock) = &self.readiness {
+            if let Ok(mut clock) = clock.lock() {
+                clock.observe(event);
+            }
+        }
+        let Some(writer) = &self.writer else {
             return;
         };
         let Ok(mut writer) = writer.lock() else {
@@ -231,7 +302,7 @@ mod tests {
         reason = "test module"
     )]
 
-    use super::{Event, Lifecycle, WorkloadStatus};
+    use super::{Event, Lifecycle, ReadinessTiming, WorkloadStatus};
     use tempfile::tempdir;
 
     fn read_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
@@ -240,6 +311,47 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).expect("each line is standalone JSON"))
             .collect()
+    }
+
+    #[test]
+    fn readiness_is_not_inferred_from_vmm_or_workload_events() {
+        let lc = Lifecycle::measured();
+        assert!(!lc.is_enabled(), "timing must not enable ping probes");
+        lc.emit(&Event::VmmStarted { pid: Some(42) });
+        lc.emit(&Event::GuestReady);
+        lc.emit(&Event::WorkloadExited {
+            exit_code: 124,
+            status: WorkloadStatus::TimedOut,
+        });
+        assert_eq!(lc.readiness(), Some(ReadinessTiming::default()));
+        lc.emit(&Event::ResumeReady);
+        let resume = lc.readiness().expect("clock");
+        assert!(resume.dispatch_to_resume_ack_seconds.is_some());
+        assert!(resume.dispatch_to_ssh_ready_seconds.is_none());
+        lc.emit(&Event::SshReady);
+        let first = lc.readiness().expect("clock");
+        assert!(first.dispatch_to_ssh_ready_seconds >= first.dispatch_to_resume_ack_seconds);
+        lc.emit(&Event::ResumeReady);
+        lc.emit(&Event::SshReady);
+        assert_eq!(
+            lc.readiness(),
+            Some(first),
+            "duplicate events retain first observation"
+        );
+    }
+
+    #[test]
+    fn readiness_clocks_are_per_clone_and_disabled_is_unknown() {
+        let first = Lifecycle::measured();
+        let second = Lifecycle::measured();
+        first.emit(&Event::SshReady);
+        assert!(first
+            .readiness()
+            .expect("clock")
+            .dispatch_to_ssh_ready_seconds
+            .is_some());
+        assert_eq!(second.readiness(), Some(ReadinessTiming::default()));
+        assert_eq!(Lifecycle::disabled().readiness(), None);
     }
 
     #[test]
