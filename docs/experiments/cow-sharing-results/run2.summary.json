@@ -1,0 +1,326 @@
+[
+ {
+  "workload": "scan",
+  "ksm": false,
+  "clones": 2,
+  "exit": 0,
+  "wall_seconds": 79.556950959,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 2832744,
+    "MemAvailable": 3501972,
+    "Cached": 775332,
+    "AnonPages": 173064
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 339.57
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 958068,
+    "Pss": 934864,
+    "Pss_Anon": 905300,
+    "Pss_File": 29540,
+    "Shared_Clean": 46368,
+    "Private_Clean": 6352,
+    "Private_Dirty": 905316,
+    "Anonymous": 905300,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 1552400,
+     "MemAvailable": 2619632,
+     "Cached": 1172816,
+     "AnonPages": 1079380
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 339.57
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "scan",
+  "ksm": false,
+  "clones": 4,
+  "exit": 0,
+  "wall_seconds": 121.83141305699974,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 2452916,
+    "MemAvailable": 3514064,
+    "Cached": 1166704,
+    "AnonPages": 171140
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 339.57
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 1912560,
+    "Pss": 1845006,
+    "Pss_Anon": 1811032,
+    "Pss_File": 33926,
+    "Shared_Clean": 91044,
+    "Private_Clean": 10388,
+    "Private_Dirty": 1811064,
+    "Anonymous": 1811032,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 601060,
+     "MemAvailable": 1674912,
+     "Cached": 1179240,
+     "AnonPages": 1988684
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 339.57
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "scan",
+  "ksm": false,
+  "clones": 6,
+  "exit": 0,
+  "wall_seconds": 165.1158271209997,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 2465888,
+    "MemAvailable": 3527568,
+    "Cached": 1166868,
+    "AnonPages": 163236
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 339.57
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 2875608,
+    "Pss": 2761314,
+    "Pss_Anon": 2721508,
+    "Pss_File": 39734,
+    "Shared_Clean": 139096,
+    "Private_Clean": 14860,
+    "Private_Dirty": 2721556,
+    "Anonymous": 2721508,
+    "ksm_merging_pages": 0
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 75256,
+     "MemAvailable": 779980,
+     "Cached": 820028,
+     "AnonPages": 2909436
+    },
+    "ksm": {
+     "pages_shared": 0,
+     "pages_sharing": 0,
+     "pages_unshared": 0,
+     "pages_volatile": 0,
+     "full_scans": 0
+    },
+    "ksmd_cpu_seconds": 339.57
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "scan",
+  "ksm": true,
+  "clones": 2,
+  "exit": 0,
+  "wall_seconds": 149.96179748900022,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 2843608,
+    "MemAvailable": 3542376,
+    "Cached": 813892,
+    "AnonPages": 158252
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 0
+   },
+   "ksmd_cpu_seconds": 339.57
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 956860,
+    "Pss": 548592,
+    "Pss_Anon": 519312,
+    "Pss_File": 29256,
+    "Shared_Clean": 45944,
+    "Private_Clean": 6288,
+    "Private_Dirty": 248348,
+    "Anonymous": 904588,
+    "ksm_merging_pages": 170445
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 2124844,
+     "MemAvailable": 2993580,
+     "Cached": 983364,
+     "AnonPages": 686740
+    },
+    "ksm": {
+     "pages_shared": 74126,
+     "pages_sharing": 96330,
+     "pages_unshared": 5236,
+     "pages_volatile": 50938,
+     "full_scans": 590
+    },
+    "ksmd_cpu_seconds": 370.25
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "scan",
+  "ksm": true,
+  "clones": 4,
+  "exit": 0,
+  "wall_seconds": 342.11408174200005,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 2680420,
+    "MemAvailable": 3543160,
+    "Cached": 977268,
+    "AnonPages": 163416
+   },
+   "ksm": {
+    "pages_shared": 0,
+    "pages_sharing": 0,
+    "pages_unshared": 0,
+    "pages_volatile": 0,
+    "full_scans": 595
+   },
+   "ksmd_cpu_seconds": 370.41
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 1918892,
+    "Pss": 570257,
+    "Pss_Anon": 536497,
+    "Pss_File": 33710,
+    "Shared_Clean": 92416,
+    "Private_Clean": 9952,
+    "Private_Dirty": 176828,
+    "Anonymous": 1816428,
+    "ksm_merging_pages": 417856
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 2076884,
+     "MemAvailable": 2954988,
+     "Cached": 992440,
+     "AnonPages": 704216
+    },
+    "ksm": {
+     "pages_shared": 97861,
+     "pages_sharing": 320326,
+     "pages_unshared": 4846,
+     "pages_volatile": 32045,
+     "full_scans": 1165
+    },
+    "ksmd_cpu_seconds": 468.2
+   }
+  },
+  "leftover_vmms": 0
+ },
+ {
+  "workload": "scan",
+  "ksm": true,
+  "clones": 6,
+  "exit": 0,
+  "wall_seconds": 413.43705428600015,
+  "before": {
+   "meminfo_kib": {
+    "MemFree": 2669432,
+    "MemAvailable": 3535524,
+    "Cached": 980228,
+    "AnonPages": 162372
+   },
+   "ksm": {
+    "pages_shared": 2,
+    "pages_sharing": 66,
+    "pages_unshared": 20,
+    "pages_volatile": 384,
+    "full_scans": 1169
+   },
+   "ksmd_cpu_seconds": 468.4
+  },
+  "steady": {
+   "samples_used": 5,
+   "sum_kib": {
+    "Rss": 2876120,
+    "Pss": 661450,
+    "Pss_Anon": 623401,
+    "Pss_File": 37975,
+    "Shared_Clean": 138668,
+    "Private_Clean": 13988,
+    "Private_Dirty": 252640,
+    "Anonymous": 2723320,
+    "ksm_merging_pages": 627121
+   },
+   "host": {
+    "meminfo_kib": {
+     "MemFree": 1935076,
+     "MemAvailable": 2820680,
+     "Cached": 999448,
+     "AnonPages": 806336
+    },
+    "ksm": {
+     "pages_shared": 102111,
+     "pages_sharing": 525633,
+     "pages_unshared": 12786,
+     "pages_volatile": 41786,
+     "full_scans": 1785
+    },
+    "ksmd_cpu_seconds": 619.0
+   }
+  },
+  "leftover_vmms": 0
+ }
+]

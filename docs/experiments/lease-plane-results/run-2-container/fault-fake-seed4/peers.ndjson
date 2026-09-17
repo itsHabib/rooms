@@ -1,0 +1,131 @@
+{"acquire_ms": 4.363690037280321, "claim_ms": 4.588820971548557, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623480838, "task": "task-0006", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623481474, "task": "task-0006", "token": 1}
+{"acquire_ms": 0.6370989140123129, "claim_ms": 0.9295640047639608, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623481475, "task": "task-0036", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623481753}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623481804}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623481908}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623482113, "task": "task-0036", "token": 1}
+{"acquire_ms": 0.5103040020912886, "claim_ms": 0.7872690912336111, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623482114, "task": "task-0037", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623482671, "task": "task-0037", "token": 1}
+{"acquire_ms": 0.6542250048369169, "claim_ms": 0.9482321329414845, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623482672, "task": "task-0021", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623483142, "task": "task-0021", "token": 1}
+{"acquire_ms": 0.6633920129388571, "claim_ms": 1.2171140406280756, "ev": "claim", "misses": 1, "peer": "peer-00", "t": 1789623483144, "task": "task-0000", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623483876, "task": "task-0000", "token": 1}
+{"acquire_ms": 0.710558844730258, "claim_ms": 1.419867854565382, "ev": "claim", "misses": 2, "peer": "peer-00", "t": 1789623483878, "task": "task-0023", "token": 3}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623484316, "task": "task-0023", "token": 3}
+{"acquire_ms": 0.8610631339251995, "claim_ms": 1.9294230733066797, "ev": "claim", "misses": 3, "peer": "peer-00", "t": 1789623484318, "task": "task-0030", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623484738, "task": "task-0030", "token": 1}
+{"ev": "exit", "misses": 23, "peer": "peer-00", "reason": "no pending tasks", "t": 1789623485072}
+{"acquire_ms": 0.6457241252064705, "claim_ms": 0.8617709390819073, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623480831, "task": "task-0025", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623481552, "task": "task-0025", "token": 1}
+{"acquire_ms": 0.5991819780319929, "claim_ms": 0.8896470535546541, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623481553, "task": "task-0029", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623481697}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623481749}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623481860}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623482100, "task": "task-0029", "token": 1}
+{"acquire_ms": 0.8500209078192711, "claim_ms": 1.1382780503481627, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623482101, "task": "task-0018", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623482597, "task": "task-0018", "token": 1}
+{"acquire_ms": 0.6220571231096983, "claim_ms": 0.8999390993267298, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623482598, "task": "task-0022", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623483054, "task": "task-0022", "token": 1}
+{"acquire_ms": 0.5664720665663481, "claim_ms": 0.8767300751060247, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623483055, "task": "task-0041", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623483532, "task": "task-0041", "token": 1}
+{"acquire_ms": 0.569971976801753, "claim_ms": 1.1056100483983755, "ev": "claim", "misses": 1, "peer": "peer-01", "t": 1789623483534, "task": "task-0038", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623484075, "task": "task-0038", "token": 1}
+{"acquire_ms": 0.8789380080997944, "claim_ms": 1.6022471245378256, "ev": "claim", "misses": 2, "peer": "peer-01", "t": 1789623484077, "task": "task-0028", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623484373, "task": "task-0028", "token": 1}
+{"acquire_ms": 0.5220549646764994, "claim_ms": 1.0026500094681978, "ev": "claim", "misses": 1, "peer": "peer-01", "t": 1789623484374, "task": "task-0003", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623484923, "task": "task-0003", "token": 1}
+{"ev": "exit", "misses": 6, "peer": "peer-01", "reason": "no pending tasks", "t": 1789623485065}
+{"acquire_ms": 1.8909629434347153, "claim_ms": 2.3968920577317476, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623480839, "task": "task-0001", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623481239, "task": "task-0001", "token": 1}
+{"acquire_ms": 0.5555958487093449, "claim_ms": 0.8731880225241184, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623481240, "task": "task-0046", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623481644}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623481697}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623481804}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623482016, "task": "task-0046", "token": 1}
+{"acquire_ms": 0.5043039564043283, "claim_ms": 0.7896029856055975, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623482016, "task": "task-0009", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623482439, "task": "task-0009", "token": 1}
+{"acquire_ms": 0.5241790786385536, "claim_ms": 0.8005609270185232, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623482440, "task": "task-0026", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623482816, "task": "task-0026", "token": 1}
+{"acquire_ms": 0.6178480107337236, "claim_ms": 0.9349810425192118, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623482817, "task": "task-0031", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623483556, "task": "task-0031", "token": 1}
+{"acquire_ms": 0.5925979930907488, "claim_ms": 1.1616540141403675, "ev": "claim", "misses": 1, "peer": "peer-02", "t": 1789623483557, "task": "task-0032", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623484200, "task": "task-0032", "token": 1}
+{"acquire_ms": 0.518804881721735, "claim_ms": 0.8173948153853416, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623484201, "task": "task-0040", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623484601, "task": "task-0040", "token": 1}
+{"ev": "exit", "misses": 46, "peer": "peer-02", "reason": "no pending tasks", "t": 1789623485065}
+{"acquire_ms": 0.6889328360557556, "claim_ms": 0.9798980318009853, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623480828, "task": "task-0008", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623481459, "task": "task-0008", "token": 1}
+{"acquire_ms": 0.6208899430930614, "claim_ms": 0.9186060633510351, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623481460, "task": "task-0042", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623481737}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623481790}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623481891}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623482100, "task": "task-0042", "token": 1}
+{"acquire_ms": 0.8471868932247162, "claim_ms": 1.1931539047509432, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623482101, "task": "task-0047", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623482504, "task": "task-0047", "token": 1}
+{"acquire_ms": 0.6327228620648384, "claim_ms": 0.915230019018054, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623482505, "task": "task-0017", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623482796, "task": "task-0017", "token": 1}
+{"acquire_ms": 0.6978919263929129, "claim_ms": 0.9816489182412624, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623482797, "task": "task-0005", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623483365, "task": "task-0005", "token": 1}
+{"acquire_ms": 0.6054730620235205, "claim_ms": 0.9043971076607704, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623483366, "task": "task-0012", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623484037, "task": "task-0012", "token": 1}
+{"acquire_ms": 0.6167651154100895, "claim_ms": 0.9183140937238932, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623484038, "task": "task-0020", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623484566, "task": "task-0020", "token": 1}
+{"ev": "exit", "misses": 52, "peer": "peer-03", "reason": "no pending tasks", "t": 1789623485072}
+{"acquire_ms": 2.1313438192009926, "claim_ms": 3.0232409480959177, "ev": "claim", "misses": 2, "peer": "peer-04", "t": 1789623480839, "task": "task-0044", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623481509, "task": "task-0044", "token": 1}
+{"acquire_ms": 0.743726035580039, "claim_ms": 1.2091121170669794, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623481511, "task": "task-0023", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623481648}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623481699}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623481804}
+{"accepted": false, "ev": "complete", "peer": "peer-04", "t": 1789623482249, "task": "task-0023", "token": 1}
+{"acquire_ms": 0.684850150719285, "claim_ms": 0.9779410902410746, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623482250, "task": "task-0011", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623482529, "task": "task-0011", "token": 1}
+{"acquire_ms": 0.6033480167388916, "claim_ms": 0.891439151018858, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623482530, "task": "task-0024", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623482983, "task": "task-0024", "token": 1}
+{"acquire_ms": 0.6494319532066584, "claim_ms": 0.9641489014029503, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623482984, "task": "task-0010", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623483351, "task": "task-0010", "token": 1}
+{"acquire_ms": 0.5954729858785868, "claim_ms": 0.904646934941411, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623483352, "task": "task-0004", "token": 1}
+{"ev": "exit", "misses": 41, "peer": "peer-04", "reason": "no pending tasks", "t": 1789623485068}
+{"acquire_ms": 3.852885914966464, "claim_ms": 4.121059086173773, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623480821, "task": "task-0043", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623481522, "task": "task-0043", "token": 1}
+{"acquire_ms": 0.6057231221348047, "claim_ms": 1.094610197469592, "ev": "claim", "misses": 1, "peer": "peer-05", "t": 1789623481524, "task": "task-0015", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623481658}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623481710}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623481810}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623482176, "task": "task-0015", "token": 1}
+{"acquire_ms": 0.5771389696747065, "claim_ms": 0.8453538175672293, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623482177, "task": "task-0023", "token": 2}
+{"acquire_ms": 0.5712229758501053, "claim_ms": 1.2183219660073519, "ev": "claim", "misses": 2, "peer": "peer-05", "t": 1789623483755, "task": "task-0002", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623484076, "task": "task-0002", "token": 1}
+{"acquire_ms": 0.8691051043570042, "claim_ms": 1.5352051705121994, "ev": "claim", "misses": 1, "peer": "peer-05", "t": 1789623484077, "task": "task-0007", "token": 3}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623484468, "task": "task-0007", "token": 3}
+{"acquire_ms": 0.5869311280548573, "claim_ms": 1.749043120071292, "ev": "claim", "misses": 4, "peer": "peer-05", "t": 1789623484470, "task": "task-0004", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623485057, "task": "task-0004", "token": 2}
+{"ev": "exit", "misses": 0, "peer": "peer-05", "reason": "no pending tasks", "t": 1789623485057}
+{"acquire_ms": 0.6093899719417095, "claim_ms": 0.9288559667766094, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623480842, "task": "task-0039", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623481377, "task": "task-0039", "token": 1}
+{"acquire_ms": 0.6792249623686075, "claim_ms": 0.9690658189356327, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623481378, "task": "task-0013", "token": 1}
+{"attempt": 0, "error": "connection closed mid-reply", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623481648}
+{"attempt": 1, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623481699}
+{"attempt": 2, "error": "[Errno 111] Connection refused", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623481804}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623482032, "task": "task-0013", "token": 1}
+{"acquire_ms": 0.6096819415688515, "claim_ms": 0.9141059126704931, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623482033, "task": "task-0027", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623482593, "task": "task-0027", "token": 1}
+{"acquire_ms": 0.6834329105913639, "claim_ms": 0.9846489410847425, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623482594, "task": "task-0014", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623483182, "task": "task-0014", "token": 1}
+{"acquire_ms": 0.5915139336138964, "claim_ms": 1.530286855995655, "ev": "claim", "misses": 3, "peer": "peer-06", "t": 1789623483184, "task": "task-0035", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623483535, "task": "task-0035", "token": 1}
+{"acquire_ms": 0.6405161693692207, "claim_ms": 0.9615651797503233, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623483536, "task": "task-0007", "token": 2}
+{"ev": "exit", "misses": 59, "peer": "peer-06", "reason": "no pending tasks", "t": 1789623485069}
+{"acquire_ms": 0.7866441737860441, "claim_ms": 2.005132148042321, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623480840, "task": "task-0007", "token": 1}
+{"acquire_ms": 0.6491411477327347, "claim_ms": 0.9112721309065819, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623482157, "task": "task-0033", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623482459, "task": "task-0033", "token": 1}
+{"acquire_ms": 0.6103899795562029, "claim_ms": 0.8996468968689442, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623482460, "task": "task-0045", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623483074, "task": "task-0045", "token": 1}
+{"acquire_ms": 0.5886810831725597, "claim_ms": 0.9288981091231108, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623483075, "task": "task-0019", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623483808, "task": "task-0019", "token": 1}
+{"acquire_ms": 0.6152240093797445, "claim_ms": 0.8748969994485378, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623483809, "task": "task-0016", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623484343, "task": "task-0016", "token": 1}
+{"acquire_ms": 0.7339760195463896, "claim_ms": 1.2971570249646902, "ev": "claim", "misses": 1, "peer": "peer-07", "t": 1789623484345, "task": "task-0034", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623484669, "task": "task-0034", "token": 1}
+{"ev": "exit", "misses": 33, "peer": "peer-07", "reason": "no pending tasks", "t": 1789623485064}

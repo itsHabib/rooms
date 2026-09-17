@@ -1,0 +1,206 @@
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-00", "t": 1789623448417}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-00", "t": 1789623448480}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-00", "t": 1789623448585}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-00", "t": 1789623448788}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-00", "t": 1789623449190}
+{"acquire_ms": 2.9986558947712183, "claim_ms": 4.087391076609492, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623450001, "task": "task-0006", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0006/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623450635}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0006/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623450686}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0006/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623450790}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0006/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623450997}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0006/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789623451398}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623452205, "task": "task-0006", "token": 1}
+{"acquire_ms": 2.465934958308935, "claim_ms": 4.021430853754282, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623452209, "task": "task-0039", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623452681, "task": "task-0039", "token": 2}
+{"acquire_ms": 1.932881074026227, "claim_ms": 3.3772489987313747, "ev": "claim", "misses": 1, "peer": "peer-00", "t": 1789623452685, "task": "task-0027", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623453414, "task": "task-0027", "token": 1}
+{"acquire_ms": 1.4731199480593204, "claim_ms": 2.223096089437604, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623453416, "task": "task-0014", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623453892, "task": "task-0014", "token": 1}
+{"acquire_ms": 1.5327038709074259, "claim_ms": 2.363807987421751, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623453894, "task": "task-0012", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623454627, "task": "task-0012", "token": 1}
+{"acquire_ms": 1.4470349997282028, "claim_ms": 2.915279008448124, "ev": "claim", "misses": 1, "peer": "peer-00", "t": 1789623454630, "task": "task-0002", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623455046, "task": "task-0002", "token": 1}
+{"acquire_ms": 1.8049189820885658, "claim_ms": 3.4470008686184883, "ev": "claim", "misses": 2, "peer": "peer-00", "t": 1789623455050, "task": "task-0028", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623455316, "task": "task-0028", "token": 2}
+{"ev": "exit", "misses": 52, "peer": "peer-00", "reason": "no pending tasks", "t": 1789623455827}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-01", "t": 1789623448406}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-01", "t": 1789623448456}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-01", "t": 1789623448561}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-01", "t": 1789623448762}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-01", "t": 1789623449163}
+{"acquire_ms": 8.68596090003848, "claim_ms": 10.85176388733089, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623449994, "task": "task-0025", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0025/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623450565}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0025/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623450616}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0025/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623450723}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0025/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623450924}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0025/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789623451331}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623452149, "task": "task-0025", "token": 1}
+{"acquire_ms": 2.44393409229815, "claim_ms": 3.5928371362388134, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623452153, "task": "task-0033", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623452703, "task": "task-0033", "token": 1}
+{"acquire_ms": 2.12584319524467, "claim_ms": 3.0436990782618523, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623452706, "task": "task-0041", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623453206, "task": "task-0041", "token": 2}
+{"acquire_ms": 2.1638439502567053, "claim_ms": 2.8637780342251062, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623453209, "task": "task-0021", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623453670, "task": "task-0021", "token": 2}
+{"acquire_ms": 1.9888400565832853, "claim_ms": 2.889028051868081, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623453673, "task": "task-0040", "token": 3}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623454154, "task": "task-0040", "token": 3}
+{"acquire_ms": 1.8631289713084698, "claim_ms": 2.6909818407148123, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623454156, "task": "task-0004", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623454699, "task": "task-0004", "token": 2}
+{"acquire_ms": 2.010965021327138, "claim_ms": 3.0022808350622654, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623454702, "task": "task-0015", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623455001, "task": "task-0015", "token": 2}
+{"acquire_ms": 1.4682018663734198, "claim_ms": 3.5329610109329224, "ev": "claim", "misses": 3, "peer": "peer-01", "t": 1789623455005, "task": "task-0024", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623455557, "task": "task-0024", "token": 1}
+{"ev": "exit", "misses": 15, "peer": "peer-01", "reason": "no pending tasks", "t": 1789623455827}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-02", "t": 1789623448395}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-02", "t": 1789623448453}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-02", "t": 1789623448561}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-02", "t": 1789623448762}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-02", "t": 1789623449163}
+{"acquire_ms": 10.297707980498672, "claim_ms": 12.594679836183786, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623449993, "task": "task-0001", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623450398, "task": "task-0001", "token": 1}
+{"acquire_ms": 3.887302940711379, "claim_ms": 6.64095301181078, "ev": "claim", "misses": 1, "peer": "peer-02", "t": 1789623450405, "task": "task-0046", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623450686}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623450738}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623450839}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623451044}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789623451450}
+{"accepted": false, "ev": "complete", "peer": "peer-02", "t": 1789623452262, "task": "task-0046", "token": 1}
+{"acquire_ms": 2.5964798405766487, "claim_ms": 3.528377041220665, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623452266, "task": "task-0010", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623452687, "task": "task-0010", "token": 1}
+{"acquire_ms": 2.129092812538147, "claim_ms": 2.936570905148983, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623452690, "task": "task-0029", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623453114, "task": "task-0029", "token": 1}
+{"acquire_ms": 1.9567138515412807, "claim_ms": 3.608088009059429, "ev": "claim", "misses": 1, "peer": "peer-02", "t": 1789623453118, "task": "task-0040", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-02", "t": 1789623453669, "task": "task-0040", "token": 1}
+{"acquire_ms": 2.5646870490163565, "claim_ms": 4.547818098217249, "ev": "claim", "misses": 1, "peer": "peer-02", "t": 1789623453674, "task": "task-0004", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-02", "t": 1789623454295, "task": "task-0004", "token": 1}
+{"acquire_ms": 2.1636357996612787, "claim_ms": 3.141367807984352, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623454298, "task": "task-0011", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623454897, "task": "task-0011", "token": 1}
+{"acquire_ms": 1.889087026938796, "claim_ms": 2.827777061611414, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623454900, "task": "task-0028", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-02", "t": 1789623455371, "task": "task-0028", "token": 1}
+{"ev": "exit", "misses": 42, "peer": "peer-02", "reason": "no pending tasks", "t": 1789623455827}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-03", "t": 1789623448432}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-03", "t": 1789623448491}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-03", "t": 1789623448595}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-03", "t": 1789623448797}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-03", "t": 1789623449201}
+{"acquire_ms": 8.123614126816392, "claim_ms": 10.732094058766961, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623450030, "task": "task-0008", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0008/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623450573}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0008/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623450628}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0008/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623450730}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0008/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623450935}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0008/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789623451338}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623452149, "task": "task-0008", "token": 1}
+{"acquire_ms": 3.7814669776707888, "claim_ms": 4.813200095668435, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623452154, "task": "task-0046", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623452427, "task": "task-0046", "token": 2}
+{"acquire_ms": 1.9655898213386536, "claim_ms": 2.951779868453741, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623452430, "task": "task-0030", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623452830, "task": "task-0030", "token": 1}
+{"acquire_ms": 1.980131957679987, "claim_ms": 3.4120408818125725, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623452833, "task": "task-0017", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623453124, "task": "task-0017", "token": 1}
+{"acquire_ms": 2.382933162152767, "claim_ms": 3.3727071713656187, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623453127, "task": "task-0026", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623453820, "task": "task-0026", "token": 1}
+{"acquire_ms": 1.9927150569856167, "claim_ms": 2.900945022702217, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623453823, "task": "task-0034", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623454097, "task": "task-0034", "token": 1}
+{"acquire_ms": 1.7337501049041748, "claim_ms": 2.590063028037548, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623454100, "task": "task-0037", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-03", "t": 1789623454658, "task": "task-0037", "token": 1}
+{"acquire_ms": 1.9282139837741852, "claim_ms": 3.6032130010426044, "ev": "claim", "misses": 1, "peer": "peer-03", "t": 1789623454662, "task": "task-0036", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-03", "t": 1789623455298, "task": "task-0036", "token": 1}
+{"ev": "exit", "misses": 52, "peer": "peer-03", "reason": "no pending tasks", "t": 1789623455828}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-04", "t": 1789623448440}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-04", "t": 1789623448494}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-04", "t": 1789623448598}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-04", "t": 1789623448799}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-04", "t": 1789623449199}
+{"acquire_ms": 4.753364948555827, "claim_ms": 15.00848913565278, "ev": "claim", "misses": 2, "peer": "peer-04", "t": 1789623450036, "task": "task-0044", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0044/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623450595}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0044/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623450653}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0044/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623450755}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0044/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623450957}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0044/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789623451364}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623452171, "task": "task-0044", "token": 1}
+{"acquire_ms": 2.054590964689851, "claim_ms": 3.0254479497671127, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623452175, "task": "task-0045", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623452926, "task": "task-0045", "token": 1}
+{"acquire_ms": 1.67675013653934, "claim_ms": 2.507978118956089, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623452929, "task": "task-0009", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623453576, "task": "task-0009", "token": 1}
+{"acquire_ms": 1.6582070384174585, "claim_ms": 3.7333399523049593, "ev": "claim", "misses": 2, "peer": "peer-04", "t": 1789623453580, "task": "task-0047", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623453868, "task": "task-0047", "token": 1}
+{"acquire_ms": 1.7470000311732292, "claim_ms": 2.7088571805506945, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623453871, "task": "task-0022", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623454175, "task": "task-0022", "token": 1}
+{"acquire_ms": 1.9216709770262241, "claim_ms": 4.08330699428916, "ev": "claim", "misses": 2, "peer": "peer-04", "t": 1789623454179, "task": "task-0003", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623454715, "task": "task-0003", "token": 1}
+{"acquire_ms": 1.7225421033799648, "claim_ms": 3.2658709678798914, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789623454718, "task": "task-0032", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623455451, "task": "task-0032", "token": 1}
+{"ev": "exit", "misses": 29, "peer": "peer-04", "reason": "no pending tasks", "t": 1789623455827}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-05", "t": 1789623448441}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-05", "t": 1789623448492}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-05", "t": 1789623448595}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-05", "t": 1789623448798}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-05", "t": 1789623449199}
+{"acquire_ms": 6.918460130691528, "claim_ms": 8.630668045952916, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623450028, "task": "task-0043", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0043/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623450590}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0043/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623450641}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0043/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623450742}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0043/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623450950}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0043/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789623451356}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623452163, "task": "task-0043", "token": 1}
+{"acquire_ms": 1.973048085346818, "claim_ms": 2.9809889383614063, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623452166, "task": "task-0031", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623452828, "task": "task-0031", "token": 1}
+{"acquire_ms": 1.95279810577631, "claim_ms": 3.38358199223876, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623452831, "task": "task-0023", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623453471, "task": "task-0023", "token": 1}
+{"acquire_ms": 1.9008801318705082, "claim_ms": 2.8234440833330154, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623453474, "task": "task-0020", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623454148, "task": "task-0020", "token": 1}
+{"acquire_ms": 1.6528309788554907, "claim_ms": 2.518935827538371, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623454150, "task": "task-0035", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623454492, "task": "task-0035", "token": 1}
+{"acquire_ms": 2.5301449932157993, "claim_ms": 3.5864210221916437, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623454495, "task": "task-0037", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623454965, "task": "task-0037", "token": 2}
+{"acquire_ms": 1.612914027646184, "claim_ms": 3.7690920289605856, "ev": "claim", "misses": 2, "peer": "peer-05", "t": 1789623454969, "task": "task-0005", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623455619, "task": "task-0005", "token": 1}
+{"ev": "exit", "misses": 9, "peer": "peer-05", "reason": "no pending tasks", "t": 1789623455828}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-06", "t": 1789623448816}
+{"acquire_ms": 5.646220175549388, "claim_ms": 8.414329029619694, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623448887, "task": "task-0039", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623449027}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623449081}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623449187}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623449396}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623449798}
+{"attempt": 5, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623450599}
+{"attempt": 6, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0039/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789623451602}
+{"accepted": false, "ev": "complete", "peer": "peer-06", "t": 1789623452607, "task": "task-0039", "token": 1}
+{"acquire_ms": 1.9727558828890324, "claim_ms": 3.6348379217088223, "ev": "claim", "misses": 1, "peer": "peer-06", "t": 1789623452611, "task": "task-0041", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-06", "t": 1789623453125, "task": "task-0041", "token": 1}
+{"acquire_ms": 2.618231112137437, "claim_ms": 3.460584208369255, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623453128, "task": "task-0021", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-06", "t": 1789623453418, "task": "task-0021", "token": 1}
+{"acquire_ms": 2.4487681221216917, "claim_ms": 3.2590380869805813, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623453422, "task": "task-0040", "token": 2}
+{"accepted": false, "ev": "complete", "peer": "peer-06", "t": 1789623454068, "task": "task-0040", "token": 2}
+{"acquire_ms": 2.302098087966442, "claim_ms": 4.360314924269915, "ev": "claim", "misses": 1, "peer": "peer-06", "t": 1789623454073, "task": "task-0015", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-06", "t": 1789623454704, "task": "task-0015", "token": 1}
+{"acquire_ms": 2.021965105086565, "claim_ms": 4.520443035289645, "ev": "claim", "misses": 2, "peer": "peer-06", "t": 1789623454709, "task": "task-0016", "token": 1}
+{"accepted": false, "ev": "complete", "peer": "peer-06", "t": 1789623455111, "task": "task-0016", "token": 1}
+{"ev": "exit", "misses": 88, "peer": "peer-06", "reason": "no pending tasks", "t": 1789623455828}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-07", "t": 1789623448439}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-07", "t": 1789623448492}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-07", "t": 1789623448595}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-07", "t": 1789623448796}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tmp'", "ev": "retry", "op": "seed", "peer": "peer-07", "t": 1789623449199}
+{"acquire_ms": 6.246735109016299, "claim_ms": 9.09259612672031, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623450029, "task": "task-0007", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623450364, "task": "task-0007", "token": 1}
+{"acquire_ms": 3.0717418994754553, "claim_ms": 4.483442986384034, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623450369, "task": "task-0042", "token": 1}
+{"attempt": 0, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-07", "t": 1789623450639}
+{"attempt": 1, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-07", "t": 1789623450690}
+{"attempt": 2, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-07", "t": 1789623450791}
+{"attempt": 3, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-07", "t": 1789623450997}
+{"attempt": 4, "error": "[Errno 20] Not a directory: 'docs/experiments/swarm-plane-results/run-2-container/fault-file-seed5/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-07", "t": 1789623451398}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623452207, "task": "task-0042", "token": 1}
+{"acquire_ms": 2.505603013560176, "claim_ms": 3.5165860317647457, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623452211, "task": "task-0013", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623452907, "task": "task-0013", "token": 1}
+{"acquire_ms": 1.6392481047660112, "claim_ms": 2.4804770946502686, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623452910, "task": "task-0038", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623453652, "task": "task-0038", "token": 1}
+{"acquire_ms": 1.6823741607367992, "claim_ms": 3.1290340702980757, "ev": "claim", "misses": 1, "peer": "peer-07", "t": 1789623453655, "task": "task-0019", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623454201, "task": "task-0019", "token": 1}
+{"acquire_ms": 1.7650849185883999, "claim_ms": 4.070057068020105, "ev": "claim", "misses": 2, "peer": "peer-07", "t": 1789623454205, "task": "task-0000", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623454560, "task": "task-0000", "token": 1}
+{"acquire_ms": 1.8217109609395266, "claim_ms": 2.827652031555772, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623454563, "task": "task-0018", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623454831, "task": "task-0018", "token": 1}
+{"acquire_ms": 2.4902268778532743, "claim_ms": 3.428166965022683, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623454835, "task": "task-0016", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623455147, "task": "task-0016", "token": 2}
+{"acquire_ms": 1.9784229807555676, "claim_ms": 3.8953451439738274, "ev": "claim", "misses": 2, "peer": "peer-07", "t": 1789623455151, "task": "task-0036", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623455827, "task": "task-0036", "token": 2}
+{"ev": "exit", "misses": 0, "peer": "peer-07", "reason": "no pending tasks", "t": 1789623455832}

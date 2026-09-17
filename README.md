@@ -30,6 +30,8 @@ The [cloud lab guide](docs/experiments/cloud-lab.md) explains how to repeat a
 workload, retain its receipts, measure memory and inspect cleanup. The runner is
 Rust (`cargo build --release --example cloud-lab`) and uses the same Rooms CLI as
 an agent or CI consumer. It records exact input hashes and keeps failed runs.
+The [readiness experiment](docs/experiments/readiness-results/README.md) separates
+resume acknowledgement, authenticated SSH and workload completion with retained samples.
 
 The [experiment tracker](docs/experiments/ten-experiments.md) separates
 measurements from unfinished work. It now includes three planned additions: [NVMe/LVM storage, eBPF tracing and deployment telemetry/UI](docs/experiments/storage-observability-deployments.md). So far, the disposable GCP lab has run the
