@@ -36,7 +36,8 @@ memory per room and time to first command?
 - tools baked into the base snapshot, with no store device
 
 Measure PSS per room, host page cache, time from dispatch to first command,
-build time and artifact bytes. Reuse the readiness fields from PR126.
+build time and artifact bytes. Reuse the per-clone `dispatch_to_resume_ack_seconds`
+and `dispatch_to_ssh_ready_seconds` readiness fields from the clone JSON record.
 
 ### 2b. Snapshot as the package manager (*local*)
 
@@ -56,7 +57,7 @@ room", attempted under a Nix flake, a Dockerfile converted to a rootfs,
 mise or devbox, and apt followed by a snapshot. Count attempts, wall time and
 the final reproducibility of each. Scoped model budget, stated before the run.
 
-### 2d. Lazy and chunked images
+### 2d. Lazy and chunked images (*cloud*)
 
 **Question:** can a host start a room after fetching only the chunks it touches?
 
@@ -92,7 +93,7 @@ partition made with experiment 6's egress controls, and recovery after the store
 is killed. Model-check the lease protocol and replay the model's traces against
 the running system.
 
-### 16. Speculative swarm
+### 16. Speculative swarm (*local, model budget*)
 
 **Question:** does re-forking from the current best branch beat independent
 branches at the same cost?
@@ -102,7 +103,7 @@ let peers publish partial scores to the store from 15; a coordinator kills
 losers early and re-forks the leader. Compare quality per dollar with serial
 execution and with N independent branches. Scoped model budget.
 
-### 17. Peer-to-peer snapshot distribution
+### 17. Peer-to-peer snapshot distribution (*cloud*)
 
 **Question:** can hosts exchange snapshot chunks directly, with no central bucket?
 
@@ -110,7 +111,7 @@ execution and with N independent branches. Scoped model budget.
 each other. Measure time to ready on a third host as the number of seeding hosts
 grows, and verify every chunk hash on receipt.
 
-### 18. Work stealing and autonomous failover
+### 18. Work stealing and autonomous failover (*cloud*)
 
 **Question:** can surviving hosts finish a preempted host's rooms with no
 coordinator involvement?
