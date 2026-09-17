@@ -44,18 +44,18 @@ lease; the token is what makes the store refuse its late completion.
 ## Run it
 
 ```sh
-make test-swarm                       # or: python3 -m unittest discover -s examples/swarm -p 'test_*.py'
-python3 examples/swarm/model.py       # the model's verdicts and counterexample traces
-python3 examples/swarm/faults.py --seed 7 --peers 8       # print a schedule
-python3 examples/swarm/bench.py --out /tmp/swarm-run      # 4/16/64 peers, then 5 fault seeds
+make test-lease-plane                       # or: python3 -m unittest discover -s examples/lease-plane -p 'test_*.py'
+python3 examples/lease-plane/model.py       # the model's verdicts and counterexample traces
+python3 examples/lease-plane/faults.py --seed 7 --peers 8       # print a schedule
+python3 examples/lease-plane/bench.py --out /tmp/swarm-run      # 4/16/64 peers, then 5 fault seeds
 ```
 
 One peer by hand, against a directory or a server:
 
 ```sh
-python3 examples/swarm/peer.py --store file:/tmp/swarm-store --peer-id a --tasks 20
-python3 examples/swarm/fake_resp.py --port 6390 &
-python3 examples/swarm/peer.py --store resp:127.0.0.1:6390 --peer-id a --tasks 20
+python3 examples/lease-plane/peer.py --store file:/tmp/swarm-store --peer-id a --tasks 20
+python3 examples/lease-plane/fake_resp.py --port 6390 &
+python3 examples/lease-plane/peer.py --store resp:127.0.0.1:6390 --peer-id a --tasks 20
 ```
 
 If `valkey-server` or `redis-server` is on `PATH`, the contract tests also run
@@ -76,7 +76,7 @@ is under test and not the peer's good manners.
 
 `bench.py` refuses to write into an existing directory. Results from one
 machine are in
-[`docs/experiments/swarm-plane-results`](../../docs/experiments/swarm-plane-results/README.md).
+[`docs/experiments/lease-plane-results`](../../docs/experiments/lease-plane-results/README.md).
 
 ## What the model shows
 
@@ -119,5 +119,5 @@ against each real backend.
   A peer stalled between them past the ttl would later bump the fence counter
   beyond the token of whoever took over, invalidating the legitimate holder,
   and a repeat could starve a task. It is now one script. The results under
-  `docs/experiments/swarm-plane-results` were recorded with the two-command
+  `docs/experiments/lease-plane-results` were recorded with the two-command
   version.

@@ -1,6 +1,6 @@
 # Swarm state plane: first local results
 
-One run of [`examples/swarm/bench.py`](../../../examples/swarm/README.md) in
+One run of [`examples/lease-plane/bench.py`](../../../examples/lease-plane/README.md) in
 process mode on one laptop, 2026-09-16. It compares lease coordination on a
 shared directory with the same protocol spoken over RESP, then replays five
 seeded fault schedules against each. Raw data is in [`run-1/`](run-1/):
@@ -9,7 +9,7 @@ seeded fault schedules against each. Raw data is in [`run-1/`](run-1/):
 `schedule.json`.
 
 ```sh
-python3 examples/swarm/bench.py --out docs/experiments/swarm-plane-results/run-1 \
+python3 examples/lease-plane/bench.py --out docs/experiments/lease-plane-results/run-1 \
   --tasks 640 --fault-seeds 5
 ```
 
@@ -102,7 +102,7 @@ takeovers happen.
 - The fake server is not Redis, and no real server was available.
 - A local APFS directory is not the shared filesystem guests would use.
 - Passing five seeds is evidence, not proof. The proof-shaped part is
-  `python3 examples/swarm/model.py`, which covers two peers and one task
+  `python3 examples/lease-plane/model.py`, which covers two peers and one task
   exhaustively, and the checker's control test, which shows a store without
   fencing is caught.
 - The schedule for a seed is reproducible byte for byte; process timing is
@@ -120,8 +120,8 @@ within a run, not across runs.
 ```sh
 docker run --rm -v "$PWD":/w -w /w python:3.12-slim sh -c \
   "apt-get update -qq && apt-get install -y -qq redis-server && \
-   python -m unittest discover -s examples/swarm -p 'test_*.py' && \
-   python examples/swarm/bench.py --out /w/docs/experiments/swarm-plane-results/run-2-container"
+   python -m unittest discover -s examples/lease-plane -p 'test_*.py' && \
+   python examples/lease-plane/bench.py --out /w/docs/experiments/lease-plane-results/run-2-container"
 ```
 
 640 tasks, 20 ms work, one run per cell, milliseconds.

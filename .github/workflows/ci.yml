@@ -61,15 +61,15 @@ jobs:
           name: payment-rehearsal
           path: ${{ runner.temp }}/payment-rehearsal
 
-  swarm:
+  lease-plane:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-      - run: make test-swarm
-      - run: python3 examples/swarm/model.py
+      - run: make test-lease-plane
+      - run: python3 examples/lease-plane/model.py
 
   audit:
     runs-on: ubuntu-latest
