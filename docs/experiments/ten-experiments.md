@@ -36,3 +36,5 @@ explicitly requested that the code, failures, receipts and lessons be reusable b
 colleagues. Keep README links and per-experiment limits current as evidence lands.
 
 Final lab inventory is clear; see [results, raw receipts and cleanup](cloud-results/README.md). No paid test hosts remain.
+
+Further planned experiments (tool delivery alternatives to the Nix toolstore, Fleet swarms and shared state) are in [next-experiments.md](next-experiments.md).
