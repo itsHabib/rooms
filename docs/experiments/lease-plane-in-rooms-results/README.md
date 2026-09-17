@@ -10,7 +10,7 @@ the host killed a clone and restarted the store while peers held leases.
 Local Lima VZ host: aarch64, 6 vCPU, 4 GiB, nested KVM, Firecracker 1.15.0,
 512 MiB single-vCPU guests. `redis-server` 7.0.15 from Ubuntu 24.04, bound to
 the host's `eth0` address with append-only persistence and `appendfsync always`.
-[`rooms_swarm.py`](../../../examples/lease-plane/rooms_peers.py) starts the server,
+[`rooms_peers.py`](../../../examples/lease-plane/rooms_peers.py) starts the server,
 seeds the tasks, and runs `rooms clone -n N --command …`. The command carries
 `store.py` and `peer.py` as a base64 tarball, so the guest needs only the
 toolstore's Python. Each peer takes its id from `/proc/sys/kernel/random/uuid`;
