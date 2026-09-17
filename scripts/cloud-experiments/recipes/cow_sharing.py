@@ -116,7 +116,10 @@ def run_condition(args, workload, ksm, count, out):
     sampler = threading.Thread(target=sample_until, args=(stop, samples))
     sampler.start()
     started = time.monotonic()
+    print(out.name, "started", flush=True)
     try:
+        # preexec_fn is unsafe with threads running if it can take a lock; opt_into_ksm
+        # makes one bare prctl syscall and must stay that small.
         done = subprocess.run(argv, capture_output=True, text=True, timeout=args.hold + args.slack + 300,
                               preexec_fn=opt_into_ksm if ksm else None, check=False)
     finally:
@@ -142,6 +145,8 @@ def main():
     parser.add_argument("--workloads", default=",".join(WORKLOADS))
     parser.add_argument("--ksm", default="0,1", help="0, 1 or 0,1")
     args = parser.parse_args()
+    if not KSM.joinpath("run").exists():
+        parser.error("this kernel has no KSM (/sys/kernel/mm/ksm); every sample would fail")
     root = Path(args.out)
     root.mkdir(parents=True)  # refuses to reuse a previous run's directory
     rows = []
