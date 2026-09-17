@@ -1,0 +1,1296 @@
+{"acquire_ms": 0.5813890602439642, "claim_ms": 2.8811960946768522, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495639, "task": "task-0565", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495666, "task": "task-0565", "token": 1}
+{"acquire_ms": 1.6321649309247732, "claim_ms": 2.9874069150537252, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495669, "task": "task-0284", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495693, "task": "task-0284", "token": 1}
+{"acquire_ms": 3.24024586006999, "claim_ms": 5.981354974210262, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495699, "task": "task-0200", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495712, "task": "task-0200", "token": 1}
+{"acquire_ms": 1.369324978441, "claim_ms": 2.635897835716605, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495715, "task": "task-0060", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495743, "task": "task-0060", "token": 1}
+{"acquire_ms": 2.7756509371101856, "claim_ms": 4.833494080230594, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495748, "task": "task-0579", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495770, "task": "task-0579", "token": 1}
+{"acquire_ms": 1.2509888038039207, "claim_ms": 2.2557219490408897, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495772, "task": "task-0429", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495794, "task": "task-0429", "token": 1}
+{"acquire_ms": 2.2867219522595406, "claim_ms": 3.9002199191600084, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495798, "task": "task-0116", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495823, "task": "task-0116", "token": 1}
+{"acquire_ms": 2.613564021885395, "claim_ms": 4.273730097338557, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495828, "task": "task-0626", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495855, "task": "task-0626", "token": 1}
+{"acquire_ms": 1.6289150808006525, "claim_ms": 2.8433611150830984, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495858, "task": "task-0214", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495887, "task": "task-0214", "token": 1}
+{"acquire_ms": 1.5709558501839638, "claim_ms": 3.9973899256438017, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495891, "task": "task-0312", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495919, "task": "task-0312", "token": 1}
+{"acquire_ms": 1.284281024709344, "claim_ms": 2.1618029568344355, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495921, "task": "task-0035", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495939, "task": "task-0035", "token": 1}
+{"acquire_ms": 1.3422411866486073, "claim_ms": 2.39935121499002, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495942, "task": "task-0001", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495963, "task": "task-0001", "token": 1}
+{"acquire_ms": 1.083318144083023, "claim_ms": 2.495644148439169, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495965, "task": "task-0077", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623495981, "task": "task-0077", "token": 1}
+{"acquire_ms": 2.2132631856948137, "claim_ms": 3.4796271938830614, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623495984, "task": "task-0038", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496010, "task": "task-0038", "token": 1}
+{"acquire_ms": 1.7152500804513693, "claim_ms": 3.261120989918709, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496013, "task": "task-0129", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496030, "task": "task-0129", "token": 1}
+{"acquire_ms": 1.3391170650720596, "claim_ms": 2.3298910818994045, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496033, "task": "task-0259", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496046, "task": "task-0259", "token": 1}
+{"acquire_ms": 2.497310983017087, "claim_ms": 5.252295173704624, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496052, "task": "task-0134", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496082, "task": "task-0134", "token": 1}
+{"acquire_ms": 1.3180321548134089, "claim_ms": 3.177243983373046, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496085, "task": "task-0092", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496100, "task": "task-0092", "token": 1}
+{"acquire_ms": 0.9011891670525074, "claim_ms": 1.878587994724512, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496102, "task": "task-0267", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496126, "task": "task-0267", "token": 1}
+{"acquire_ms": 1.1626540217548609, "claim_ms": 2.5242711417376995, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496129, "task": "task-0159", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496147, "task": "task-0159", "token": 1}
+{"acquire_ms": 1.2611967977136374, "claim_ms": 2.8425687924027443, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496150, "task": "task-0322", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496165, "task": "task-0322", "token": 1}
+{"acquire_ms": 1.9132131710648537, "claim_ms": 3.8844291120767593, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496170, "task": "task-0094", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496200, "task": "task-0094", "token": 1}
+{"acquire_ms": 1.3965338002890348, "claim_ms": 2.8976129833608866, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496203, "task": "task-0303", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496219, "task": "task-0303", "token": 1}
+{"acquire_ms": 1.9787570927292109, "claim_ms": 3.983014030382037, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496224, "task": "task-0359", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496255, "task": "task-0359", "token": 1}
+{"acquire_ms": 2.326016081497073, "claim_ms": 4.130935063585639, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496259, "task": "task-0138", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496291, "task": "task-0138", "token": 1}
+{"acquire_ms": 2.4123091716319323, "claim_ms": 4.719199147075415, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496296, "task": "task-0309", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496316, "task": "task-0309", "token": 1}
+{"acquire_ms": 1.2867399491369724, "claim_ms": 2.640689956024289, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496319, "task": "task-0317", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496330, "task": "task-0317", "token": 1}
+{"acquire_ms": 1.7634599935263395, "claim_ms": 3.719090949743986, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496335, "task": "task-0481", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496356, "task": "task-0481", "token": 1}
+{"acquire_ms": 1.4671608805656433, "claim_ms": 4.2922720313072205, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496361, "task": "task-0610", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496373, "task": "task-0610", "token": 1}
+{"acquire_ms": 1.2963239569216967, "claim_ms": 2.88602989166975, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496377, "task": "task-0533", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496403, "task": "task-0533", "token": 1}
+{"acquire_ms": 1.0018579196184874, "claim_ms": 2.1398859098553658, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496405, "task": "task-0534", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496430, "task": "task-0534", "token": 1}
+{"acquire_ms": 1.6619160305708647, "claim_ms": 2.885946072638035, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496433, "task": "task-0334", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496457, "task": "task-0334", "token": 1}
+{"acquire_ms": 1.338199945166707, "claim_ms": 2.707857871428132, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496460, "task": "task-0425", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496489, "task": "task-0425", "token": 1}
+{"acquire_ms": 3.5100451204925776, "claim_ms": 6.306363036856055, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496495, "task": "task-0343", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496518, "task": "task-0343", "token": 1}
+{"acquire_ms": 2.704898826777935, "claim_ms": 4.6137378085404634, "ev": "claim", "misses": 1, "peer": "peer-00", "t": 1789623496523, "task": "task-0487", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496548, "task": "task-0487", "token": 1}
+{"acquire_ms": 1.2908228673040867, "claim_ms": 2.65731499530375, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496551, "task": "task-0356", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496570, "task": "task-0356", "token": 1}
+{"acquire_ms": 2.1175520960241556, "claim_ms": 3.9411799516528845, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496575, "task": "task-0364", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496588, "task": "task-0364", "token": 1}
+{"acquire_ms": 2.9758650343865156, "claim_ms": 5.846184911206365, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496595, "task": "task-0531", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496622, "task": "task-0531", "token": 1}
+{"acquire_ms": 3.216078970581293, "claim_ms": 5.828309804201126, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789623496629, "task": "task-0631", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789623496657, "task": "task-0631", "token": 1}
+{"ev": "exit", "misses": 11, "peer": "peer-00", "reason": "no pending tasks", "t": 1789623496702}
+{"acquire_ms": 1.2588638346642256, "claim_ms": 7.474557962268591, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495646, "task": "task-0614", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495662, "task": "task-0614", "token": 1}
+{"acquire_ms": 2.0700921304523945, "claim_ms": 4.128559958189726, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495667, "task": "task-0033", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495688, "task": "task-0033", "token": 1}
+{"acquire_ms": 1.4885780401527882, "claim_ms": 2.964489161968231, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495692, "task": "task-0508", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495711, "task": "task-0508", "token": 1}
+{"acquire_ms": 1.5251620206981897, "claim_ms": 2.9319878667593002, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495714, "task": "task-0313", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495745, "task": "task-0313", "token": 1}
+{"acquire_ms": 2.484060823917389, "claim_ms": 4.469068953767419, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495750, "task": "task-0315", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495764, "task": "task-0315", "token": 1}
+{"acquire_ms": 0.7581859827041626, "claim_ms": 1.6068730037659407, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495766, "task": "task-0592", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495778, "task": "task-0592", "token": 1}
+{"acquire_ms": 2.236054977402091, "claim_ms": 4.088683985173702, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495783, "task": "task-0410", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495798, "task": "task-0410", "token": 1}
+{"acquire_ms": 1.6018310561776161, "claim_ms": 3.493127878755331, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495801, "task": "task-0607", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495825, "task": "task-0607", "token": 1}
+{"acquire_ms": 2.0813429728150368, "claim_ms": 4.055015975609422, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495830, "task": "task-0314", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495845, "task": "task-0314", "token": 1}
+{"acquire_ms": 1.2945309281349182, "claim_ms": 2.258096821606159, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495847, "task": "task-0270", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495874, "task": "task-0270", "token": 1}
+{"acquire_ms": 1.189487986266613, "claim_ms": 2.4063510354608297, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495877, "task": "task-0428", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495910, "task": "task-0428", "token": 1}
+{"acquire_ms": 2.2564721293747425, "claim_ms": 3.626464167609811, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495914, "task": "task-0338", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495934, "task": "task-0338", "token": 1}
+{"acquire_ms": 1.6923330258578062, "claim_ms": 3.1584519892930984, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495938, "task": "task-0532", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495953, "task": "task-0532", "token": 1}
+{"acquire_ms": 1.413451973348856, "claim_ms": 3.4465850330889225, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495957, "task": "task-0417", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495969, "task": "task-0417", "token": 1}
+{"acquire_ms": 2.2399299778044224, "claim_ms": 4.59657097235322, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495974, "task": "task-0346", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623495993, "task": "task-0346", "token": 1}
+{"acquire_ms": 2.9654481913894415, "claim_ms": 4.702907055616379, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623495998, "task": "task-0113", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496011, "task": "task-0113", "token": 1}
+{"acquire_ms": 1.7484601121395826, "claim_ms": 3.02336597815156, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496015, "task": "task-0154", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496028, "task": "task-0154", "token": 1}
+{"acquire_ms": 1.5179540496319532, "claim_ms": 2.6093979831784964, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496031, "task": "task-0485", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496046, "task": "task-0485", "token": 1}
+{"acquire_ms": 2.4753110483288765, "claim_ms": 5.699473898857832, "ev": "claim", "misses": 1, "peer": "peer-01", "t": 1789623496052, "task": "task-0050", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496076, "task": "task-0050", "token": 1}
+{"acquire_ms": 1.4746198430657387, "claim_ms": 2.9330309480428696, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496079, "task": "task-0089", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496107, "task": "task-0089", "token": 1}
+{"acquire_ms": 1.1029848828911781, "claim_ms": 2.282555913552642, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496110, "task": "task-0450", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496134, "task": "task-0450", "token": 1}
+{"acquire_ms": 1.9870488904416561, "claim_ms": 3.8495948538184166, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496138, "task": "task-0251", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496150, "task": "task-0251", "token": 1}
+{"acquire_ms": 0.7976030465215445, "claim_ms": 1.7813770100474358, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496152, "task": "task-0115", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496183, "task": "task-0115", "token": 1}
+{"acquire_ms": 1.6223310958594084, "claim_ms": 3.3938330598175526, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496186, "task": "task-0026", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496210, "task": "task-0026", "token": 1}
+{"acquire_ms": 0.9096048306673765, "claim_ms": 2.4927689228206873, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496213, "task": "task-0347", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496236, "task": "task-0347", "token": 1}
+{"acquire_ms": 0.9299400262534618, "claim_ms": 2.468477003276348, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496239, "task": "task-0551", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496266, "task": "task-0551", "token": 1}
+{"acquire_ms": 1.876337919384241, "claim_ms": 2.9373220168054104, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496269, "task": "task-0587", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496290, "task": "task-0587", "token": 1}
+{"acquire_ms": 1.6419151797890663, "claim_ms": 3.591921180486679, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496293, "task": "task-0142", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496313, "task": "task-0142", "token": 1}
+{"acquire_ms": 1.451409887522459, "claim_ms": 3.125700866803527, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496316, "task": "task-0193", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496335, "task": "task-0193", "token": 1}
+{"acquire_ms": 1.8966710194945335, "claim_ms": 5.139084067195654, "ev": "claim", "misses": 1, "peer": "peer-01", "t": 1789623496341, "task": "task-0121", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496359, "task": "task-0121", "token": 1}
+{"acquire_ms": 1.4629941433668137, "claim_ms": 3.1201180536299944, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496362, "task": "task-0504", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496377, "task": "task-0504", "token": 1}
+{"acquire_ms": 1.6730418428778648, "claim_ms": 3.3020819537341595, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496381, "task": "task-0608", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496398, "task": "task-0608", "token": 1}
+{"acquire_ms": 1.6256228554993868, "claim_ms": 2.9935319907963276, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496401, "task": "task-0176", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496413, "task": "task-0176", "token": 1}
+{"acquire_ms": 1.569455023854971, "claim_ms": 3.694714978337288, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496417, "task": "task-0081", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496444, "task": "task-0081", "token": 1}
+{"acquire_ms": 2.6682729367166758, "claim_ms": 5.4118819534778595, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496449, "task": "task-0087", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496480, "task": "task-0087", "token": 1}
+{"acquire_ms": 2.069218084216118, "claim_ms": 3.4875860437750816, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496484, "task": "task-0380", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496497, "task": "task-0380", "token": 1}
+{"acquire_ms": 2.05563404597342, "claim_ms": 3.7615089677274227, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496501, "task": "task-0180", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496525, "task": "task-0180", "token": 1}
+{"acquire_ms": 3.624839009717107, "claim_ms": 6.456033093854785, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496532, "task": "task-0597", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496563, "task": "task-0597", "token": 1}
+{"acquire_ms": 3.943513846024871, "claim_ms": 6.850292906165123, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496570, "task": "task-0523", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496601, "task": "task-0523", "token": 1}
+{"acquire_ms": 1.3256568927317858, "claim_ms": 3.219286911189556, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789623496605, "task": "task-0197", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496636, "task": "task-0197", "token": 1}
+{"acquire_ms": 0.7932700682431459, "claim_ms": 2.1807621233165264, "ev": "claim", "misses": 4, "peer": "peer-01", "t": 1789623496638, "task": "task-0471", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789623496656, "task": "task-0471", "token": 1}
+{"ev": "exit", "misses": 11, "peer": "peer-01", "reason": "no pending tasks", "t": 1789623496706}
+{"acquire_ms": 1.131485914811492, "claim_ms": 5.165127106010914, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495620, "task": "task-0263", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495636, "task": "task-0263", "token": 1}
+{"acquire_ms": 1.2018210254609585, "claim_ms": 1.9578400533646345, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495639, "task": "task-0105", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495652, "task": "task-0105", "token": 1}
+{"acquire_ms": 3.830093890428543, "claim_ms": 6.2110270373523235, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495658, "task": "task-0247", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495671, "task": "task-0247", "token": 1}
+{"acquire_ms": 1.6752080991864204, "claim_ms": 3.0071160290390253, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495674, "task": "task-0470", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495695, "task": "task-0470", "token": 1}
+{"acquire_ms": 2.913612872362137, "claim_ms": 4.620238905772567, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495700, "task": "task-0496", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495717, "task": "task-0496", "token": 1}
+{"acquire_ms": 1.5445381868630648, "claim_ms": 2.8498200699687004, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495720, "task": "task-0257", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495742, "task": "task-0257", "token": 1}
+{"acquire_ms": 3.483918961137533, "claim_ms": 5.8303100522607565, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495748, "task": "task-0281", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495761, "task": "task-0281", "token": 1}
+{"acquire_ms": 0.821353867650032, "claim_ms": 1.8659208435565233, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495763, "task": "task-0399", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495794, "task": "task-0399", "token": 1}
+{"acquire_ms": 2.2728058975189924, "claim_ms": 3.845052793622017, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495798, "task": "task-0604", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495819, "task": "task-0604", "token": 1}
+{"acquire_ms": 2.4776440113782883, "claim_ms": 3.7064661737531424, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495823, "task": "task-0057", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495839, "task": "task-0057", "token": 1}
+{"acquire_ms": 1.65704102255404, "claim_ms": 3.3826660364866257, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495843, "task": "task-0072", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495855, "task": "task-0072", "token": 1}
+{"acquire_ms": 1.869753934442997, "claim_ms": 2.947030123323202, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495859, "task": "task-0337", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495871, "task": "task-0337", "token": 1}
+{"acquire_ms": 1.357408007606864, "claim_ms": 2.7429419569671154, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495874, "task": "task-0098", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495898, "task": "task-0098", "token": 1}
+{"acquire_ms": 1.535037998110056, "claim_ms": 3.1670359894633293, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495902, "task": "task-0028", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495929, "task": "task-0028", "token": 1}
+{"acquire_ms": 2.128385007381439, "claim_ms": 3.509043948724866, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495933, "task": "task-0556", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495953, "task": "task-0556", "token": 1}
+{"acquire_ms": 1.6239150427281857, "claim_ms": 3.9140961598604918, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495957, "task": "task-0420", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623495982, "task": "task-0420", "token": 1}
+{"acquire_ms": 2.0374248269945383, "claim_ms": 3.4390429500490427, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623495986, "task": "task-0145", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496007, "task": "task-0145", "token": 1}
+{"acquire_ms": 1.737876096740365, "claim_ms": 4.122559912502766, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496011, "task": "task-0373", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496043, "task": "task-0373", "token": 1}
+{"acquire_ms": 1.29619799554348, "claim_ms": 2.3412660229951143, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496045, "task": "task-0207", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496068, "task": "task-0207", "token": 1}
+{"acquire_ms": 0.8871471509337425, "claim_ms": 2.034091157838702, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496070, "task": "task-0382", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496082, "task": "task-0382", "token": 1}
+{"acquire_ms": 1.3885758817195892, "claim_ms": 3.06857586838305, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496085, "task": "task-0542", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496112, "task": "task-0542", "token": 1}
+{"acquire_ms": 1.0757760610431433, "claim_ms": 2.4278510827571154, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496115, "task": "task-0374", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496139, "task": "task-0374", "token": 1}
+{"acquire_ms": 2.0921339746564627, "claim_ms": 3.5998381208628416, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496142, "task": "task-0598", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496159, "task": "task-0598", "token": 1}
+{"acquire_ms": 1.8732959870249033, "claim_ms": 2.9564891010522842, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496162, "task": "task-0177", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496181, "task": "task-0177", "token": 1}
+{"acquire_ms": 2.2891811095178127, "claim_ms": 4.273063037544489, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496186, "task": "task-0327", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496204, "task": "task-0327", "token": 1}
+{"acquire_ms": 1.5951220411807299, "claim_ms": 3.04374098777771, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496208, "task": "task-0370", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496235, "task": "task-0370", "token": 1}
+{"acquire_ms": 1.0186501313000917, "claim_ms": 2.3901420645415783, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496238, "task": "task-0213", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496262, "task": "task-0213", "token": 1}
+{"acquire_ms": 0.807770062237978, "claim_ms": 1.8224199302494526, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496264, "task": "task-0538", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496277, "task": "task-0538", "token": 1}
+{"acquire_ms": 1.2749060988426208, "claim_ms": 3.2979559618979692, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496281, "task": "task-0458", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496309, "task": "task-0458", "token": 1}
+{"acquire_ms": 1.4228271320462227, "claim_ms": 3.240330144762993, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496313, "task": "task-0441", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496328, "task": "task-0441", "token": 1}
+{"acquire_ms": 2.944614039734006, "claim_ms": 5.298462929204106, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496333, "task": "task-0316", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496353, "task": "task-0316", "token": 1}
+{"acquire_ms": 2.1446358878165483, "claim_ms": 4.276313818991184, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496358, "task": "task-0574", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496387, "task": "task-0574", "token": 1}
+{"acquire_ms": 1.8685050308704376, "claim_ms": 4.328439943492413, "ev": "claim", "misses": 1, "peer": "peer-02", "t": 1789623496392, "task": "task-0041", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496417, "task": "task-0041", "token": 1}
+{"acquire_ms": 1.6459149774163961, "claim_ms": 3.2344129867851734, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496420, "task": "task-0416", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496450, "task": "task-0416", "token": 1}
+{"acquire_ms": 1.6655409708619118, "claim_ms": 2.621523104608059, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496453, "task": "task-0025", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496472, "task": "task-0025", "token": 1}
+{"acquire_ms": 1.6582489479333162, "claim_ms": 3.0843678396195173, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496475, "task": "task-0437", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496489, "task": "task-0437", "token": 1}
+{"acquire_ms": 3.7613839376717806, "claim_ms": 5.6420129258185625, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496495, "task": "task-0444", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496521, "task": "task-0444", "token": 1}
+{"acquire_ms": 2.9109050519764423, "claim_ms": 5.758600076660514, "ev": "claim", "misses": 1, "peer": "peer-02", "t": 1789623496527, "task": "task-0073", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496545, "task": "task-0073", "token": 1}
+{"acquire_ms": 1.4911619946360588, "claim_ms": 2.822902984917164, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496548, "task": "task-0580", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496565, "task": "task-0580", "token": 1}
+{"acquire_ms": 2.23176390863955, "claim_ms": 5.162544082850218, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496570, "task": "task-0030", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496586, "task": "task-0030", "token": 1}
+{"acquire_ms": 3.082909155637026, "claim_ms": 5.495594115927815, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496592, "task": "task-0483", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496619, "task": "task-0483", "token": 1}
+{"acquire_ms": 3.7131330464035273, "claim_ms": 6.249986123293638, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789623496626, "task": "task-0341", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496646, "task": "task-0341", "token": 1}
+{"acquire_ms": 1.9227978773415089, "claim_ms": 4.219936905428767, "ev": "claim", "misses": 4, "peer": "peer-02", "t": 1789623496650, "task": "task-0047", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789623496669, "task": "task-0047", "token": 1}
+{"ev": "exit", "misses": 4, "peer": "peer-02", "reason": "no pending tasks", "t": 1789623496693}
+{"acquire_ms": 3.359415801241994, "claim_ms": 6.588036892935634, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495661, "task": "task-0236", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495686, "task": "task-0236", "token": 1}
+{"acquire_ms": 2.087217988446355, "claim_ms": 4.0135979652404785, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495690, "task": "task-0509", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495720, "task": "task-0509", "token": 1}
+{"acquire_ms": 3.105367999523878, "claim_ms": 4.715656861662865, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495725, "task": "task-0065", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495747, "task": "task-0065", "token": 1}
+{"acquire_ms": 1.5460799913853407, "claim_ms": 3.4730019979178905, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495751, "task": "task-0297", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495780, "task": "task-0297", "token": 1}
+{"acquire_ms": 1.5457470435649157, "claim_ms": 3.032824955880642, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495783, "task": "task-0628", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495808, "task": "task-0628", "token": 1}
+{"acquire_ms": 1.4869531150907278, "claim_ms": 3.412791993469, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495812, "task": "task-0467", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495834, "task": "task-0467", "token": 1}
+{"acquire_ms": 1.0747769847512245, "claim_ms": 2.515894826501608, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495837, "task": "task-0468", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495864, "task": "task-0468", "token": 1}
+{"acquire_ms": 0.7625189609825611, "claim_ms": 1.68674997985363, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495866, "task": "task-0600", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495880, "task": "task-0600", "token": 1}
+{"acquire_ms": 2.4691440630704165, "claim_ms": 6.723914993926883, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495889, "task": "task-0492", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495910, "task": "task-0492", "token": 1}
+{"acquire_ms": 2.812944119796157, "claim_ms": 4.055183148011565, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495915, "task": "task-0212", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495930, "task": "task-0212", "token": 1}
+{"acquire_ms": 1.5546628274023533, "claim_ms": 3.8386359810829163, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495934, "task": "task-0367", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495953, "task": "task-0367", "token": 1}
+{"acquire_ms": 1.3620748650282621, "claim_ms": 4.099641926586628, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495957, "task": "task-0510", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623495971, "task": "task-0510", "token": 1}
+{"acquire_ms": 1.9057139288634062, "claim_ms": 4.216644912958145, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623495976, "task": "task-0406", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496001, "task": "task-0406", "token": 1}
+{"acquire_ms": 1.4345361851155758, "claim_ms": 2.8475290164351463, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496004, "task": "task-0248", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496017, "task": "task-0248", "token": 1}
+{"acquire_ms": 2.596271922811866, "claim_ms": 4.415025003254414, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496021, "task": "task-0550", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496048, "task": "task-0550", "token": 1}
+{"acquire_ms": 2.4021838326007128, "claim_ms": 4.848493961617351, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496053, "task": "task-0466", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496065, "task": "task-0466", "token": 1}
+{"acquire_ms": 1.4152429066598415, "claim_ms": 2.591396914795041, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496068, "task": "task-0606", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496080, "task": "task-0606", "token": 1}
+{"acquire_ms": 2.081634011119604, "claim_ms": 3.7973839789628983, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496084, "task": "task-0064", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496108, "task": "task-0064", "token": 1}
+{"acquire_ms": 1.192071009427309, "claim_ms": 2.2888900712132454, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496110, "task": "task-0402", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496138, "task": "task-0402", "token": 1}
+{"acquire_ms": 2.0054250489920378, "claim_ms": 3.997222986072302, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496142, "task": "task-0283", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496166, "task": "task-0283", "token": 1}
+{"acquire_ms": 2.7856098022311926, "claim_ms": 5.3574638441205025, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496171, "task": "task-0381", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496197, "task": "task-0381", "token": 1}
+{"acquire_ms": 1.3009898830205202, "claim_ms": 2.525812014937401, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496200, "task": "task-0220", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496226, "task": "task-0220", "token": 1}
+{"acquire_ms": 2.0157580729573965, "claim_ms": 3.4432101529091597, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496230, "task": "task-0118", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496254, "task": "task-0118", "token": 1}
+{"acquire_ms": 2.287140116095543, "claim_ms": 3.866428043693304, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496259, "task": "task-0595", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496289, "task": "task-0595", "token": 1}
+{"acquire_ms": 2.2913478314876556, "claim_ms": 4.704532912001014, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496294, "task": "task-0514", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496312, "task": "task-0514", "token": 1}
+{"acquire_ms": 1.4333270955830812, "claim_ms": 2.721691969782114, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496315, "task": "task-0108", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496333, "task": "task-0108", "token": 1}
+{"acquire_ms": 3.324956865981221, "claim_ms": 5.727183073759079, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496339, "task": "task-0609", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496360, "task": "task-0609", "token": 1}
+{"acquire_ms": 1.2954489793628454, "claim_ms": 2.6457319036126137, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496363, "task": "task-0240", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496376, "task": "task-0240", "token": 1}
+{"acquire_ms": 2.1796368528157473, "claim_ms": 3.6442980635911226, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496380, "task": "task-0209", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496392, "task": "task-0209", "token": 1}
+{"acquire_ms": 2.1742619574069977, "claim_ms": 4.062349908053875, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496397, "task": "task-0384", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496412, "task": "task-0384", "token": 1}
+{"acquire_ms": 1.5936638228595257, "claim_ms": 4.329856019467115, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496416, "task": "task-0292", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496430, "task": "task-0292", "token": 1}
+{"acquire_ms": 1.8980889581143856, "claim_ms": 3.783217864111066, "ev": "claim", "misses": 2, "peer": "peer-03", "t": 1789623496434, "task": "task-0328", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496450, "task": "task-0328", "token": 1}
+{"acquire_ms": 1.4298269525170326, "claim_ms": 2.391517162322998, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496452, "task": "task-0495", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496468, "task": "task-0495", "token": 1}
+{"acquire_ms": 1.4856199268251657, "claim_ms": 3.4137091133743525, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496471, "task": "task-0500", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496486, "task": "task-0500", "token": 1}
+{"acquire_ms": 2.8038611635565758, "claim_ms": 4.703158047050238, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496491, "task": "task-0515", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496508, "task": "task-0515", "token": 1}
+{"acquire_ms": 1.3634089846163988, "claim_ms": 2.5562709197402, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496511, "task": "task-0387", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496524, "task": "task-0387", "token": 1}
+{"acquire_ms": 3.7903019692748785, "claim_ms": 7.182009983807802, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496532, "task": "task-0507", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496563, "task": "task-0507", "token": 1}
+{"acquire_ms": 2.4661440402269363, "claim_ms": 7.562102982774377, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496571, "task": "task-0106", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496598, "task": "task-0106", "token": 1}
+{"acquire_ms": 2.0793008152395487, "claim_ms": 5.329296924173832, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496604, "task": "task-0244", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496627, "task": "task-0244", "token": 1}
+{"acquire_ms": 1.8086691852658987, "claim_ms": 3.825552063062787, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789623496631, "task": "task-0440", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789623496652, "task": "task-0440", "token": 1}
+{"ev": "exit", "misses": 14, "peer": "peer-03", "reason": "no pending tasks", "t": 1789623496706}
+{"acquire_ms": 1.8212529830634594, "claim_ms": 7.084048818796873, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495659, "task": "task-0591", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495681, "task": "task-0591", "token": 1}
+{"acquire_ms": 1.0403180494904518, "claim_ms": 1.8653380684554577, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495683, "task": "task-0398", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495696, "task": "task-0398", "token": 1}
+{"acquire_ms": 1.9165051635354757, "claim_ms": 4.014265025034547, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495701, "task": "task-0226", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495732, "task": "task-0226", "token": 1}
+{"acquire_ms": 1.4520769473165274, "claim_ms": 2.5748549960553646, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495735, "task": "task-0027", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495755, "task": "task-0027", "token": 1}
+{"acquire_ms": 1.5482460148632526, "claim_ms": 2.8173611499369144, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495758, "task": "task-0006", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495776, "task": "task-0006", "token": 1}
+{"acquire_ms": 1.9153801258653402, "claim_ms": 3.332332009449601, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495779, "task": "task-0545", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495799, "task": "task-0545", "token": 1}
+{"acquire_ms": 1.2405309826135635, "claim_ms": 2.9975741636008024, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495802, "task": "task-0079", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495821, "task": "task-0079", "token": 1}
+{"acquire_ms": 2.071509137749672, "claim_ms": 3.5265451297163963, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495825, "task": "task-0201", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495838, "task": "task-0201", "token": 1}
+{"acquire_ms": 1.9642559345811605, "claim_ms": 3.6649650428444147, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495842, "task": "task-0539", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495855, "task": "task-0539", "token": 1}
+{"acquire_ms": 1.6755831893533468, "claim_ms": 3.8763871416449547, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495859, "task": "task-0605", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495887, "task": "task-0605", "token": 1}
+{"acquire_ms": 1.5342878177762032, "claim_ms": 3.1561190262436867, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495890, "task": "task-0196", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495911, "task": "task-0196", "token": 1}
+{"acquire_ms": 1.9657982047647238, "claim_ms": 3.842261154204607, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495916, "task": "task-0139", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495935, "task": "task-0139", "token": 1}
+{"acquire_ms": 1.4931620098650455, "claim_ms": 3.423333866521716, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789623495939, "task": "task-0291", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495963, "task": "task-0291", "token": 1}
+{"acquire_ms": 1.2546151410788298, "claim_ms": 2.9834071174263954, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495966, "task": "task-0568", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623495990, "task": "task-0568", "token": 1}
+{"acquire_ms": 1.171319978311658, "claim_ms": 2.100593177601695, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623495993, "task": "task-0573", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496018, "task": "task-0573", "token": 1}
+{"acquire_ms": 2.7439009863883257, "claim_ms": 5.063541000708938, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496024, "task": "task-0442", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496054, "task": "task-0442", "token": 1}
+{"acquire_ms": 2.0512999035418034, "claim_ms": 3.355456981807947, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496058, "task": "task-0049", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496078, "task": "task-0049", "token": 1}
+{"acquire_ms": 1.398908905684948, "claim_ms": 2.712399000301957, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496080, "task": "task-0362", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496111, "task": "task-0362", "token": 1}
+{"acquire_ms": 1.5835389494895935, "claim_ms": 2.8919868636876345, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496114, "task": "task-0234", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496143, "task": "task-0234", "token": 1}
+{"acquire_ms": 0.7759779691696167, "claim_ms": 1.968340016901493, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496145, "task": "task-0552", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496169, "task": "task-0552", "token": 1}
+{"acquire_ms": 2.771983854472637, "claim_ms": 4.77378279902041, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496174, "task": "task-0506", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496193, "task": "task-0506", "token": 1}
+{"acquire_ms": 1.467286143451929, "claim_ms": 2.595772035419941, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496196, "task": "task-0415", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496211, "task": "task-0415", "token": 1}
+{"acquire_ms": 0.9840650018304586, "claim_ms": 2.070134039968252, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496214, "task": "task-0149", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496233, "task": "task-0149", "token": 1}
+{"acquire_ms": 1.4345359522849321, "claim_ms": 2.7514430694282055, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496236, "task": "task-0585", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496256, "task": "task-0585", "token": 1}
+{"acquire_ms": 1.1376941110938787, "claim_ms": 4.201394040137529, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789623496261, "task": "task-0070", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496279, "task": "task-0070", "token": 1}
+{"acquire_ms": 1.5238288324326277, "claim_ms": 3.1362848822027445, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496283, "task": "task-0456", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496299, "task": "task-0456", "token": 1}
+{"acquire_ms": 0.8261869661509991, "claim_ms": 1.9911329727619886, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496301, "task": "task-0068", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496325, "task": "task-0068", "token": 1}
+{"acquire_ms": 2.0890929736196995, "claim_ms": 4.114768002182245, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496330, "task": "task-0104", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496354, "task": "task-0104", "token": 1}
+{"acquire_ms": 2.3430578876286745, "claim_ms": 4.01322403922677, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496358, "task": "task-0052", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496388, "task": "task-0052", "token": 1}
+{"acquire_ms": 2.6772739365696907, "claim_ms": 5.527260946109891, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789623496394, "task": "task-0493", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496409, "task": "task-0493", "token": 1}
+{"acquire_ms": 1.9322980660945177, "claim_ms": 4.053266020491719, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496413, "task": "task-0182", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496430, "task": "task-0182", "token": 1}
+{"acquire_ms": 1.3054490555077791, "claim_ms": 2.3849341087043285, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496433, "task": "task-0443", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496445, "task": "task-0443", "token": 1}
+{"acquire_ms": 1.8436701502650976, "claim_ms": 4.036098951473832, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496450, "task": "task-0152", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496470, "task": "task-0152", "token": 1}
+{"acquire_ms": 1.1674868874251842, "claim_ms": 2.578814048320055, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496473, "task": "task-0171", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496490, "task": "task-0171", "token": 1}
+{"acquire_ms": 2.735899994149804, "claim_ms": 7.067965110763907, "ev": "claim", "misses": 2, "peer": "peer-04", "t": 1789623496498, "task": "task-0584", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496523, "task": "task-0584", "token": 1}
+{"acquire_ms": 4.955037962645292, "claim_ms": 10.308293858543038, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496533, "task": "task-0490", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496551, "task": "task-0490", "token": 1}
+{"acquire_ms": 4.338814876973629, "claim_ms": 7.8539010137319565, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789623496559, "task": "task-0476", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496575, "task": "task-0476", "token": 1}
+{"acquire_ms": 1.0034828446805477, "claim_ms": 2.4555600248277187, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496577, "task": "task-0252", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496599, "task": "task-0252", "token": 1}
+{"acquire_ms": 2.1286781411617994, "claim_ms": 4.305231152102351, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789623496603, "task": "task-0141", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496627, "task": "task-0141", "token": 1}
+{"acquire_ms": 1.037108013406396, "claim_ms": 4.932953976094723, "ev": "claim", "misses": 4, "peer": "peer-04", "t": 1789623496633, "task": "task-0219", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496647, "task": "task-0219", "token": 1}
+{"acquire_ms": 3.3774999901652336, "claim_ms": 6.242777919396758, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789623496654, "task": "task-0336", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789623496684, "task": "task-0336", "token": 1}
+{"ev": "exit", "misses": 1, "peer": "peer-04", "reason": "no pending tasks", "t": 1789623496709}
+{"acquire_ms": 1.2091959360986948, "claim_ms": 1.9792979583144188, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495643, "task": "task-0621", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495670, "task": "task-0621", "token": 1}
+{"acquire_ms": 2.035674871876836, "claim_ms": 3.463584929704666, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495674, "task": "task-0296", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495688, "task": "task-0296", "token": 1}
+{"acquire_ms": 1.4642030000686646, "claim_ms": 3.4000419545918703, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495692, "task": "task-0348", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495709, "task": "task-0348", "token": 1}
+{"acquire_ms": 1.6033730935305357, "claim_ms": 2.4978111032396555, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495711, "task": "task-0146", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495733, "task": "task-0146", "token": 1}
+{"acquire_ms": 1.0023161303251982, "claim_ms": 2.618356142193079, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495736, "task": "task-0358", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495767, "task": "task-0358", "token": 1}
+{"acquire_ms": 1.2052790261805058, "claim_ms": 2.180177951231599, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495769, "task": "task-0231", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495784, "task": "task-0231", "token": 1}
+{"acquire_ms": 0.9101890027523041, "claim_ms": 1.9037551246583462, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495786, "task": "task-0452", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495803, "task": "task-0452", "token": 1}
+{"acquire_ms": 1.7053328920155764, "claim_ms": 3.0937418341636658, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495806, "task": "task-0372", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495820, "task": "task-0372", "token": 1}
+{"acquire_ms": 2.546604024246335, "claim_ms": 4.687323002144694, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495825, "task": "task-0389", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495856, "task": "task-0389", "token": 1}
+{"acquire_ms": 1.924589043483138, "claim_ms": 3.7193000316619873, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495860, "task": "task-0186", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495875, "task": "task-0186", "token": 1}
+{"acquire_ms": 1.21786305680871, "claim_ms": 2.8596119955182076, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495878, "task": "task-0181", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495891, "task": "task-0181", "token": 1}
+{"acquire_ms": 0.8060198742896318, "claim_ms": 2.522061811760068, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495893, "task": "task-0022", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495910, "task": "task-0022", "token": 1}
+{"acquire_ms": 2.712483052164316, "claim_ms": 4.601279040798545, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495915, "task": "task-0423", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495931, "task": "task-0423", "token": 1}
+{"acquire_ms": 1.534538110718131, "claim_ms": 3.3562490716576576, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495935, "task": "task-0412", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495953, "task": "task-0412", "token": 1}
+{"acquire_ms": 1.5845808666199446, "claim_ms": 3.444710047915578, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495957, "task": "task-0164", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495973, "task": "task-0164", "token": 1}
+{"acquire_ms": 2.046257955953479, "claim_ms": 3.834676928818226, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495977, "task": "task-0339", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623495994, "task": "task-0339", "token": 1}
+{"acquire_ms": 2.2043040953576565, "claim_ms": 4.540278110653162, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623495999, "task": "task-0494", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496014, "task": "task-0494", "token": 1}
+{"acquire_ms": 2.6235231198370457, "claim_ms": 4.556154133751988, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496019, "task": "task-0622", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496049, "task": "task-0622", "token": 1}
+{"acquire_ms": 2.1434270311146975, "claim_ms": 4.137393087148666, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496054, "task": "task-0024", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496084, "task": "task-0024", "token": 1}
+{"acquire_ms": 0.7927690166980028, "claim_ms": 2.5723129510879517, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496087, "task": "task-0484", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496107, "task": "task-0484", "token": 1}
+{"acquire_ms": 1.1094030924141407, "claim_ms": 2.237430075183511, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496110, "task": "task-0499", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496134, "task": "task-0499", "token": 1}
+{"acquire_ms": 1.9102140795439482, "claim_ms": 3.81755200214684, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496138, "task": "task-0255", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496162, "task": "task-0255", "token": 1}
+{"acquire_ms": 3.2329128589481115, "claim_ms": 5.431716796010733, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496167, "task": "task-0325", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496189, "task": "task-0325", "token": 1}
+{"acquire_ms": 0.7847701199352741, "claim_ms": 1.8700880464166403, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496191, "task": "task-0520", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496219, "task": "task-0520", "token": 1}
+{"acquire_ms": 1.7737098969519138, "claim_ms": 3.273454960435629, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496222, "task": "task-0525", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496250, "task": "task-0525", "token": 1}
+{"acquire_ms": 2.3271399550139904, "claim_ms": 4.595653852447867, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496254, "task": "task-0400", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496273, "task": "task-0400", "token": 1}
+{"acquire_ms": 1.5630382113158703, "claim_ms": 3.1614520121365786, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496276, "task": "task-0273", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496304, "task": "task-0273", "token": 1}
+{"acquire_ms": 2.1515118423849344, "claim_ms": 3.2524969428777695, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496307, "task": "task-0075", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496334, "task": "task-0075", "token": 1}
+{"acquire_ms": 3.455918049439788, "claim_ms": 5.127126118168235, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496339, "task": "task-0280", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496353, "task": "task-0280", "token": 1}
+{"acquire_ms": 2.360682934522629, "claim_ms": 3.9790149312466383, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496357, "task": "task-0590", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496369, "task": "task-0590", "token": 1}
+{"acquire_ms": 1.5159121248871088, "claim_ms": 2.7281499933451414, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496372, "task": "task-0331", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496396, "task": "task-0331", "token": 1}
+{"acquire_ms": 1.4621610753238201, "claim_ms": 3.0775750055909157, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496399, "task": "task-0454", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496418, "task": "task-0454", "token": 1}
+{"acquire_ms": 1.7925030551850796, "claim_ms": 3.1298690009862185, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496422, "task": "task-0562", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496440, "task": "task-0562", "token": 1}
+{"acquire_ms": 2.4297679774463177, "claim_ms": 4.427192034199834, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496445, "task": "task-0046", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496465, "task": "task-0046", "token": 1}
+{"acquire_ms": 2.60910508222878, "claim_ms": 4.365856992080808, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496469, "task": "task-0616", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496498, "task": "task-0616", "token": 1}
+{"acquire_ms": 2.805486088618636, "claim_ms": 4.453734960407019, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496503, "task": "task-0407", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496524, "task": "task-0407", "token": 1}
+{"acquire_ms": 4.822284914553165, "claim_ms": 8.998553967103362, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496534, "task": "task-0522", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496552, "task": "task-0522", "token": 1}
+{"acquire_ms": 2.9866150580346584, "claim_ms": 4.3058141600340605, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496556, "task": "task-0014", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496586, "task": "task-0014", "token": 1}
+{"acquire_ms": 3.000281983986497, "claim_ms": 6.433408008888364, "ev": "claim", "misses": 1, "peer": "peer-05", "t": 1789623496593, "task": "task-0120", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496611, "task": "task-0120", "token": 1}
+{"acquire_ms": 1.322282012552023, "claim_ms": 2.937696874141693, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789623496614, "task": "task-0179", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496643, "task": "task-0179", "token": 1}
+{"acquire_ms": 2.1792619954794645, "claim_ms": 4.388107918202877, "ev": "claim", "misses": 1, "peer": "peer-05", "t": 1789623496648, "task": "task-0464", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789623496672, "task": "task-0464", "token": 1}
+{"ev": "exit", "misses": 3, "peer": "peer-05", "reason": "no pending tasks", "t": 1789623496695}
+{"acquire_ms": 1.404867973178625, "claim_ms": 5.67247299477458, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495620, "task": "task-0472", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495642, "task": "task-0472", "token": 1}
+{"acquire_ms": 1.7256259452551603, "claim_ms": 2.826069016009569, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495645, "task": "task-0558", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495672, "task": "task-0558", "token": 1}
+{"acquire_ms": 1.462368993088603, "claim_ms": 2.776317996904254, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495675, "task": "task-0148", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495697, "task": "task-0148", "token": 1}
+{"acquire_ms": 1.7974190413951874, "claim_ms": 3.9862231351435184, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495702, "task": "task-0394", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495714, "task": "task-0394", "token": 1}
+{"acquire_ms": 1.5258709900081158, "claim_ms": 2.5835628621280193, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495717, "task": "task-0518", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495732, "task": "task-0518", "token": 1}
+{"acquire_ms": 1.6911248676478863, "claim_ms": 2.9291550163179636, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495735, "task": "task-0465", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495757, "task": "task-0465", "token": 1}
+{"acquire_ms": 1.5272449236363173, "claim_ms": 2.5446040090173483, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495759, "task": "task-0544", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495771, "task": "task-0544", "token": 1}
+{"acquire_ms": 1.156945014372468, "claim_ms": 2.2546800319105387, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495774, "task": "task-0082", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495796, "task": "task-0082", "token": 1}
+{"acquire_ms": 2.057593083009124, "claim_ms": 4.07418399117887, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495800, "task": "task-0009", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495830, "task": "task-0009", "token": 1}
+{"acquire_ms": 1.8537959549576044, "claim_ms": 3.614713903516531, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495835, "task": "task-0489", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495859, "task": "task-0489", "token": 1}
+{"acquire_ms": 1.62678980268538, "claim_ms": 3.3081229776144028, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495862, "task": "task-0305", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495874, "task": "task-0305", "token": 1}
+{"acquire_ms": 1.3086979743093252, "claim_ms": 2.804193878546357, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495877, "task": "task-0601", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495910, "task": "task-0601", "token": 1}
+{"acquire_ms": 2.7422341518104076, "claim_ms": 4.768325015902519, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495915, "task": "task-0324", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495939, "task": "task-0324", "token": 1}
+{"acquire_ms": 1.1481121182441711, "claim_ms": 2.1110940724611282, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495941, "task": "task-0403", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495963, "task": "task-0403", "token": 1}
+{"acquire_ms": 1.1631110683083534, "claim_ms": 2.8083191718906164, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623495966, "task": "task-0363", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623495996, "task": "task-0363", "token": 1}
+{"acquire_ms": 2.1596369333565235, "claim_ms": 3.964097937569022, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496001, "task": "task-0058", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496018, "task": "task-0058", "token": 1}
+{"acquire_ms": 2.533270977437496, "claim_ms": 5.44805102981627, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496023, "task": "task-0438", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496046, "task": "task-0438", "token": 1}
+{"acquire_ms": 2.421226119622588, "claim_ms": 5.194211145862937, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496052, "task": "task-0167", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496076, "task": "task-0167", "token": 1}
+{"acquire_ms": 1.08711002394557, "claim_ms": 2.2908058017492294, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496078, "task": "task-0225", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496095, "task": "task-0225", "token": 1}
+{"acquire_ms": 1.101610017940402, "claim_ms": 2.152093918994069, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496097, "task": "task-0300", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496113, "task": "task-0300", "token": 1}
+{"acquire_ms": 1.3211988843977451, "claim_ms": 3.283330937847495, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496116, "task": "task-0140", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496131, "task": "task-0140", "token": 1}
+{"acquire_ms": 1.7120421398431063, "claim_ms": 3.104784060269594, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496134, "task": "task-0204", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496165, "task": "task-0204", "token": 1}
+{"acquire_ms": 2.306222915649414, "claim_ms": 4.359772894531488, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496169, "task": "task-0561", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496191, "task": "task-0561", "token": 1}
+{"acquire_ms": 0.9610650595277548, "claim_ms": 2.6819398626685143, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496194, "task": "task-0379", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496223, "task": "task-0379", "token": 1}
+{"acquire_ms": 1.7039170488715172, "claim_ms": 3.214786993339658, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496226, "task": "task-0480", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496252, "task": "task-0480", "token": 1}
+{"acquire_ms": 1.4617859851568937, "claim_ms": 3.4993779845535755, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496256, "task": "task-0036", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496268, "task": "task-0036", "token": 1}
+{"acquire_ms": 2.0951770711690187, "claim_ms": 3.84880299679935, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496272, "task": "task-0593", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496283, "task": "task-0593", "token": 1}
+{"acquire_ms": 1.6574990004301071, "claim_ms": 2.6441060472279787, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496286, "task": "task-0003", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496304, "task": "task-0003", "token": 1}
+{"acquire_ms": 2.045050961896777, "claim_ms": 3.2522049732506275, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496307, "task": "task-0469", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496328, "task": "task-0469", "token": 1}
+{"acquire_ms": 3.9000948891043663, "claim_ms": 5.87839400395751, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496334, "task": "task-0577", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496351, "task": "task-0577", "token": 1}
+{"acquire_ms": 2.479518996551633, "claim_ms": 4.640239058062434, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496356, "task": "task-0063", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496370, "task": "task-0063", "token": 1}
+{"acquire_ms": 1.0508589912205935, "claim_ms": 2.8274860233068466, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496373, "task": "task-0034", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496392, "task": "task-0034", "token": 1}
+{"acquire_ms": 2.0144248846918344, "claim_ms": 3.896096022799611, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496396, "task": "task-0153", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496419, "task": "task-0153", "token": 1}
+{"acquire_ms": 1.6170819289982319, "claim_ms": 2.951405942440033, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496423, "task": "task-0311", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496439, "task": "task-0311", "token": 1}
+{"acquire_ms": 2.38193292170763, "claim_ms": 3.5985459107905626, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496443, "task": "task-0383", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496466, "task": "task-0383", "token": 1}
+{"acquire_ms": 2.819236135110259, "claim_ms": 4.718990996479988, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496471, "task": "task-0435", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496488, "task": "task-0435", "token": 1}
+{"acquire_ms": 3.3397909719496965, "claim_ms": 5.549970082938671, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496494, "task": "task-0599", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496516, "task": "task-0599", "token": 1}
+{"acquire_ms": 2.1481779403984547, "claim_ms": 4.563444992527366, "ev": "claim", "misses": 1, "peer": "peer-06", "t": 1789623496521, "task": "task-0117", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496550, "task": "task-0117", "token": 1}
+{"acquire_ms": 2.721607917919755, "claim_ms": 4.249271005392075, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496554, "task": "task-0342", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496586, "task": "task-0342", "token": 1}
+{"acquire_ms": 2.478852169588208, "claim_ms": 5.6345961056649685, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496592, "task": "task-0517", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496617, "task": "task-0517", "token": 1}
+{"acquire_ms": 2.323682187125087, "claim_ms": 3.380540991201997, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789623496621, "task": "task-0578", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496647, "task": "task-0578", "token": 1}
+{"acquire_ms": 2.8714039362967014, "claim_ms": 6.164234830066562, "ev": "claim", "misses": 3, "peer": "peer-06", "t": 1789623496653, "task": "task-0166", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789623496683, "task": "task-0166", "token": 1}
+{"ev": "exit", "misses": 1, "peer": "peer-06", "reason": "no pending tasks", "t": 1789623496710}
+{"acquire_ms": 4.122060025110841, "claim_ms": 6.821793038398027, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495663, "task": "task-0575", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495694, "task": "task-0575", "token": 1}
+{"acquire_ms": 2.6001050136983395, "claim_ms": 4.640446975827217, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495699, "task": "task-0488", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495721, "task": "task-0488", "token": 1}
+{"acquire_ms": 2.1885959431529045, "claim_ms": 4.617447033524513, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495726, "task": "task-0304", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495738, "task": "task-0304", "token": 1}
+{"acquire_ms": 1.1342780198901892, "claim_ms": 1.9625481218099594, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495740, "task": "task-0355", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495771, "task": "task-0355", "token": 1}
+{"acquire_ms": 1.152111915871501, "claim_ms": 2.41414294578135, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495773, "task": "task-0007", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495792, "task": "task-0007", "token": 1}
+{"acquire_ms": 1.837919931858778, "claim_ms": 2.976740011945367, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495795, "task": "task-0455", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495808, "task": "task-0455", "token": 1}
+{"acquire_ms": 1.8917960114777088, "claim_ms": 2.970948116853833, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495811, "task": "task-0274", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495828, "task": "task-0274", "token": 1}
+{"acquire_ms": 2.607105066999793, "claim_ms": 4.493234911933541, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495833, "task": "task-0144", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495859, "task": "task-0144", "token": 1}
+{"acquire_ms": 1.3316581025719643, "claim_ms": 2.571646124124527, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495862, "task": "task-0318", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495877, "task": "task-0318", "token": 1}
+{"acquire_ms": 2.8907801024615765, "claim_ms": 4.488027188926935, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495881, "task": "task-0629", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495899, "task": "task-0629", "token": 1}
+{"acquire_ms": 1.2774479109793901, "claim_ms": 2.5573959574103355, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495901, "task": "task-0502", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495929, "task": "task-0502", "token": 1}
+{"acquire_ms": 2.079383935779333, "claim_ms": 3.5359198227524757, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495932, "task": "task-0101", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495957, "task": "task-0101", "token": 1}
+{"acquire_ms": 0.7423101924359798, "claim_ms": 2.0420500077307224, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495959, "task": "task-0162", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623495987, "task": "task-0162", "token": 1}
+{"acquire_ms": 1.7636260017752647, "claim_ms": 2.9373220168054104, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623495990, "task": "task-0326", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496017, "task": "task-0326", "token": 1}
+{"acquire_ms": 2.2589298896491528, "claim_ms": 4.78495005518198, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496022, "task": "task-0625", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496053, "task": "task-0625", "token": 1}
+{"acquire_ms": 1.7515851650387049, "claim_ms": 3.4030841197818518, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496057, "task": "task-0294", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496076, "task": "task-0294", "token": 1}
+{"acquire_ms": 1.1776948813349009, "claim_ms": 2.5208948645740747, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496079, "task": "task-0074", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496110, "task": "task-0074", "token": 1}
+{"acquire_ms": 1.5754969790577888, "claim_ms": 3.026823978871107, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496113, "task": "task-0474", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496129, "task": "task-0474", "token": 1}
+{"acquire_ms": 2.163385972380638, "claim_ms": 3.8474691100418568, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496133, "task": "task-0173", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496146, "task": "task-0173", "token": 1}
+{"acquire_ms": 0.90593914501369, "claim_ms": 2.246472053229809, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496148, "task": "task-0042", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496180, "task": "task-0042", "token": 1}
+{"acquire_ms": 2.374975010752678, "claim_ms": 4.103892017155886, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496184, "task": "task-0475", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496206, "task": "task-0475", "token": 1}
+{"acquire_ms": 1.5755800995975733, "claim_ms": 3.2164540607482195, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496210, "task": "task-0256", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496233, "task": "task-0256", "token": 1}
+{"acquire_ms": 1.8581710755825043, "claim_ms": 3.0615751165896654, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496237, "task": "task-0635", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496251, "task": "task-0635", "token": 1}
+{"acquire_ms": 1.9637560471892357, "claim_ms": 4.2447291780263186, "ev": "claim", "misses": 1, "peer": "peer-07", "t": 1789623496255, "task": "task-0479", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496271, "task": "task-0479", "token": 1}
+{"acquire_ms": 1.4124098233878613, "claim_ms": 3.1101598870009184, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496274, "task": "task-0161", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496292, "task": "task-0161", "token": 1}
+{"acquire_ms": 2.021007938310504, "claim_ms": 3.97751503624022, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496296, "task": "task-0559", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496319, "task": "task-0559", "token": 1}
+{"acquire_ms": 0.7242679130285978, "claim_ms": 1.6272480133920908, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496321, "task": "task-0530", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496344, "task": "task-0530", "token": 1}
+{"acquire_ms": 0.939022982493043, "claim_ms": 2.540646120905876, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496347, "task": "task-0055", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496372, "task": "task-0055", "token": 1}
+{"acquire_ms": 1.918755006045103, "claim_ms": 3.2162871211767197, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496375, "task": "task-0320", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496406, "task": "task-0320", "token": 1}
+{"acquire_ms": 1.5838309191167355, "claim_ms": 2.926404820755124, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496409, "task": "task-0262", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496439, "task": "task-0262", "token": 1}
+{"acquire_ms": 2.5853971019387245, "claim_ms": 3.7813850212842226, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496443, "task": "task-0229", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496474, "task": "task-0229", "token": 1}
+{"acquire_ms": 2.103635109961033, "claim_ms": 3.977305954322219, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496478, "task": "task-0611", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496494, "task": "task-0611", "token": 1}
+{"acquire_ms": 2.2620968520641327, "claim_ms": 4.657655954360962, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496499, "task": "task-0243", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496531, "task": "task-0243", "token": 1}
+{"acquire_ms": 1.7568350303918123, "claim_ms": 6.8827110808342695, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496538, "task": "task-0335", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496564, "task": "task-0335", "token": 1}
+{"acquire_ms": 2.7683600783348083, "claim_ms": 5.2799631375819445, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496569, "task": "task-0096", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496598, "task": "task-0096", "token": 1}
+{"acquire_ms": 2.1458861883729696, "claim_ms": 4.267021082341671, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496602, "task": "task-0633", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496621, "task": "task-0633", "token": 1}
+{"acquire_ms": 3.4129591658711433, "claim_ms": 5.6259711273014545, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789623496627, "task": "task-0293", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789623496652, "task": "task-0293", "token": 1}
+{"ev": "exit", "misses": 14, "peer": "peer-07", "reason": "no pending tasks", "t": 1789623496710}
+{"acquire_ms": 1.6154148615896702, "claim_ms": 3.151868935674429, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495647, "task": "task-0345", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495666, "task": "task-0345", "token": 1}
+{"acquire_ms": 1.6436658333986998, "claim_ms": 2.8193190228194, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495670, "task": "task-0290", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495697, "task": "task-0290", "token": 1}
+{"acquire_ms": 1.6149980947375298, "claim_ms": 4.283188143745065, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495701, "task": "task-0333", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495720, "task": "task-0333", "token": 1}
+{"acquire_ms": 2.538020955398679, "claim_ms": 5.521177081391215, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495726, "task": "task-0132", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495741, "task": "task-0132", "token": 1}
+{"acquire_ms": 2.9720310121774673, "claim_ms": 5.195626989006996, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495746, "task": "task-0017", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495768, "task": "task-0017", "token": 1}
+{"acquire_ms": 1.0386919602751732, "claim_ms": 2.5971890427172184, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495771, "task": "task-0563", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495797, "task": "task-0563", "token": 1}
+{"acquire_ms": 1.9111719448119402, "claim_ms": 3.644714830443263, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495801, "task": "task-0254", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495830, "task": "task-0254", "token": 1}
+{"acquire_ms": 1.985382055863738, "claim_ms": 3.6352970637381077, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495834, "task": "task-0249", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495847, "task": "task-0249", "token": 1}
+{"acquire_ms": 0.7956027984619141, "claim_ms": 1.6891669947654009, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495849, "task": "task-0572", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495870, "task": "task-0572", "token": 1}
+{"acquire_ms": 1.5562048647552729, "claim_ms": 2.782942960038781, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495873, "task": "task-0203", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495895, "task": "task-0203", "token": 1}
+{"acquire_ms": 2.0831760484725237, "claim_ms": 3.869761945679784, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495900, "task": "task-0097", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495929, "task": "task-0097", "token": 1}
+{"acquire_ms": 2.0820097997784615, "claim_ms": 3.247163025662303, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495932, "task": "task-0227", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495955, "task": "task-0227", "token": 1}
+{"acquire_ms": 1.2776150833815336, "claim_ms": 2.3197659756988287, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495957, "task": "task-0366", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495975, "task": "task-0366", "token": 1}
+{"acquire_ms": 1.337283058091998, "claim_ms": 2.7715261094272137, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623495978, "task": "task-0224", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623495999, "task": "task-0224", "token": 1}
+{"acquire_ms": 1.2212800793349743, "claim_ms": 2.776568057015538, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496002, "task": "task-0016", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496024, "task": "task-0016", "token": 1}
+{"acquire_ms": 1.0187749285250902, "claim_ms": 2.1558450534939766, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496026, "task": "task-0503", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496054, "task": "task-0503", "token": 1}
+{"acquire_ms": 2.317973878234625, "claim_ms": 4.0930588729679585, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496058, "task": "task-0461", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496072, "task": "task-0461", "token": 1}
+{"acquire_ms": 0.9971910621970892, "claim_ms": 1.9088380504399538, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496074, "task": "task-0264", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496104, "task": "task-0264", "token": 1}
+{"acquire_ms": 0.961523037403822, "claim_ms": 1.927963923662901, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496107, "task": "task-0128", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496130, "task": "task-0128", "token": 1}
+{"acquire_ms": 2.0223408937454224, "claim_ms": 3.220328828319907, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496133, "task": "task-0409", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496149, "task": "task-0409", "token": 1}
+{"acquire_ms": 0.8194791153073311, "claim_ms": 2.3365989327430725, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496151, "task": "task-0266", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496164, "task": "task-0266", "token": 1}
+{"acquire_ms": 2.3689749650657177, "claim_ms": 4.245311953127384, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496169, "task": "task-0095", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496182, "task": "task-0095", "token": 1}
+{"acquire_ms": 1.4467439614236355, "claim_ms": 3.4805850591510534, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496186, "task": "task-0272", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496207, "task": "task-0272", "token": 1}
+{"acquire_ms": 2.2137630730867386, "claim_ms": 4.143059952184558, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496212, "task": "task-0147", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496229, "task": "task-0147", "token": 1}
+{"acquire_ms": 1.4095341321080923, "claim_ms": 3.8353861309587955, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496233, "task": "task-0405", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496248, "task": "task-0405", "token": 1}
+{"acquire_ms": 2.34855804592371, "claim_ms": 4.209436941891909, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496253, "task": "task-0392", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496271, "task": "task-0392", "token": 1}
+{"acquire_ms": 1.7528769094496965, "claim_ms": 3.8364280480891466, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496275, "task": "task-0056", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496288, "task": "task-0056", "token": 1}
+{"acquire_ms": 2.6885250117629766, "claim_ms": 4.8869948368519545, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496293, "task": "task-0421", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496322, "task": "task-0421", "token": 1}
+{"acquire_ms": 1.3365328777581453, "claim_ms": 2.5548129342496395, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496325, "task": "task-0228", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496341, "task": "task-0228", "token": 1}
+{"acquire_ms": 0.9674408938735723, "claim_ms": 2.1340937819331884, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496343, "task": "task-0535", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496364, "task": "task-0535", "token": 1}
+{"acquire_ms": 2.0625919569283724, "claim_ms": 3.5396700259298086, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496367, "task": "task-0085", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496388, "task": "task-0085", "token": 1}
+{"acquire_ms": 1.7122919671237469, "claim_ms": 3.383333096280694, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496391, "task": "task-0282", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496407, "task": "task-0282", "token": 1}
+{"acquire_ms": 1.7710851971060038, "claim_ms": 3.1992041040211916, "ev": "claim", "misses": 1, "peer": "peer-08", "t": 1789623496410, "task": "task-0199", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496432, "task": "task-0199", "token": 1}
+{"acquire_ms": 1.575330039486289, "claim_ms": 3.791759954765439, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496436, "task": "task-0031", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496465, "task": "task-0031", "token": 1}
+{"acquire_ms": 2.6890661101788282, "claim_ms": 4.204312106594443, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496469, "task": "task-0211", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496495, "task": "task-0211", "token": 1}
+{"acquire_ms": 2.4383519776165485, "claim_ms": 4.947829991579056, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496500, "task": "task-0349", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496533, "task": "task-0349", "token": 1}
+{"acquire_ms": 1.6159981023520231, "claim_ms": 3.6186310462653637, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496537, "task": "task-0310", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496570, "task": "task-0310", "token": 1}
+{"acquire_ms": 2.0335079170763493, "claim_ms": 3.9841399993747473, "ev": "claim", "misses": 0, "peer": "peer-08", "t": 1789623496574, "task": "task-0536", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496589, "task": "task-0536", "token": 1}
+{"acquire_ms": 3.168245078995824, "claim_ms": 6.964254891499877, "ev": "claim", "misses": 1, "peer": "peer-08", "t": 1789623496597, "task": "task-0112", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496623, "task": "task-0112", "token": 1}
+{"acquire_ms": 3.051616018638015, "claim_ms": 7.397889858111739, "ev": "claim", "misses": 1, "peer": "peer-08", "t": 1789623496630, "task": "task-0175", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-08", "t": 1789623496653, "task": "task-0175", "token": 1}
+{"ev": "exit", "misses": 14, "peer": "peer-08", "reason": "no pending tasks", "t": 1789623496704}
+{"acquire_ms": 5.150876007974148, "claim_ms": 8.03907192312181, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495662, "task": "task-0043", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495688, "task": "task-0043", "token": 1}
+{"acquire_ms": 1.800835831090808, "claim_ms": 3.4758769907057285, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495691, "task": "task-0588", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495712, "task": "task-0588", "token": 1}
+{"acquire_ms": 1.634289976209402, "claim_ms": 2.7099831495434046, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495714, "task": "task-0571", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495745, "task": "task-0571", "token": 1}
+{"acquire_ms": 2.401849953457713, "claim_ms": 4.859410924836993, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495750, "task": "task-0178", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495769, "task": "task-0178", "token": 1}
+{"acquire_ms": 1.2971151154488325, "claim_ms": 2.6758150197565556, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495771, "task": "task-0015", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495787, "task": "task-0015", "token": 1}
+{"acquire_ms": 0.9771909099072218, "claim_ms": 1.8212529830634594, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495789, "task": "task-0632", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495819, "task": "task-0632", "token": 1}
+{"acquire_ms": 2.227138029411435, "claim_ms": 3.8362599443644285, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495823, "task": "task-0511", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495841, "task": "task-0511", "token": 1}
+{"acquire_ms": 1.3278659898787737, "claim_ms": 2.9169879853725433, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495844, "task": "task-0393", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495870, "task": "task-0393", "token": 1}
+{"acquire_ms": 2.0683840848505497, "claim_ms": 3.308498067781329, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495873, "task": "task-0498", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495892, "task": "task-0498", "token": 1}
+{"acquire_ms": 1.4914111234247684, "claim_ms": 2.486560959368944, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495895, "task": "task-0340", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495912, "task": "task-0340", "token": 1}
+{"acquire_ms": 1.724625937640667, "claim_ms": 3.529879031702876, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495916, "task": "task-0165", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495944, "task": "task-0165", "token": 1}
+{"acquire_ms": 0.8061029948294163, "claim_ms": 1.8345031421631575, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495946, "task": "task-0460", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495969, "task": "task-0460", "token": 1}
+{"acquire_ms": 1.968340016901493, "claim_ms": 3.548045875504613, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495973, "task": "task-0321", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623495987, "task": "task-0321", "token": 1}
+{"acquire_ms": 1.1696950532495975, "claim_ms": 2.7344829868525267, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623495990, "task": "task-0066", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496018, "task": "task-0066", "token": 1}
+{"acquire_ms": 2.634481992572546, "claim_ms": 5.478550912812352, "ev": "claim", "misses": 1, "peer": "peer-09", "t": 1789623496024, "task": "task-0158", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496048, "task": "task-0158", "token": 1}
+{"acquire_ms": 2.1230101119726896, "claim_ms": 4.7251160722225904, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496054, "task": "task-0436", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496077, "task": "task-0436", "token": 1}
+{"acquire_ms": 1.2047379277646542, "claim_ms": 2.7985679917037487, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496080, "task": "task-0386", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496095, "task": "task-0386", "token": 1}
+{"acquire_ms": 1.1754028964787722, "claim_ms": 2.152260858565569, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496097, "task": "task-0279", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496114, "task": "task-0279", "token": 1}
+{"acquire_ms": 0.9498989675194025, "claim_ms": 2.495895139873028, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496117, "task": "task-0133", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496136, "task": "task-0133", "token": 1}
+{"acquire_ms": 2.293806988745928, "claim_ms": 3.8965540006756783, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496140, "task": "task-0071", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496162, "task": "task-0071", "token": 1}
+{"acquire_ms": 2.2941390052437782, "claim_ms": 4.451691871508956, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496167, "task": "task-0040", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496180, "task": "task-0040", "token": 1}
+{"acquire_ms": 2.4031419306993484, "claim_ms": 4.069932969287038, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496184, "task": "task-0174", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496198, "task": "task-0174", "token": 1}
+{"acquire_ms": 1.5214539598673582, "claim_ms": 2.677774056792259, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496201, "task": "task-0061", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496215, "task": "task-0061", "token": 1}
+{"acquire_ms": 0.8378950878977776, "claim_ms": 1.772168092429638, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496217, "task": "task-0505", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496229, "task": "task-0505", "token": 1}
+{"acquire_ms": 1.6289560589939356, "claim_ms": 3.1546601094305515, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496232, "task": "task-0567", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496244, "task": "task-0567", "token": 1}
+{"acquire_ms": 1.2561969924718142, "claim_ms": 2.2248460445553064, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496247, "task": "task-0397", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496272, "task": "task-0397", "token": 1}
+{"acquire_ms": 1.887212973088026, "claim_ms": 4.298396874219179, "ev": "claim", "misses": 1, "peer": "peer-09", "t": 1789623496276, "task": "task-0086", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496298, "task": "task-0086", "token": 1}
+{"acquire_ms": 0.7417257875204086, "claim_ms": 1.7933768685907125, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496300, "task": "task-0451", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496312, "task": "task-0451", "token": 1}
+{"acquire_ms": 0.9113140404224396, "claim_ms": 2.5193949695676565, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496315, "task": "task-0062", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496345, "task": "task-0062", "token": 1}
+{"acquire_ms": 0.9101058822125196, "claim_ms": 2.2160548251122236, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496348, "task": "task-0557", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496376, "task": "task-0557", "token": 1}
+{"acquire_ms": 2.346433000639081, "claim_ms": 4.1155589278787374, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496380, "task": "task-0396", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496399, "task": "task-0396", "token": 1}
+{"acquire_ms": 1.0564420372247696, "claim_ms": 2.4272259324789047, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496402, "task": "task-0004", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496433, "task": "task-0004", "token": 1}
+{"acquire_ms": 1.4419939834624529, "claim_ms": 2.9657811392098665, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496436, "task": "task-0352", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496459, "task": "task-0352", "token": 1}
+{"acquire_ms": 1.367366872727871, "claim_ms": 2.6679830625653267, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496462, "task": "task-0151", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496482, "task": "task-0151", "token": 1}
+{"acquire_ms": 2.393183996900916, "claim_ms": 4.34706499800086, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496486, "task": "task-0302", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496500, "task": "task-0302", "token": 1}
+{"acquire_ms": 2.174719935283065, "claim_ms": 4.091099835932255, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496505, "task": "task-0427", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496523, "task": "task-0427", "token": 1}
+{"acquire_ms": 3.3218320459127426, "claim_ms": 5.837684962898493, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496529, "task": "task-0354", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496553, "task": "task-0354", "token": 1}
+{"acquire_ms": 3.0658249743282795, "claim_ms": 5.409882869571447, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496558, "task": "task-0555", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496588, "task": "task-0555", "token": 1}
+{"acquire_ms": 2.9073208570480347, "claim_ms": 5.367589881643653, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496593, "task": "task-0521", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496622, "task": "task-0521", "token": 1}
+{"acquire_ms": 2.2697639651596546, "claim_ms": 5.085417069494724, "ev": "claim", "misses": 0, "peer": "peer-09", "t": 1789623496628, "task": "task-0371", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-09", "t": 1789623496653, "task": "task-0371", "token": 1}
+{"ev": "exit", "misses": 14, "peer": "peer-09", "reason": "no pending tasks", "t": 1789623496708}
+{"acquire_ms": 2.4138919543474913, "claim_ms": 4.906577989459038, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495667, "task": "task-0360", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495697, "task": "task-0360", "token": 1}
+{"acquire_ms": 1.7848769202828407, "claim_ms": 4.340147832408547, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495702, "task": "task-0218", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495729, "task": "task-0218", "token": 1}
+{"acquire_ms": 1.258698059245944, "claim_ms": 2.1249691490083933, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495732, "task": "task-0411", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495748, "task": "task-0411", "token": 1}
+{"acquire_ms": 1.0718600824475288, "claim_ms": 2.576021943241358, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495751, "task": "task-0069", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495782, "task": "task-0069", "token": 1}
+{"acquire_ms": 1.1732790153473616, "claim_ms": 2.3535159416496754, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495785, "task": "task-0537", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495803, "task": "task-0537", "token": 1}
+{"acquire_ms": 1.908046891912818, "claim_ms": 2.7752758469432592, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495806, "task": "task-0044", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495823, "task": "task-0044", "token": 1}
+{"acquire_ms": 2.697983058169484, "claim_ms": 4.287271993234754, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495828, "task": "task-0011", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495844, "task": "task-0011", "token": 1}
+{"acquire_ms": 1.173403114080429, "claim_ms": 2.23567895591259, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495847, "task": "task-0008", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495872, "task": "task-0008", "token": 1}
+{"acquire_ms": 1.330658094957471, "claim_ms": 3.095576073974371, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495876, "task": "task-0037", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495889, "task": "task-0037", "token": 1}
+{"acquire_ms": 1.6637500375509262, "claim_ms": 2.8876960277557373, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495892, "task": "task-0093", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495916, "task": "task-0093", "token": 1}
+{"acquire_ms": 1.4449518639594316, "claim_ms": 2.8471529949456453, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495919, "task": "task-0090", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495941, "task": "task-0090", "token": 1}
+{"acquire_ms": 1.0144421830773354, "claim_ms": 2.058424986898899, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495944, "task": "task-0059", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623495971, "task": "task-0059", "token": 1}
+{"acquire_ms": 1.8729211296886206, "claim_ms": 3.953472012653947, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623495975, "task": "task-0169", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496005, "task": "task-0169", "token": 1}
+{"acquire_ms": 2.013550139963627, "claim_ms": 3.5619211848825216, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496009, "task": "task-0627", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496033, "task": "task-0627", "token": 1}
+{"acquire_ms": 1.0376509744673967, "claim_ms": 2.1271780133247375, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496035, "task": "task-0250", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496054, "task": "task-0250", "token": 1}
+{"acquire_ms": 1.9597981590777636, "claim_ms": 3.7566751707345247, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496058, "task": "task-0099", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496081, "task": "task-0099", "token": 1}
+{"acquire_ms": 1.8477961421012878, "claim_ms": 3.555838018655777, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496084, "task": "task-0136", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496104, "task": "task-0136", "token": 1}
+{"acquire_ms": 1.1701539624482393, "claim_ms": 2.111301990225911, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496107, "task": "task-0298", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496138, "task": "task-0298", "token": 1}
+{"acquire_ms": 2.0088409073650837, "claim_ms": 4.1588530875742435, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496142, "task": "task-0602", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496170, "task": "task-0602", "token": 1}
+{"acquire_ms": 2.0847180858254433, "claim_ms": 3.975764149799943, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496175, "task": "task-0091", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496192, "task": "task-0091", "token": 1}
+{"acquire_ms": 1.480452949181199, "claim_ms": 2.6152729988098145, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496195, "task": "task-0528", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496218, "task": "task-0528", "token": 1}
+{"acquire_ms": 1.5997469890862703, "claim_ms": 2.9922400135546923, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496221, "task": "task-0449", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496248, "task": "task-0449", "token": 1}
+{"acquire_ms": 2.7076080441474915, "claim_ms": 4.230604041367769, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496252, "task": "task-0190", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496276, "task": "task-0190", "token": 1}
+{"acquire_ms": 2.3334322031587362, "claim_ms": 3.621505107730627, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496280, "task": "task-0189", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496293, "task": "task-0189", "token": 1}
+{"acquire_ms": 1.9345469772815704, "claim_ms": 3.6012548953294754, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496297, "task": "task-0323", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496323, "task": "task-0323", "token": 1}
+{"acquire_ms": 1.4566199388355017, "claim_ms": 3.0396580696105957, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496327, "task": "task-0586", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496351, "task": "task-0586", "token": 1}
+{"acquire_ms": 2.4814780335873365, "claim_ms": 4.3058141600340605, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496356, "task": "task-0150", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496384, "task": "task-0150", "token": 1}
+{"acquire_ms": 3.2689969521015882, "claim_ms": 5.2890051156282425, "ev": "claim", "misses": 1, "peer": "peer-10", "t": 1789623496389, "task": "task-0206", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496410, "task": "task-0206", "token": 1}
+{"acquire_ms": 2.732526045292616, "claim_ms": 4.406858002766967, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496414, "task": "task-0238", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496434, "task": "task-0238", "token": 1}
+{"acquire_ms": 0.892729964107275, "claim_ms": 3.043283009901643, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496437, "task": "task-0185", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496455, "task": "task-0185", "token": 1}
+{"acquire_ms": 1.2116958387196064, "claim_ms": 3.205078886821866, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496459, "task": "task-0344", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496476, "task": "task-0344", "token": 1}
+{"acquire_ms": 1.414993079379201, "claim_ms": 3.677424043416977, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496480, "task": "task-0191", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496508, "task": "task-0191", "token": 1}
+{"acquire_ms": 1.561746932566166, "claim_ms": 2.5787719059735537, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496511, "task": "task-0426", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496531, "task": "task-0426", "token": 1}
+{"acquire_ms": 1.915089087560773, "claim_ms": 6.687663961201906, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496538, "task": "task-0457", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496559, "task": "task-0457", "token": 1}
+{"acquire_ms": 1.5932898968458176, "claim_ms": 5.965522024780512, "ev": "claim", "misses": 1, "peer": "peer-10", "t": 1789623496566, "task": "task-0237", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496598, "task": "task-0237", "token": 1}
+{"acquire_ms": 2.0188000053167343, "claim_ms": 5.238379118964076, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496603, "task": "task-0125", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496622, "task": "task-0125", "token": 1}
+{"acquire_ms": 3.0064911115914583, "claim_ms": 5.3502151276916265, "ev": "claim", "misses": 0, "peer": "peer-10", "t": 1789623496627, "task": "task-0330", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-10", "t": 1789623496650, "task": "task-0330", "token": 1}
+{"ev": "exit", "misses": 17, "peer": "peer-10", "reason": "no pending tasks", "t": 1789623496704}
+{"acquire_ms": 1.6444569919258356, "claim_ms": 3.003740916028619, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495671, "task": "task-0473", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495693, "task": "task-0473", "token": 1}
+{"acquire_ms": 2.296681981533766, "claim_ms": 5.574553972110152, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495699, "task": "task-0230", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495722, "task": "task-0230", "token": 1}
+{"acquire_ms": 2.5006451178342104, "claim_ms": 4.509360995143652, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495727, "task": "task-0048", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495753, "task": "task-0048", "token": 1}
+{"acquire_ms": 0.8484800346195698, "claim_ms": 1.7079170793294907, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495755, "task": "task-0543", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495777, "task": "task-0543", "token": 1}
+{"acquire_ms": 2.116801915690303, "claim_ms": 3.299914998933673, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495780, "task": "task-0618", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495809, "task": "task-0618", "token": 1}
+{"acquire_ms": 1.9129218999296427, "claim_ms": 3.495001932606101, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495813, "task": "task-0368", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495827, "task": "task-0368", "token": 1}
+{"acquire_ms": 2.387933898717165, "claim_ms": 4.267146112397313, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495832, "task": "task-0447", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495861, "task": "task-0447", "token": 1}
+{"acquire_ms": 0.9920240845531225, "claim_ms": 2.3946419823914766, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495864, "task": "task-0445", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495895, "task": "task-0445", "token": 1}
+{"acquire_ms": 1.143402885645628, "claim_ms": 2.5237698573619127, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495897, "task": "task-0202", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495921, "task": "task-0202", "token": 1}
+{"acquire_ms": 0.9800239931792021, "claim_ms": 2.19776201993227, "ev": "claim", "misses": 1, "peer": "peer-11", "t": 1789623495924, "task": "task-0299", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495953, "task": "task-0299", "token": 1}
+{"acquire_ms": 1.905796118080616, "claim_ms": 3.4379169810563326, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495957, "task": "task-0289", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495980, "task": "task-0289", "token": 1}
+{"acquire_ms": 1.3164491392672062, "claim_ms": 2.4739359505474567, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623495983, "task": "task-0076", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623495995, "task": "task-0076", "token": 1}
+{"acquire_ms": 2.4289339780807495, "claim_ms": 4.956205142661929, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496000, "task": "task-0624", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496016, "task": "task-0624", "token": 1}
+{"acquire_ms": 2.5485209189355373, "claim_ms": 4.727408057078719, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496021, "task": "task-0102", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496043, "task": "task-0102", "token": 1}
+{"acquire_ms": 2.515894826501608, "claim_ms": 3.5581288393586874, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496047, "task": "task-0124", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496061, "task": "task-0124", "token": 1}
+{"acquire_ms": 1.102859852835536, "claim_ms": 2.454059896990657, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496063, "task": "task-0581", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496079, "task": "task-0581", "token": 1}
+{"acquire_ms": 1.491911942139268, "claim_ms": 2.726899925619364, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496082, "task": "task-0512", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496101, "task": "task-0512", "token": 1}
+{"acquire_ms": 0.7384340278804302, "claim_ms": 2.019549021497369, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496103, "task": "task-0137", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496133, "task": "task-0137", "token": 1}
+{"acquire_ms": 1.919463975355029, "claim_ms": 3.6160890012979507, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496136, "task": "task-0582", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496160, "task": "task-0582", "token": 1}
+{"acquire_ms": 2.307932125404477, "claim_ms": 3.7073830608278513, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496164, "task": "task-0453", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496180, "task": "task-0453", "token": 1}
+{"acquire_ms": 2.087967935949564, "claim_ms": 4.667323082685471, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496184, "task": "task-0157", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496206, "task": "task-0157", "token": 1}
+{"acquire_ms": 1.5064540784806013, "claim_ms": 3.284539096057415, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496209, "task": "task-0109", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496228, "task": "task-0109", "token": 1}
+{"acquire_ms": 1.8597119487822056, "claim_ms": 3.0690329149365425, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496231, "task": "task-0617", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496247, "task": "task-0617", "token": 1}
+{"acquire_ms": 2.3020149674266577, "claim_ms": 3.6964660976082087, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496251, "task": "task-0029", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496280, "task": "task-0029", "token": 1}
+{"acquire_ms": 1.673082821071148, "claim_ms": 2.7434839867055416, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496283, "task": "task-0156", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496305, "task": "task-0156", "token": 1}
+{"acquire_ms": 2.243013819679618, "claim_ms": 3.6565898917615414, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496308, "task": "task-0208", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496339, "task": "task-0208", "token": 1}
+{"acquire_ms": 1.0421089828014374, "claim_ms": 2.6851079892367125, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496342, "task": "task-0012", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496365, "task": "task-0012", "token": 1}
+{"acquire_ms": 1.8105858471244574, "claim_ms": 3.2411208376288414, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496368, "task": "task-0401", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496383, "task": "task-0401", "token": 1}
+{"acquire_ms": 1.9775480031967163, "claim_ms": 3.282913938164711, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496387, "task": "task-0351", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496412, "task": "task-0351", "token": 1}
+{"acquire_ms": 1.6990830190479755, "claim_ms": 3.517793957144022, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496416, "task": "task-0513", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496434, "task": "task-0513", "token": 1}
+{"acquire_ms": 0.8354790043085814, "claim_ms": 2.5566460099071264, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496437, "task": "task-0388", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496467, "task": "task-0388", "token": 1}
+{"acquire_ms": 2.176344860345125, "claim_ms": 4.132059868425131, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496471, "task": "task-0418", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496487, "task": "task-0418", "token": 1}
+{"acquire_ms": 3.2341210171580315, "claim_ms": 5.252420902252197, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496492, "task": "task-0216", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496508, "task": "task-0216", "token": 1}
+{"acquire_ms": 1.4093678910285234, "claim_ms": 2.582231070846319, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496511, "task": "task-0564", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496523, "task": "task-0564", "token": 1}
+{"acquire_ms": 3.0449500773102045, "claim_ms": 7.073590997606516, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496530, "task": "task-0413", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496558, "task": "task-0413", "token": 1}
+{"acquire_ms": 3.5957549698650837, "claim_ms": 6.194818997755647, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496564, "task": "task-0054", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496588, "task": "task-0054", "token": 1}
+{"acquire_ms": 2.890778938308358, "claim_ms": 5.264420993626118, "ev": "claim", "misses": 0, "peer": "peer-11", "t": 1789623496593, "task": "task-0275", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496624, "task": "task-0275", "token": 1}
+{"acquire_ms": 2.8241940308362246, "claim_ms": 5.56347006931901, "ev": "claim", "misses": 1, "peer": "peer-11", "t": 1789623496630, "task": "task-0377", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496650, "task": "task-0377", "token": 1}
+{"acquire_ms": 2.1601361222565174, "claim_ms": 6.100815953686833, "ev": "claim", "misses": 1, "peer": "peer-11", "t": 1789623496656, "task": "task-0594", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-11", "t": 1789623496686, "task": "task-0594", "token": 1}
+{"ev": "exit", "misses": 0, "peer": "peer-11", "reason": "no pending tasks", "t": 1789623496687}
+{"acquire_ms": 1.7405841499567032, "claim_ms": 2.868404146283865, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495671, "task": "task-0067", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495688, "task": "task-0067", "token": 1}
+{"acquire_ms": 1.8780881073325872, "claim_ms": 3.391750156879425, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495692, "task": "task-0462", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495719, "task": "task-0462", "token": 1}
+{"acquire_ms": 1.8815048970282078, "claim_ms": 3.167494898661971, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495722, "task": "task-0021", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495741, "task": "task-0021", "token": 1}
+{"acquire_ms": 2.9467809945344925, "claim_ms": 4.726323997601867, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495746, "task": "task-0391", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495762, "task": "task-0391", "token": 1}
+{"acquire_ms": 1.061026006937027, "claim_ms": 2.1494280081242323, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495765, "task": "task-0554", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495777, "task": "task-0554", "token": 1}
+{"acquire_ms": 2.3954331409186125, "claim_ms": 4.333231132477522, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495782, "task": "task-0107", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495810, "task": "task-0107", "token": 1}
+{"acquire_ms": 1.424659974873066, "claim_ms": 2.6467309799045324, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495813, "task": "task-0612", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495830, "task": "task-0612", "token": 1}
+{"acquire_ms": 2.3150560446083546, "claim_ms": 5.001456011086702, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495835, "task": "task-0239", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495856, "task": "task-0239", "token": 1}
+{"acquire_ms": 1.9880910404026508, "claim_ms": 3.857053117826581, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495861, "task": "task-0205", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495887, "task": "task-0205", "token": 1}
+{"acquire_ms": 2.2158040665090084, "claim_ms": 3.7427169736474752, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495891, "task": "task-0002", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495915, "task": "task-0002", "token": 1}
+{"acquire_ms": 2.142928075045347, "claim_ms": 3.9328879211097956, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495919, "task": "task-0160", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495934, "task": "task-0160", "token": 1}
+{"acquire_ms": 1.8912551458925009, "claim_ms": 3.112743142992258, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495937, "task": "task-0583", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495954, "task": "task-0583", "token": 1}
+{"acquire_ms": 1.3686171732842922, "claim_ms": 3.3162899781018496, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495957, "task": "task-0039", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495978, "task": "task-0039", "token": 1}
+{"acquire_ms": 1.1432359460741282, "claim_ms": 2.281180815771222, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623495980, "task": "task-0078", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623495997, "task": "task-0078", "token": 1}
+{"acquire_ms": 2.2608889266848564, "claim_ms": 3.7646759301424026, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496001, "task": "task-0183", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496021, "task": "task-0183", "token": 1}
+{"acquire_ms": 1.6334149986505508, "claim_ms": 3.501002909615636, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496025, "task": "task-0385", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496047, "task": "task-0385", "token": 1}
+{"acquire_ms": 2.401767997071147, "claim_ms": 4.490360850468278, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496052, "task": "task-0432", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496082, "task": "task-0432", "token": 1}
+{"acquire_ms": 1.3316988479346037, "claim_ms": 3.0591997783631086, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496085, "task": "task-0375", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496102, "task": "task-0375", "token": 1}
+{"acquire_ms": 0.7303520105779171, "claim_ms": 1.9491731654852629, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496104, "task": "task-0000", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496124, "task": "task-0000", "token": 1}
+{"acquire_ms": 0.775603111833334, "claim_ms": 1.662624068558216, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496125, "task": "task-0319", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496139, "task": "task-0319", "token": 1}
+{"acquire_ms": 1.5484129544347525, "claim_ms": 3.282788908109069, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496143, "task": "task-0491", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496162, "task": "task-0491", "token": 1}
+{"acquire_ms": 2.820901805534959, "claim_ms": 4.976746859028935, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496167, "task": "task-0020", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496198, "task": "task-0020", "token": 1}
+{"acquire_ms": 1.2989479582756758, "claim_ms": 2.892903983592987, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496202, "task": "task-0637", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496218, "task": "task-0637", "token": 1}
+{"acquire_ms": 1.4651608653366566, "claim_ms": 3.0167410150170326, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496221, "task": "task-0261", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496241, "task": "task-0261", "token": 1}
+{"acquire_ms": 0.7463940419256687, "claim_ms": 1.6869581304490566, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496243, "task": "task-0100", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496259, "task": "task-0100", "token": 1}
+{"acquire_ms": 1.6621239483356476, "claim_ms": 3.3391660545021296, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496262, "task": "task-0548", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496293, "task": "task-0548", "token": 1}
+{"acquire_ms": 1.793751958757639, "claim_ms": 3.897762158885598, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496297, "task": "task-0408", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496315, "task": "task-0408", "token": 1}
+{"acquire_ms": 1.2108630035072565, "claim_ms": 2.701982855796814, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496318, "task": "task-0023", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496336, "task": "task-0023", "token": 1}
+{"acquire_ms": 1.792960800230503, "claim_ms": 4.401232814416289, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496340, "task": "task-0376", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496357, "task": "task-0376", "token": 1}
+{"acquire_ms": 1.7489180900156498, "claim_ms": 4.0870169177651405, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496362, "task": "task-0486", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496384, "task": "task-0486", "token": 1}
+{"acquire_ms": 2.5672290939837694, "claim_ms": 4.122267942875624, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496389, "task": "task-0286", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496410, "task": "task-0286", "token": 1}
+{"acquire_ms": 1.9062559586018324, "claim_ms": 3.563713049516082, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496413, "task": "task-0353", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496443, "task": "task-0353", "token": 1}
+{"acquire_ms": 2.698815893381834, "claim_ms": 4.994580987840891, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496448, "task": "task-0222", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496478, "task": "task-0222", "token": 1}
+{"acquire_ms": 1.3071161229163408, "claim_ms": 3.321373136714101, "ev": "claim", "misses": 1, "peer": "peer-12", "t": 1789623496481, "task": "task-0636", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496504, "task": "task-0636", "token": 1}
+{"acquire_ms": 1.3577421195805073, "claim_ms": 2.8471541590988636, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496507, "task": "task-0287", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496531, "task": "task-0287", "token": 1}
+{"acquire_ms": 1.1002770625054836, "claim_ms": 4.660072969272733, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496536, "task": "task-0623", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496564, "task": "task-0623", "token": 1}
+{"acquire_ms": 2.1647620014846325, "claim_ms": 6.994005991145968, "ev": "claim", "misses": 0, "peer": "peer-12", "t": 1789623496571, "task": "task-0260", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496595, "task": "task-0260", "token": 1}
+{"acquire_ms": 3.0639078468084335, "claim_ms": 6.448699859902263, "ev": "claim", "misses": 1, "peer": "peer-12", "t": 1789623496601, "task": "task-0419", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496619, "task": "task-0419", "token": 1}
+{"acquire_ms": 3.676965134218335, "claim_ms": 7.328930078074336, "ev": "claim", "misses": 2, "peer": "peer-12", "t": 1789623496627, "task": "task-0306", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496640, "task": "task-0306", "token": 1}
+{"acquire_ms": 1.061026006937027, "claim_ms": 2.2217631340026855, "ev": "claim", "misses": 1, "peer": "peer-12", "t": 1789623496642, "task": "task-0639", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-12", "t": 1789623496669, "task": "task-0639", "token": 1}
+{"ev": "exit", "misses": 4, "peer": "peer-12", "reason": "no pending tasks", "t": 1789623496696}
+{"acquire_ms": 0.9481478482484818, "claim_ms": 1.9035469740629196, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495627, "task": "task-0308", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495657, "task": "task-0308", "token": 1}
+{"acquire_ms": 3.979223081842065, "claim_ms": 5.629972089082003, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495663, "task": "task-0126", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495696, "task": "task-0126", "token": 1}
+{"acquire_ms": 2.0305500365793705, "claim_ms": 4.241438116878271, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495700, "task": "task-0215", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495722, "task": "task-0215", "token": 1}
+{"acquire_ms": 2.5144361425191164, "claim_ms": 4.433399997651577, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495727, "task": "task-0553", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495744, "task": "task-0553", "token": 1}
+{"acquire_ms": 2.3998511023819447, "claim_ms": 5.031289998441935, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495750, "task": "task-0546", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495776, "task": "task-0546", "token": 1}
+{"acquire_ms": 1.4630360528826714, "claim_ms": 2.9836150351911783, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495779, "task": "task-0084", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495803, "task": "task-0084", "token": 1}
+{"acquire_ms": 1.662540016695857, "claim_ms": 2.772401086986065, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495806, "task": "task-0080", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495833, "task": "task-0080", "token": 1}
+{"acquire_ms": 1.0984018445014954, "claim_ms": 3.1399098224937916, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495837, "task": "task-0395", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495859, "task": "task-0395", "token": 1}
+{"acquire_ms": 1.4313680585473776, "claim_ms": 3.052158048376441, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495863, "task": "task-0365", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495887, "task": "task-0365", "token": 1}
+{"acquire_ms": 1.8200450576841831, "claim_ms": 3.4574600867927074, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495890, "task": "task-0603", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495921, "task": "task-0603", "token": 1}
+{"acquire_ms": 1.1029851157218218, "claim_ms": 2.2610549349337816, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495923, "task": "task-0634", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495942, "task": "task-0634", "token": 1}
+{"acquire_ms": 0.7994780316948891, "claim_ms": 1.6557909548282623, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495943, "task": "task-0271", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495963, "task": "task-0271", "token": 1}
+{"acquire_ms": 1.104444032534957, "claim_ms": 2.2644721902906895, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495966, "task": "task-0414", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623495987, "task": "task-0414", "token": 1}
+{"acquire_ms": 1.8808369059115648, "claim_ms": 3.1342848669737577, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623495990, "task": "task-0032", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496004, "task": "task-0032", "token": 1}
+{"acquire_ms": 1.7657100688666105, "claim_ms": 2.8210689779371023, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496007, "task": "task-0232", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496024, "task": "task-0232", "token": 1}
+{"acquire_ms": 1.0099841747432947, "claim_ms": 2.29076505638659, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496027, "task": "task-0404", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496058, "task": "task-0404", "token": 1}
+{"acquire_ms": 1.66387390345335, "claim_ms": 2.9188639018684626, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496061, "task": "task-0135", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496091, "task": "task-0135", "token": 1}
+{"acquire_ms": 0.9376888629049063, "claim_ms": 1.8405448645353317, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496093, "task": "task-0361", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496113, "task": "task-0361", "token": 1}
+{"acquire_ms": 1.0002742055803537, "claim_ms": 2.6699400041252375, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496116, "task": "task-0242", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496142, "task": "task-0242", "token": 1}
+{"acquire_ms": 1.2127798981964588, "claim_ms": 2.6486068964004517, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496145, "task": "task-0187", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496170, "task": "task-0187", "token": 1}
+{"acquire_ms": 2.017508028075099, "claim_ms": 3.874387126415968, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496174, "task": "task-0168", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496190, "task": "task-0168", "token": 1}
+{"acquire_ms": 1.101277070119977, "claim_ms": 2.3334319703280926, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496193, "task": "task-0307", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496223, "task": "task-0307", "token": 1}
+{"acquire_ms": 1.7522519920021296, "claim_ms": 3.411833895370364, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496227, "task": "task-0143", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496253, "task": "task-0143", "token": 1}
+{"acquire_ms": 2.11742683313787, "claim_ms": 3.75555083155632, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496257, "task": "task-0422", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496269, "task": "task-0422", "token": 1}
+{"acquire_ms": 2.955780830234289, "claim_ms": 4.516485845670104, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496274, "task": "task-0045", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496287, "task": "task-0045", "token": 1}
+{"acquire_ms": 2.3985998705029488, "claim_ms": 4.089599940925837, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496291, "task": "task-0233", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496310, "task": "task-0233", "token": 1}
+{"acquire_ms": 1.622539944946766, "claim_ms": 3.303163917735219, "ev": "claim", "misses": 1, "peer": "peer-13", "t": 1789623496314, "task": "task-0540", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496330, "task": "task-0540", "token": 1}
+{"acquire_ms": 2.7347749564796686, "claim_ms": 4.557527834549546, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496335, "task": "task-0357", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496356, "task": "task-0357", "token": 1}
+{"acquire_ms": 2.311890944838524, "claim_ms": 4.261896945536137, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496361, "task": "task-0195", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496390, "task": "task-0195", "token": 1}
+{"acquire_ms": 2.613106044009328, "claim_ms": 4.436817020177841, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496394, "task": "task-0051", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496415, "task": "task-0051", "token": 1}
+{"acquire_ms": 2.2402629256248474, "claim_ms": 4.175852984189987, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496419, "task": "task-0265", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496442, "task": "task-0265", "token": 1}
+{"acquire_ms": 2.4564359337091446, "claim_ms": 4.461234901100397, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496447, "task": "task-0301", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496461, "task": "task-0301", "token": 1}
+{"acquire_ms": 0.9412309154868126, "claim_ms": 2.6156059466302395, "ev": "claim", "misses": 1, "peer": "peer-13", "t": 1789623496464, "task": "task-0010", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496482, "task": "task-0010", "token": 1}
+{"acquire_ms": 2.479895018041134, "claim_ms": 4.253645893186331, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496486, "task": "task-0246", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496512, "task": "task-0246", "token": 1}
+{"acquire_ms": 2.6398978661745787, "claim_ms": 6.159818032756448, "ev": "claim", "misses": 1, "peer": "peer-13", "t": 1789623496518, "task": "task-0448", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496539, "task": "task-0448", "token": 1}
+{"acquire_ms": 3.295288886874914, "claim_ms": 5.226044915616512, "ev": "claim", "misses": 2, "peer": "peer-13", "t": 1789623496545, "task": "task-0390", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496572, "task": "task-0390", "token": 1}
+{"acquire_ms": 1.1084428988397121, "claim_ms": 3.616587957367301, "ev": "claim", "misses": 2, "peer": "peer-13", "t": 1789623496576, "task": "task-0288", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496594, "task": "task-0288", "token": 1}
+{"acquire_ms": 3.032949985936284, "claim_ms": 6.336946971714497, "ev": "claim", "misses": 1, "peer": "peer-13", "t": 1789623496601, "task": "task-0529", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496615, "task": "task-0529", "token": 1}
+{"acquire_ms": 1.0445259977132082, "claim_ms": 2.0365919917821884, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496617, "task": "task-0424", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496635, "task": "task-0424", "token": 1}
+{"acquire_ms": 0.8921469561755657, "claim_ms": 2.3303069174289703, "ev": "claim", "misses": 0, "peer": "peer-13", "t": 1789623496637, "task": "task-0278", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-13", "t": 1789623496669, "task": "task-0278", "token": 1}
+{"ev": "exit", "misses": 4, "peer": "peer-13", "reason": "no pending tasks", "t": 1789623496692}
+{"acquire_ms": 1.1231100652366877, "claim_ms": 4.993705078959465, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495664, "task": "task-0482", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495695, "task": "task-0482", "token": 1}
+{"acquire_ms": 2.3872260935604572, "claim_ms": 4.8370361328125, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495700, "task": "task-0217", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495726, "task": "task-0217", "token": 1}
+{"acquire_ms": 1.1722368653863668, "claim_ms": 2.5568539276719093, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495729, "task": "task-0170", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495753, "task": "task-0170", "token": 1}
+{"acquire_ms": 0.828352989628911, "claim_ms": 1.6757911071181297, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495755, "task": "task-0223", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495777, "task": "task-0223", "token": 1}
+{"acquire_ms": 2.157761948183179, "claim_ms": 4.280854947865009, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495782, "task": "task-0477", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495806, "task": "task-0477", "token": 1}
+{"acquire_ms": 1.2604480143636465, "claim_ms": 2.2450140677392483, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495808, "task": "task-0459", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495840, "task": "task-0459", "token": 1}
+{"acquire_ms": 1.6109149437397718, "claim_ms": 3.03869997151196, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495843, "task": "task-0527", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495872, "task": "task-0527", "token": 1}
+{"acquire_ms": 1.748042879626155, "claim_ms": 3.038408001884818, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495875, "task": "task-0018", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495888, "task": "task-0018", "token": 1}
+{"acquire_ms": 1.4248681254684925, "claim_ms": 2.9922400135546923, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495891, "task": "task-0478", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495914, "task": "task-0478", "token": 1}
+{"acquire_ms": 1.9802150782197714, "claim_ms": 3.732383018359542, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495918, "task": "task-0569", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495945, "task": "task-0569", "token": 1}
+{"acquire_ms": 0.708684092387557, "claim_ms": 1.5920810401439667, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495947, "task": "task-0576", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495968, "task": "task-0576", "token": 1}
+{"acquire_ms": 1.2551138643175364, "claim_ms": 2.2524718660861254, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495970, "task": "task-0277", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623495983, "task": "task-0277", "token": 1}
+{"acquire_ms": 1.533788163214922, "claim_ms": 2.950947964563966, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623495986, "task": "task-0620", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496007, "task": "task-0620", "token": 1}
+{"acquire_ms": 1.6602911055088043, "claim_ms": 3.4730848856270313, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496011, "task": "task-0524", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496031, "task": "task-0524", "token": 1}
+{"acquire_ms": 1.7707939259707928, "claim_ms": 3.0325329862535, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496034, "task": "task-0131", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496059, "task": "task-0131", "token": 1}
+{"acquire_ms": 1.595539040863514, "claim_ms": 2.5330199860036373, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496061, "task": "task-0350", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496083, "task": "task-0350", "token": 1}
+{"acquire_ms": 1.044068019837141, "claim_ms": 2.7168591041117907, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496086, "task": "task-0053", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496116, "task": "task-0053", "token": 1}
+{"acquire_ms": 0.7371020037680864, "claim_ms": 1.8602539785206318, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496118, "task": "task-0615", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496148, "task": "task-0615", "token": 1}
+{"acquire_ms": 1.058775931596756, "claim_ms": 2.364765852689743, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496150, "task": "task-0439", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496171, "task": "task-0439", "token": 1}
+{"acquire_ms": 1.7304590437561274, "claim_ms": 3.25312209315598, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496175, "task": "task-0019", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496186, "task": "task-0019", "token": 1}
+{"acquire_ms": 0.9347309824079275, "claim_ms": 1.8962968606501818, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496188, "task": "task-0329", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496203, "task": "task-0329", "token": 1}
+{"acquire_ms": 2.0230079535394907, "claim_ms": 3.1265770085155964, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496206, "task": "task-0119", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496223, "task": "task-0119", "token": 1}
+{"acquire_ms": 1.5930391382426023, "claim_ms": 2.94819800183177, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496226, "task": "task-0613", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496257, "task": "task-0613", "token": 1}
+{"acquire_ms": 1.422201981768012, "claim_ms": 3.062866861000657, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496260, "task": "task-0570", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496286, "task": "task-0570", "token": 1}
+{"acquire_ms": 2.475727116689086, "claim_ms": 4.9060790333896875, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496291, "task": "task-0516", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496307, "task": "task-0516", "token": 1}
+{"acquire_ms": 1.5129949897527695, "claim_ms": 3.4602510277181864, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496311, "task": "task-0378", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496326, "task": "task-0378", "token": 1}
+{"acquire_ms": 2.0659668371081352, "claim_ms": 3.7497589364647865, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496330, "task": "task-0431", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496357, "task": "task-0431", "token": 1}
+{"acquire_ms": 1.8074610270559788, "claim_ms": 4.089016932994127, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496362, "task": "task-0369", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496387, "task": "task-0369", "token": 1}
+{"acquire_ms": 1.9426310900598764, "claim_ms": 4.975580144673586, "ev": "claim", "misses": 1, "peer": "peer-14", "t": 1789623496392, "task": "task-0497", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496412, "task": "task-0497", "token": 1}
+{"acquire_ms": 1.6692080534994602, "claim_ms": 4.07022493891418, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496416, "task": "task-0295", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496432, "task": "task-0295", "token": 1}
+{"acquire_ms": 1.491911942139268, "claim_ms": 3.5702548921108246, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496436, "task": "task-0269", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496455, "task": "task-0269", "token": 1}
+{"acquire_ms": 1.1795710306614637, "claim_ms": 2.3644750472158194, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496458, "task": "task-0122", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496483, "task": "task-0122", "token": 1}
+{"acquire_ms": 1.9578819628804922, "claim_ms": 3.662839997559786, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496487, "task": "task-0245", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496500, "task": "task-0245", "token": 1}
+{"acquire_ms": 1.634581945836544, "claim_ms": 4.39885794185102, "ev": "claim", "misses": 1, "peer": "peer-14", "t": 1789623496505, "task": "task-0110", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496530, "task": "task-0110", "token": 1}
+{"acquire_ms": 0.9561898186802864, "claim_ms": 4.16151899844408, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496535, "task": "task-0083", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496559, "task": "task-0083", "token": 1}
+{"acquire_ms": 3.8630119524896145, "claim_ms": 5.3594650235027075, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496565, "task": "task-0434", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496591, "task": "task-0434", "token": 1}
+{"acquire_ms": 3.101618029177189, "claim_ms": 5.7311400305479765, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496597, "task": "task-0013", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496626, "task": "task-0013", "token": 1}
+{"acquire_ms": 1.6604990232735872, "claim_ms": 5.016830982640386, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496631, "task": "task-0541", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496643, "task": "task-0541", "token": 1}
+{"acquire_ms": 1.9493401050567627, "claim_ms": 3.2500391826033592, "ev": "claim", "misses": 0, "peer": "peer-14", "t": 1789623496646, "task": "task-0253", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-14", "t": 1789623496669, "task": "task-0253", "token": 1}
+{"ev": "exit", "misses": 4, "peer": "peer-14", "reason": "no pending tasks", "t": 1789623496694}
+{"acquire_ms": 3.6758820060640574, "claim_ms": 6.412907969206572, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495662, "task": "task-0163", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495685, "task": "task-0163", "token": 1}
+{"acquire_ms": 1.9388808868825436, "claim_ms": 3.0818248633295298, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495688, "task": "task-0433", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495700, "task": "task-0433", "token": 1}
+{"acquire_ms": 0.988316023722291, "claim_ms": 2.4403510615229607, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495703, "task": "task-0332", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495716, "task": "task-0332", "token": 1}
+{"acquire_ms": 2.238305052742362, "claim_ms": 3.6685059312731028, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495720, "task": "task-0210", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495741, "task": "task-0210", "token": 1}
+{"acquire_ms": 3.5670450888574123, "claim_ms": 5.712348036468029, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495747, "task": "task-0638", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495759, "task": "task-0638", "token": 1}
+{"acquire_ms": 1.4997869729995728, "claim_ms": 2.47493595816195, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495762, "task": "task-0221", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495791, "task": "task-0221", "token": 1}
+{"acquire_ms": 1.0569009464234114, "claim_ms": 2.0704257767647505, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495793, "task": "task-0130", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495823, "task": "task-0130", "token": 1}
+{"acquire_ms": 2.745441859588027, "claim_ms": 4.358232021331787, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495828, "task": "task-0114", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495855, "task": "task-0114", "token": 1}
+{"acquire_ms": 1.6301230061799288, "claim_ms": 3.6288390401750803, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495859, "task": "task-0589", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495887, "task": "task-0589", "token": 1}
+{"acquire_ms": 1.4834951143711805, "claim_ms": 3.821510123088956, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495891, "task": "task-0088", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495910, "task": "task-0088", "token": 1}
+{"acquire_ms": 1.9977570045739412, "claim_ms": 3.327873069792986, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495913, "task": "task-0596", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495939, "task": "task-0596", "token": 1}
+{"acquire_ms": 0.9518149308860302, "claim_ms": 1.8655038438737392, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495941, "task": "task-0547", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495964, "task": "task-0547", "token": 1}
+{"acquire_ms": 0.6829749327152967, "claim_ms": 2.2682638373225927, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495967, "task": "task-0619", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623495991, "task": "task-0619", "token": 1}
+{"acquire_ms": 1.497369958087802, "claim_ms": 3.0863259453326464, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623495995, "task": "task-0560", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496016, "task": "task-0560", "token": 1}
+{"acquire_ms": 2.33664084225893, "claim_ms": 5.136667983606458, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496022, "task": "task-0188", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496048, "task": "task-0188", "token": 1}
+{"acquire_ms": 2.072551054880023, "claim_ms": 3.624172182753682, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496053, "task": "task-0198", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496064, "task": "task-0198", "token": 1}
+{"acquire_ms": 1.0392761323601007, "claim_ms": 2.2493889555335045, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496066, "task": "task-0526", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496088, "task": "task-0526", "token": 1}
+{"acquire_ms": 0.9873989038169384, "claim_ms": 1.8899210263043642, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496090, "task": "task-0184", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496111, "task": "task-0184", "token": 1}
+{"acquire_ms": 1.307615078985691, "claim_ms": 3.082366893067956, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496114, "task": "task-0566", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496126, "task": "task-0566", "token": 1}
+{"acquire_ms": 0.9665649849921465, "claim_ms": 2.063634106889367, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496128, "task": "task-0155", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496142, "task": "task-0155", "token": 1}
+{"acquire_ms": 1.0822350159287453, "claim_ms": 2.108301967382431, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496144, "task": "task-0519", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496171, "task": "task-0519", "token": 1}
+{"acquire_ms": 1.7405850812792778, "claim_ms": 3.6898411344736814, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496175, "task": "task-0285", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496196, "task": "task-0285", "token": 1}
+{"acquire_ms": 1.4297431334853172, "claim_ms": 2.5121860671788454, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496198, "task": "task-0235", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496218, "task": "task-0235", "token": 1}
+{"acquire_ms": 1.6324149910360575, "claim_ms": 3.7364668678492308, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496222, "task": "task-0630", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496250, "task": "task-0630", "token": 1}
+{"acquire_ms": 1.9654228817671537, "claim_ms": 3.9792219176888466, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496255, "task": "task-0241", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496286, "task": "task-0241", "token": 1}
+{"acquire_ms": 2.452310174703598, "claim_ms": 4.301272099837661, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496290, "task": "task-0123", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496313, "task": "task-0123", "token": 1}
+{"acquire_ms": 1.3083661906421185, "claim_ms": 2.760901115834713, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496316, "task": "task-0127", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496333, "task": "task-0127", "token": 1}
+{"acquire_ms": 3.4173759631812572, "claim_ms": 5.400882801041007, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496339, "task": "task-0194", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496365, "task": "task-0194", "token": 1}
+{"acquire_ms": 1.4542029239237309, "claim_ms": 3.008532105013728, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496369, "task": "task-0276", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496381, "task": "task-0276", "token": 1}
+{"acquire_ms": 1.6524149104952812, "claim_ms": 2.7058159466832876, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496383, "task": "task-0172", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496403, "task": "task-0172", "token": 1}
+{"acquire_ms": 1.6253311187028885, "claim_ms": 2.7504009194672108, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496407, "task": "task-0549", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496422, "task": "task-0549", "token": 1}
+{"acquire_ms": 1.1040689423680305, "claim_ms": 2.2291799541562796, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496425, "task": "task-0005", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496446, "task": "task-0005", "token": 1}
+{"acquire_ms": 1.4637019485235214, "claim_ms": 3.4875848796218634, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496450, "task": "task-0463", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496475, "task": "task-0463", "token": 1}
+{"acquire_ms": 1.3778670690953732, "claim_ms": 3.3980838488787413, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496479, "task": "task-0258", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496493, "task": "task-0258", "token": 1}
+{"acquire_ms": 2.0722600165754557, "claim_ms": 4.407441942021251, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496498, "task": "task-0192", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496513, "task": "task-0192", "token": 1}
+{"acquire_ms": 1.7730430699884892, "claim_ms": 5.294630071148276, "ev": "claim", "misses": 1, "peer": "peer-15", "t": 1789623496520, "task": "task-0103", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496544, "task": "task-0103", "token": 1}
+{"acquire_ms": 1.6170400194823742, "claim_ms": 3.803509986028075, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496548, "task": "task-0268", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496566, "task": "task-0268", "token": 1}
+{"acquire_ms": 2.0184251479804516, "claim_ms": 5.208336049690843, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496571, "task": "task-0446", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496585, "task": "task-0446", "token": 1}
+{"acquire_ms": 3.358623944222927, "claim_ms": 6.313655059784651, "ev": "claim", "misses": 1, "peer": "peer-15", "t": 1789623496591, "task": "task-0430", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496609, "task": "task-0430", "token": 1}
+{"acquire_ms": 2.048842143267393, "claim_ms": 3.198744961991906, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496613, "task": "task-0111", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496633, "task": "task-0111", "token": 1}
+{"acquire_ms": 0.9682739619165659, "claim_ms": 2.1690530702471733, "ev": "claim", "misses": 0, "peer": "peer-15", "t": 1789623496635, "task": "task-0501", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-15", "t": 1789623496657, "task": "task-0501", "token": 1}
+{"ev": "exit", "misses": 11, "peer": "peer-15", "reason": "no pending tasks", "t": 1789623496707}

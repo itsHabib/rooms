@@ -1,0 +1,129 @@
+{"acquire_ms": 0.9056671988219023, "claim_ms": 1.1054580099880695, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789621441816, "task": "task-0006", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621442448, "task": "task-0006", "token": 1}
+{"acquire_ms": 0.4695828538388014, "claim_ms": 0.593333039432764, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789621442449, "task": "task-0036", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0036/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789621442722}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0036/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789621442773}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0036/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-00", "t": 1789621442876}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621443078, "task": "task-0036", "token": 1}
+{"acquire_ms": 0.4835000727325678, "claim_ms": 0.587250106036663, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789621443078, "task": "task-0019", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621443637, "task": "task-0019", "token": 1}
+{"acquire_ms": 0.5767089314758778, "claim_ms": 0.7967089768499136, "ev": "claim", "misses": 1, "peer": "peer-00", "t": 1789621443638, "task": "task-0016", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621444108, "task": "task-0016", "token": 1}
+{"acquire_ms": 0.7192501798272133, "claim_ms": 0.8468341547995806, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789621444109, "task": "task-0010", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621444842, "task": "task-0010", "token": 1}
+{"acquire_ms": 0.5718749016523361, "claim_ms": 0.6944998167455196, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789621444843, "task": "task-0003", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621445257, "task": "task-0003", "token": 1}
+{"acquire_ms": 0.5017919465899467, "claim_ms": 0.6092498078942299, "ev": "claim", "misses": 0, "peer": "peer-00", "t": 1789621445257, "task": "task-0032", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-00", "t": 1789621445554, "task": "task-0032", "token": 1}
+{"ev": "exit", "misses": 39, "peer": "peer-00", "reason": "no pending tasks", "t": 1789621446223}
+{"acquire_ms": 0.7910409476608038, "claim_ms": 0.9457499254494905, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789621441820, "task": "task-0025", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621442539, "task": "task-0025", "token": 1}
+{"acquire_ms": 0.4777919966727495, "claim_ms": 0.5931248888373375, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789621442539, "task": "task-0029", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0029/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789621442676}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0029/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789621442730}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0029/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-01", "t": 1789621442835}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621443086, "task": "task-0029", "token": 1}
+{"acquire_ms": 0.6348341703414917, "claim_ms": 0.7697090040892363, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789621443087, "task": "task-0041", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621443589, "task": "task-0041", "token": 1}
+{"acquire_ms": 0.47975010238587856, "claim_ms": 0.5862500984221697, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789621443589, "task": "task-0021", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621444049, "task": "task-0021", "token": 1}
+{"acquire_ms": 0.6167080719023943, "claim_ms": 0.957417069002986, "ev": "claim", "misses": 2, "peer": "peer-01", "t": 1789621444050, "task": "task-0026", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621444529, "task": "task-0026", "token": 2}
+{"acquire_ms": 0.5940829869359732, "claim_ms": 0.7087499834597111, "ev": "claim", "misses": 0, "peer": "peer-01", "t": 1789621444530, "task": "task-0040", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621445059, "task": "task-0040", "token": 1}
+{"acquire_ms": 0.5699999164789915, "claim_ms": 0.8307078387588263, "ev": "claim", "misses": 2, "peer": "peer-01", "t": 1789621445060, "task": "task-0002", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621445313, "task": "task-0002", "token": 2}
+{"acquire_ms": 0.4500409122556448, "claim_ms": 0.7840828038752079, "ev": "claim", "misses": 3, "peer": "peer-01", "t": 1789621445314, "task": "task-0028", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-01", "t": 1789621445729, "task": "task-0028", "token": 1}
+{"ev": "exit", "misses": 21, "peer": "peer-01", "reason": "no pending tasks", "t": 1789621446222}
+{"acquire_ms": 0.7852909620851278, "claim_ms": 0.9684581309556961, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789621441822, "task": "task-0001", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621442222, "task": "task-0001", "token": 1}
+{"acquire_ms": 0.6887500640004873, "claim_ms": 0.8425409905612469, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789621442223, "task": "task-0046", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789621442629}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789621442681}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0046/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-02", "t": 1789621442782}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621442988, "task": "task-0046", "token": 1}
+{"acquire_ms": 0.6449171341955662, "claim_ms": 0.7881249766796827, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789621442988, "task": "task-0009", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621443411, "task": "task-0009", "token": 1}
+{"acquire_ms": 0.5227499641478062, "claim_ms": 0.6564999930560589, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789621443412, "task": "task-0014", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621443784, "task": "task-0014", "token": 1}
+{"acquire_ms": 0.5452090408653021, "claim_ms": 0.6745420396327972, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789621443785, "task": "task-0034", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621444528, "task": "task-0034", "token": 1}
+{"acquire_ms": 0.9419999551028013, "claim_ms": 1.1092079803347588, "ev": "claim", "misses": 0, "peer": "peer-02", "t": 1789621444529, "task": "task-0007", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621445171, "task": "task-0007", "token": 2}
+{"acquire_ms": 0.47870888374745846, "claim_ms": 0.8659588638693094, "ev": "claim", "misses": 4, "peer": "peer-02", "t": 1789621445172, "task": "task-0031", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-02", "t": 1789621445577, "task": "task-0031", "token": 1}
+{"ev": "exit", "misses": 35, "peer": "peer-02", "reason": "no pending tasks", "t": 1789621446213}
+{"acquire_ms": 0.9479159489274025, "claim_ms": 1.2389160692691803, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789621441815, "task": "task-0008", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621442427, "task": "task-0008", "token": 1}
+{"acquire_ms": 0.4478751216083765, "claim_ms": 0.5529171321541071, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789621442428, "task": "task-0042", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789621442696}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789621442751}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0042/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-03", "t": 1789621442856}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621443061, "task": "task-0042", "token": 1}
+{"acquire_ms": 0.45395782217383385, "claim_ms": 0.5514170043170452, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789621443062, "task": "task-0024", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621443460, "task": "task-0024", "token": 1}
+{"acquire_ms": 0.7043750956654549, "claim_ms": 0.8744159713387489, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789621443461, "task": "task-0017", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621443750, "task": "task-0017", "token": 1}
+{"acquire_ms": 0.5897919181734324, "claim_ms": 0.7348749786615372, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789621443751, "task": "task-0005", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621444323, "task": "task-0005", "token": 1}
+{"acquire_ms": 0.76916697435081, "claim_ms": 1.090124947950244, "ev": "claim", "misses": 1, "peer": "peer-03", "t": 1789621444324, "task": "task-0020", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621444996, "task": "task-0020", "token": 1}
+{"acquire_ms": 0.584667082875967, "claim_ms": 0.7492920849472284, "ev": "claim", "misses": 0, "peer": "peer-03", "t": 1789621444997, "task": "task-0012", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-03", "t": 1789621445530, "task": "task-0012", "token": 1}
+{"ev": "exit", "misses": 42, "peer": "peer-03", "reason": "no pending tasks", "t": 1789621446215}
+{"acquire_ms": 0.6260829977691174, "claim_ms": 1.0327911004424095, "ev": "claim", "misses": 2, "peer": "peer-04", "t": 1789621441821, "task": "task-0044", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789621442493, "task": "task-0044", "token": 1}
+{"acquire_ms": 0.6557910237461329, "claim_ms": 0.8486248552799225, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789621442494, "task": "task-0023", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0023/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789621442631}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0023/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789621442684}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0023/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-04", "t": 1789621442786}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789621443237, "task": "task-0023", "token": 1}
+{"acquire_ms": 0.4357921425253153, "claim_ms": 0.6126670632511377, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789621443238, "task": "task-0011", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789621443513, "task": "task-0011", "token": 1}
+{"acquire_ms": 0.4882090725004673, "claim_ms": 0.6897500716149807, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789621443514, "task": "task-0022", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789621443969, "task": "task-0022", "token": 1}
+{"acquire_ms": 0.7919999770820141, "claim_ms": 1.1428750585764647, "ev": "claim", "misses": 1, "peer": "peer-04", "t": 1789621443970, "task": "task-0045", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-04", "t": 1789621444347, "task": "task-0045", "token": 1}
+{"acquire_ms": 0.7153749465942383, "claim_ms": 0.8371251169592142, "ev": "claim", "misses": 0, "peer": "peer-04", "t": 1789621444348, "task": "task-0002", "token": 1}
+{"ev": "exit", "misses": 32, "peer": "peer-04", "reason": "no pending tasks", "t": 1789621446213}
+{"acquire_ms": 0.8819159120321274, "claim_ms": 1.0507081169635057, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789621441812, "task": "task-0043", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789621442514, "task": "task-0043", "token": 1}
+{"acquire_ms": 0.4653329961001873, "claim_ms": 0.6702500395476818, "ev": "claim", "misses": 1, "peer": "peer-05", "t": 1789621442515, "task": "task-0015", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0015/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789621442649}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0015/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789621442704}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0015/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-05", "t": 1789621442805}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789621443172, "task": "task-0015", "token": 1}
+{"acquire_ms": 0.4787908401340246, "claim_ms": 0.744332792237401, "ev": "claim", "misses": 2, "peer": "peer-05", "t": 1789621443173, "task": "task-0026", "token": 1}
+{"acquire_ms": 0.7364579942077398, "claim_ms": 0.9054159745573997, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789621444753, "task": "task-0000", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789621445071, "task": "task-0000", "token": 1}
+{"acquire_ms": 0.4877501633018255, "claim_ms": 0.5987090989947319, "ev": "claim", "misses": 0, "peer": "peer-05", "t": 1789621445071, "task": "task-0018", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-05", "t": 1789621445465, "task": "task-0018", "token": 1}
+{"ev": "exit", "misses": 59, "peer": "peer-05", "reason": "no pending tasks", "t": 1789621446231}
+{"acquire_ms": 0.7035830058157444, "claim_ms": 0.8280409965664148, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789621441820, "task": "task-0039", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789621442351, "task": "task-0039", "token": 1}
+{"acquire_ms": 0.4598330706357956, "claim_ms": 0.5574580281972885, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789621442352, "task": "task-0013", "token": 1}
+{"attempt": 0, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0013/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789621442623}
+{"attempt": 1, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0013/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789621442676}
+{"attempt": 2, "error": "[Errno 13] Permission denied: 'docs/experiments/swarm-plane-results/run-1/fault-file-seed4/scratch/store/tasks/task-0013/00000001.json'", "ev": "retry", "op": "extend", "peer": "peer-06", "t": 1789621442778}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789621443005, "task": "task-0013", "token": 1}
+{"acquire_ms": 0.530624995008111, "claim_ms": 0.6551670376211405, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789621443006, "task": "task-0027", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789621443567, "task": "task-0027", "token": 1}
+{"acquire_ms": 0.4816248547285795, "claim_ms": 0.6148337852209806, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789621443567, "task": "task-0035", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789621443854, "task": "task-0035", "token": 1}
+{"acquire_ms": 0.6165420636534691, "claim_ms": 0.7869589608162642, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789621443854, "task": "task-0047", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789621444206, "task": "task-0047", "token": 1}
+{"acquire_ms": 0.6719578523188829, "claim_ms": 1.072125043720007, "ev": "claim", "misses": 2, "peer": "peer-06", "t": 1789621444207, "task": "task-0038", "token": 1}
+{"acquire_ms": 0.8923748973757029, "claim_ms": 1.0395839344710112, "ev": "claim", "misses": 0, "peer": "peer-06", "t": 1789621445529, "task": "task-0038", "token": 2}
+{"accepted": true, "ev": "complete", "peer": "peer-06", "t": 1789621446211, "task": "task-0038", "token": 2}
+{"ev": "exit", "misses": 0, "peer": "peer-06", "reason": "no pending tasks", "t": 1789621446211}
+{"acquire_ms": 0.6702498067170382, "claim_ms": 0.8080408442765474, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789621441818, "task": "task-0007", "token": 1}
+{"acquire_ms": 0.6421247962862253, "claim_ms": 0.7606248836964369, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789621443152, "task": "task-0033", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789621443453, "task": "task-0033", "token": 1}
+{"acquire_ms": 0.7497079204767942, "claim_ms": 1.2632498983293772, "ev": "claim", "misses": 1, "peer": "peer-07", "t": 1789621443455, "task": "task-0037", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789621444061, "task": "task-0037", "token": 1}
+{"acquire_ms": 0.6709168665111065, "claim_ms": 0.9677079506218433, "ev": "claim", "misses": 1, "peer": "peer-07", "t": 1789621444062, "task": "task-0004", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789621444762, "task": "task-0004", "token": 1}
+{"acquire_ms": 0.5638750735670328, "claim_ms": 0.6820829585194588, "ev": "claim", "misses": 0, "peer": "peer-07", "t": 1789621444763, "task": "task-0030", "token": 1}
+{"accepted": true, "ev": "complete", "peer": "peer-07", "t": 1789621445502, "task": "task-0030", "token": 1}
+{"ev": "exit", "misses": 50, "peer": "peer-07", "reason": "no pending tasks", "t": 1789621446231}
