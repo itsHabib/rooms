@@ -74,9 +74,11 @@ class Swarm:
             self.restart({"peer": index})
 
     def store_restart(self, _event=None):
+        if self.backend == "file" and os.path.isdir(self.root + ".down"):
+            os.unlink(self.root)
+            os.rename(self.root + ".down", self.root)
         if self.backend == "file":
             os.makedirs(self.root, exist_ok=True)
-            os.chmod(self.root, 0o755)
             return
         if self.server and self.server.poll() is None:
             return
@@ -96,9 +98,13 @@ class Swarm:
         raise RuntimeError("%s server did not come up on port %d" % (self.backend, self.port))
 
     def store_kill(self, _event=None):
-        """A directory has no process to kill; revoking access is the nearest outage."""
+        """A directory has no process to kill; moving it away is the nearest outage,
+        and unlike revoking permissions it also stops a peer running as root. A
+        plain file takes its place so a restarting peer cannot seed a second store."""
+        if self.backend == "file" and os.path.isdir(self.root):
+            os.rename(self.root, self.root + ".down")
+            open(self.root, "w", encoding="utf-8").close()
         if self.backend == "file":
-            os.chmod(self.root, 0)
             return
         self.server.kill()
         self.server.wait()
@@ -156,8 +162,8 @@ class Swarm:
     def stop(self):
         if self.server:
             self.store_kill()
-        if os.path.isdir(self.root):
-            os.chmod(self.root, 0o755)
+        if self.backend == "file":
+            self.store_restart()
 
     def peer_events(self):
         events = []

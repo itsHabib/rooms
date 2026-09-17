@@ -1,0 +1,824 @@
+{
+  "fault_runs": [
+    {
+      "acquire_ms": {
+        "max": 4.428,
+        "n": 50,
+        "p50": 2.111,
+        "p95": 4.06
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 274,
+      "claim_ms": {
+        "max": 7.371,
+        "n": 50,
+        "p50": 3.473,
+        "p95": 6.566
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 1,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-file-seed1",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 15,
+      "seed": 1,
+      "store_retries": 40,
+      "tasks": 48,
+      "throughput_tasks_per_s": 9.56,
+      "wall_s": 5.02
+    },
+    {
+      "acquire_ms": {
+        "max": 7.59,
+        "n": 56,
+        "p50": 3.343,
+        "p95": 6.945
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 245,
+      "claim_ms": {
+        "max": 17.994,
+        "n": 56,
+        "p50": 5.738,
+        "p95": 9.855
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 7,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-file-seed2",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 13,
+      "seed": 2,
+      "store_retries": 62,
+      "tasks": 48,
+      "throughput_tasks_per_s": 8.45,
+      "wall_s": 5.678
+    },
+    {
+      "acquire_ms": {
+        "max": 16.072,
+        "n": 52,
+        "p50": 4.167,
+        "p95": 10.872
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 211,
+      "claim_ms": {
+        "max": 26.794,
+        "n": 52,
+        "p50": 7.524,
+        "p95": 18.438
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 4,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-file-seed3",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 14,
+      "seed": 3,
+      "store_retries": 71,
+      "tasks": 48,
+      "throughput_tasks_per_s": 7.72,
+      "wall_s": 6.221
+    },
+    {
+      "acquire_ms": {
+        "max": 11.674,
+        "n": 53,
+        "p50": 5.027,
+        "p95": 8.509
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 196,
+      "claim_ms": {
+        "max": 21.602,
+        "n": 53,
+        "p50": 8.04,
+        "p95": 14.683
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 1,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-file-seed4",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 15,
+      "seed": 4,
+      "store_retries": 21,
+      "tasks": 48,
+      "throughput_tasks_per_s": 9.77,
+      "wall_s": 4.913
+    },
+    {
+      "acquire_ms": {
+        "max": 10.298,
+        "n": 60,
+        "p50": 1.993,
+        "p95": 8.124
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 316,
+      "claim_ms": {
+        "max": 15.008,
+        "n": 60,
+        "p50": 3.447,
+        "p95": 10.852
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 12,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-file-seed5",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 12,
+      "seed": 5,
+      "store_retries": 78,
+      "tasks": 48,
+      "throughput_tasks_per_s": 6.32,
+      "wall_s": 7.597
+    },
+    {
+      "acquire_ms": {
+        "max": 5.328,
+        "n": 52,
+        "p50": 0.631,
+        "p95": 3.454
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 365,
+      "claim_ms": {
+        "max": 6.834,
+        "n": 52,
+        "p50": 1.135,
+        "p95": 5.717
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 2,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-fake-seed1",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 15,
+      "seed": 1,
+      "store_retries": 40,
+      "tasks": 48,
+      "throughput_tasks_per_s": 8.72,
+      "wall_s": 5.503
+    },
+    {
+      "acquire_ms": {
+        "max": 2.475,
+        "n": 51,
+        "p50": 0.694,
+        "p95": 1.832
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 315,
+      "claim_ms": {
+        "max": 3.486,
+        "n": 51,
+        "p50": 1.17,
+        "p95": 2.856
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 2,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-fake-seed2",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 13,
+      "seed": 2,
+      "store_retries": 65,
+      "tasks": 48,
+      "throughput_tasks_per_s": 9.05,
+      "wall_s": 5.306
+    },
+    {
+      "acquire_ms": {
+        "max": 2.759,
+        "n": 49,
+        "p50": 0.697,
+        "p95": 2.544
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 282,
+      "claim_ms": {
+        "max": 767.64,
+        "n": 49,
+        "p50": 1.195,
+        "p95": 4.295
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 1,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-fake-seed3",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 14,
+      "seed": 3,
+      "store_retries": 70,
+      "tasks": 48,
+      "throughput_tasks_per_s": 8.63,
+      "wall_s": 5.562
+    },
+    {
+      "acquire_ms": {
+        "max": 4.364,
+        "n": 53,
+        "p50": 0.622,
+        "p95": 2.131
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 285,
+      "claim_ms": {
+        "max": 4.589,
+        "n": 53,
+        "p50": 0.964,
+        "p95": 3.023
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 1,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-fake-seed4",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 15,
+      "seed": 4,
+      "store_retries": 21,
+      "tasks": 48,
+      "throughput_tasks_per_s": 11.06,
+      "wall_s": 4.342
+    },
+    {
+      "acquire_ms": {
+        "max": 3.079,
+        "n": 49,
+        "p50": 0.634,
+        "p95": 2.809
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 335,
+      "claim_ms": {
+        "max": 5.236,
+        "n": 49,
+        "p50": 1.118,
+        "p95": 4.53
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 1,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-fake-seed5",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 12,
+      "seed": 5,
+      "store_retries": 79,
+      "tasks": 48,
+      "throughput_tasks_per_s": 7.66,
+      "wall_s": 6.269
+    },
+    {
+      "acquire_ms": {
+        "max": 9.838,
+        "n": 52,
+        "p50": 0.85,
+        "p95": 1.459
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 340,
+      "claim_ms": {
+        "max": 10.233,
+        "n": 52,
+        "p50": 1.184,
+        "p95": 2.366
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 2,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-real-seed1",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 15,
+      "seed": 1,
+      "store_retries": 40,
+      "tasks": 48,
+      "throughput_tasks_per_s": 8.7,
+      "wall_s": 5.514
+    },
+    {
+      "acquire_ms": {
+        "max": 1.493,
+        "n": 52,
+        "p50": 0.844,
+        "p95": 1.43
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 258,
+      "claim_ms": {
+        "max": 2.378,
+        "n": 52,
+        "p50": 1.141,
+        "p95": 2.104
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 3,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-real-seed2",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 13,
+      "seed": 2,
+      "store_retries": 64,
+      "tasks": 48,
+      "throughput_tasks_per_s": 8.97,
+      "wall_s": 5.351
+    },
+    {
+      "acquire_ms": {
+        "max": 6.003,
+        "n": 49,
+        "p50": 0.811,
+        "p95": 3.021
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 336,
+      "claim_ms": {
+        "max": 1248.53,
+        "n": 49,
+        "p50": 1.103,
+        "p95": 3.845
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 1,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-real-seed3",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 14,
+      "seed": 3,
+      "store_retries": 70,
+      "tasks": 48,
+      "throughput_tasks_per_s": 8.54,
+      "wall_s": 5.62
+    },
+    {
+      "acquire_ms": {
+        "max": 2.15,
+        "n": 52,
+        "p50": 0.815,
+        "p95": 1.694
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 275,
+      "claim_ms": {
+        "max": 4.043,
+        "n": 52,
+        "p50": 1.086,
+        "p95": 2.354
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-real-seed4",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 15,
+      "seed": 4,
+      "store_retries": 21,
+      "tasks": 48,
+      "throughput_tasks_per_s": 11.07,
+      "wall_s": 4.335
+    },
+    {
+      "acquire_ms": {
+        "max": 5.239,
+        "n": 48,
+        "p50": 0.837,
+        "p95": 1.503
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 270,
+      "claim_ms": {
+        "max": 5.365,
+        "n": 48,
+        "p50": 1.154,
+        "p95": 2.326
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 48,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "fault-real-seed5",
+      "peers": 8,
+      "peers_gave_up": 0,
+      "schedule_events": 12,
+      "seed": 5,
+      "store_retries": 79,
+      "tasks": 48,
+      "throughput_tasks_per_s": 7.11,
+      "wall_s": 6.747
+    }
+  ],
+  "machine": {
+    "cpus": 4,
+    "machine": "aarch64",
+    "platform": "Linux-6.8.0-117-generic-aarch64-with-glibc2.41",
+    "python": "3.12.14",
+    "real_server": "/usr/bin/redis-server"
+  },
+  "options": {
+    "backends": "file,fake,real",
+    "fault_peers": 8,
+    "fault_seeds": 5,
+    "fault_tasks": 48,
+    "fault_ttl_ms": 400,
+    "fault_work_ms": 500,
+    "out": "docs/experiments/swarm-plane-results/run-2-container",
+    "peers": "4,16,64",
+    "tasks": 640,
+    "ttl_ms": 2000,
+    "work_ms": 20
+  },
+  "runs": [
+    {
+      "acquire_ms": {
+        "max": 6.003,
+        "n": 640,
+        "p50": 2.277,
+        "p95": 3.667
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 18,
+      "claim_ms": {
+        "max": 11.669,
+        "n": 640,
+        "p50": 5.215,
+        "p95": 7.758
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-file-p4",
+      "peers": 4,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 110.03,
+      "wall_s": 5.817
+    },
+    {
+      "acquire_ms": {
+        "max": 79.661,
+        "n": 640,
+        "p50": 25.618,
+        "p95": 50.42
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 195,
+      "claim_ms": {
+        "max": 102.79,
+        "n": 640,
+        "p50": 40.433,
+        "p95": 69.306
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-file-p16",
+      "peers": 16,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 76.16,
+      "wall_s": 8.403
+    },
+    {
+      "acquire_ms": {
+        "max": 178.217,
+        "n": 640,
+        "p50": 26.834,
+        "p95": 145.996
+      },
+      "backend": "file",
+      "claim_attempts_rejected": 2070,
+      "claim_ms": {
+        "max": 520.281,
+        "n": 640,
+        "p50": 42.271,
+        "p95": 344.031
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-file-p64",
+      "peers": 64,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 41.09,
+      "wall_s": 15.575
+    },
+    {
+      "acquire_ms": {
+        "max": 4.026,
+        "n": 640,
+        "p50": 0.738,
+        "p95": 2.146
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 21,
+      "claim_ms": {
+        "max": 6.534,
+        "n": 640,
+        "p50": 2.405,
+        "p95": 4.335
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-fake-p4",
+      "peers": 4,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 155.02,
+      "wall_s": 4.128
+    },
+    {
+      "acquire_ms": {
+        "max": 13.168,
+        "n": 640,
+        "p50": 3.964,
+        "p95": 8.055
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 170,
+      "claim_ms": {
+        "max": 22.959,
+        "n": 640,
+        "p50": 7.497,
+        "p95": 14.273
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-fake-p16",
+      "peers": 16,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 430.25,
+      "wall_s": 1.488
+    },
+    {
+      "acquire_ms": {
+        "max": 235.168,
+        "n": 640,
+        "p50": 47.086,
+        "p95": 63.968
+      },
+      "backend": "fake",
+      "claim_attempts_rejected": 1758,
+      "claim_ms": {
+        "max": 276.121,
+        "n": 640,
+        "p50": 80.542,
+        "p95": 136.114
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-fake-p64",
+      "peers": 64,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 250.47,
+      "wall_s": 2.555
+    },
+    {
+      "acquire_ms": {
+        "max": 4.44,
+        "n": 640,
+        "p50": 0.889,
+        "p95": 1.654
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 24,
+      "claim_ms": {
+        "max": 5.734,
+        "n": 640,
+        "p50": 2.21,
+        "p95": 3.118
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-real-p4",
+      "peers": 4,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 155.99,
+      "wall_s": 4.103
+    },
+    {
+      "acquire_ms": {
+        "max": 5.151,
+        "n": 640,
+        "p50": 1.738,
+        "p95": 3.24
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 187,
+      "claim_ms": {
+        "max": 10.308,
+        "n": 640,
+        "p50": 3.447,
+        "p95": 6.164
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-real-p16",
+      "peers": 16,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 527.21,
+      "wall_s": 1.214
+    },
+    {
+      "acquire_ms": {
+        "max": 49.557,
+        "n": 640,
+        "p50": 7.219,
+        "p95": 38.28
+      },
+      "backend": "real",
+      "claim_attempts_rejected": 1881,
+      "claim_ms": {
+        "max": 93.176,
+        "n": 640,
+        "p50": 15.397,
+        "p95": 61.776
+      },
+      "finished": true,
+      "invariants": {
+        "accepted": 640,
+        "accepted_duplicates": 0,
+        "ok": true,
+        "rejected_completions": 0,
+        "violations": []
+      },
+      "lost_leases": 0,
+      "name": "bench-real-p64",
+      "peers": 64,
+      "peers_gave_up": 0,
+      "store_retries": 0,
+      "tasks": 640,
+      "throughput_tasks_per_s": 532.14,
+      "wall_s": 1.203
+    }
+  ]
+}

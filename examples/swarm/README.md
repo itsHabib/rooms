@@ -93,8 +93,7 @@ against each real backend.
 
 - **Process mode on one machine is not a network partition.** Peers share a
   kernel, a page cache and a loopback interface. A store "kill" for the file
-  backend is `chmod 000` on the directory (which does nothing if you run as
-  root); for RESP it is `SIGKILL` of the server. Neither drops packets in one
+  backend is renaming the directory away; for RESP it is `SIGKILL` of the server. Neither drops packets in one
   direction, delays them, or splits the swarm into sides that each see a store.
 - **The fake server is not Redis.** It runs the commands under a Python lock in
   a threaded server, so its latency under load measures the fake and not a
