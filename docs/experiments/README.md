@@ -12,6 +12,7 @@ of them is a capacity claim.
 | The original ten cloud experiments, status and remaining work | [ten-experiments.md](ten-experiments.md), results in [cloud-results/](cloud-results/README.md) |
 | Experiments 11–13 (storage, eBPF tracing, deployment UI), planned | [storage-observability-deployments.md](storage-observability-deployments.md) |
 | Experiments 2a–2d and 14–22, questions and prototypes | [next-experiments.md](next-experiments.md) |
+| Experiments 23–34, a swarm of agents that runs in Rooms, planned | [fleet-swarm-experiments.md](fleet-swarm-experiments.md) |
 | How to rerun a clone workload and what to retain | [cloud-lab.md](cloud-lab.md) |
 | Substrate bugs found while experimenting | [../follow-ups.md](../follow-ups.md) |
 
@@ -81,7 +82,10 @@ good and nothing retires it.
 3. **Needs cloud hosts:** timed cross-host transfer for 2d and 17; 18 work
    stealing and failover; 2a and 2b at 16, 32 and 64 rooms. Rehearse locally
    first so host-hours go to measuring.
-4. **Blocked on hardware:** bare-metal legs of 1 and 3; GPU Room (7) needs a host
+4. **The swarm in Rooms:** experiments 23–34 put the workbench `swarm` fleet's seats
+   inside Rooms and try to break it; start with the warm seat (24) and
+   memory-based admission (25).
+5. **Blocked on hardware:** bare-metal legs of 1 and 3; GPU Room (7) needs a host
    that exposes an IOMMU.
 
 ## Sharing
