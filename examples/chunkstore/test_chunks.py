@@ -102,6 +102,12 @@ class RefusalTest(ChunkCase):
             self.store.put(b"not it", expect=chunks.sha256_hex(b"it"))
         self.assertEqual(self.store.hashes(), set())
 
+    def test_failed_write_leaves_no_temp_file(self):
+        with self.assertRaises(TypeError):
+            self.store._write_atomic(os.path.join(self.store.objects, "x"), "not bytes")
+        self.assertEqual(os.listdir(self.store.tmp), [])
+        self.assertEqual(os.listdir(self.store.objects), [])
+
     def test_manifest_cannot_name_a_path_outside_the_output(self):
         for path in ("../escape", "/etc/passwd", "a/b", "..", ""):
             manifest = {"version": 1, "name": "snap", "files": [{"path": path, "size": 0, "chunks": []}]}

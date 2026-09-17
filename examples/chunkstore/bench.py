@@ -171,7 +171,7 @@ def run_fetch(label, source, work, expect, args, seeds, corrupt=None, warm=None,
     if warm is not None:
         chunks.build_manifest(SET_A, warm, source.load_manifest(SET_B)["chunker"], local)
     out_dir = os.path.join(work, label, "out")
-    record = {"kind": "fetch", "run": label, "seed_count": seeds,"rate_mbps": rate, "corrupt_seed": corrupt}
+    record = {"kind": "fetch", "run": label, "seed_count": seeds, "rate_mbps": rate, "corrupt_seed": corrupt}
     with contextlib.ExitStack() as stack:
         urls = [
             stack.enter_context(serve.serving(source.root, rate=int(rate * 1e6), corrupt=(index == corrupt)))

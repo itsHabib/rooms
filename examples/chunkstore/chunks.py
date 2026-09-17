@@ -115,9 +115,13 @@ class Store:
 
     def _write_atomic(self, path, data):
         fd, tmp = tempfile.mkstemp(dir=self.tmp)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.replace(tmp, path)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp, path)
+        except BaseException:
+            os.unlink(tmp)
+            raise
 
 
 def _fixed_spans(size, chunk):

@@ -136,9 +136,16 @@ def load_have(swarm):
         if seed.dropped is not None:
             continue
         try:
-            seed.have = set(json.loads(swarm.get(seed, "/have")))
-        except (FetchError, ValueError, TypeError) as err:
+            seed.have = _parse_have(swarm.get(seed, "/have"))
+        except (FetchError, ValueError) as err:
             swarm.drop(seed, f"have: {err}")
+
+
+def _parse_have(raw):
+    listing = json.loads(raw)
+    if not isinstance(listing, list) or not all(isinstance(item, str) for item in listing):
+        raise ValueError("have listing is not a json list of strings")
+    return set(listing)
 
 
 def fetch_chunk(swarm, store, sha, length):
@@ -177,7 +184,8 @@ def _fetch(swarm, name, store, out_dir, workers, manifest_sha):
     needed = {sha: length for sha, length in wanted.items() if not store.has(sha)}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         jobs = [pool.submit(fetch_chunk, swarm, store, sha, length) for sha, length in needed.items()]
-        failures = [job.exception() for job in jobs if job.exception() is not None]
+        outcomes = [job.exception() for job in jobs]
+    failures = [err for err in outcomes if err is not None]
     if failures:
         raise FetchError(f"{len(failures)} chunks could not be fetched; first: {failures[0]}")
     stats = {

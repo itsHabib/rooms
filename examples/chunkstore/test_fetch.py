@@ -2,6 +2,7 @@ import contextlib
 import os
 import random
 import tempfile
+import threading
 import unittest
 
 import chunks
@@ -9,6 +10,26 @@ import fetch
 import serve
 
 KIB = 1024
+
+
+@contextlib.contextmanager
+def lying_have_seed(store_dir, body):
+    """A seed that serves real manifests and chunks but this body for /have."""
+
+    class Handler(serve.Handler):
+        def _have(self, arg):
+            return self._reply(200, body)
+
+    server = serve.make_server(store_dir)
+    server.RequestHandlerClass = Handler
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 class FetchTest(unittest.TestCase):
@@ -111,6 +132,16 @@ class FetchTest(unittest.TestCase):
                 fetch.fetch("snap", urls, local, manifest_sha="0" * 64)
             stats = fetch.fetch("snap", urls, local, manifest_sha=self.manifest_sha)
         self.assertEqual(stats["chunks_local"], 0)
+
+    def test_seed_with_malformed_have_is_dropped(self):
+        bodies = (b"{}", b'{"%s": 1}' % (b"0" * 64), b"[1, 2]", b"not json")
+        for index, body in enumerate(bodies):
+            local = chunks.Store(os.path.join(self.dir, "local-%d" % index))
+            with self.seeds(False) as urls, lying_have_seed(self.source.root, body) as liar:
+                stats = fetch.fetch("snap", [liar] + urls, local)
+            self.assertIn("have:", stats["seeds"][0]["dropped"], body)
+            self.assertEqual(stats["seeds"][0]["chunks"], 0)
+            self.assertEqual(stats["seeds"][1]["chunks"], stats["chunks_total"])
 
     def test_unreachable_seed_is_survived(self):
         local = chunks.Store(os.path.join(self.dir, "local"))
