@@ -5,7 +5,7 @@
 #   rooms-seat.sh up  <n> <wall-seconds> <out-dir>     keep N clones alive, start git daemon + binary server
 #   rooms-seat.sh down                                  kill the clones
 # Per turn (called by the runner with SEAT, PROMPT_FILE, RESUME, DIR, REMOTE, BRANCH, MODEL,
-# TURNS, SWARM_STORE in the environment; a child team's seats get their own BRANCH and store): rooms-seat.sh turn   -> prints the seat's JSON line last.
+# TURNS, TOOLS, SWARM_STORE in the environment; a child team's seats get their own BRANCH and store): rooms-seat.sh turn   -> prints the seat's JSON line last.
 set -euo pipefail
 STATE=${ROOMS_SEAT_STATE:-$HOME/seat-state}
 HOST_IP=${ROOMS_SEAT_HOST_IP:-10.128.0.3}
@@ -88,8 +88,8 @@ turn() {
     # Every runner-supplied value is passed through printf %q so the guest shell
     # sees it as one word. The seat reads /run/rooms/secrets.env itself.
     local cmd
-    cmd=$(printf 'export PATH=/nix/var/rooms/env/bin:$PATH SWARM_STORE=%q SWARM_INCARNATION=$(cat /proc/sys/kernel/random/uuid); cd ~ && ~/swarm seat run --seat %q --prompt %q --dir %q --remote %q --branch %q --resume %q --model %q --turns %q --skip-permissions' \
-        "$SWARM_STORE" "$SEAT" "prompts/$SEAT.txt" "work/$SEAT" "$remote" "${BRANCH:-}" "${RESUME:-}" "${MODEL:-}" "${TURNS:-0}")
+    cmd=$(printf 'export PATH=/nix/var/rooms/env/bin:$PATH SWARM_STORE=%q SWARM_INCARNATION=$(cat /proc/sys/kernel/random/uuid); cd ~ && ~/swarm seat run --seat %q --prompt %q --dir %q --remote %q --branch %q --resume %q --model %q --turns %q --tools %q --skip-permissions' \
+        "$SWARM_STORE" "$SEAT" "prompts/$SEAT.txt" "work/$SEAT" "$remote" "${BRANCH:-}" "${RESUME:-}" "${MODEL:-}" "${TURNS:-0}" "${TOOLS:-}")
     guest "$idx" "$cmd"
 }
 
