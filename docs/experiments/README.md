@@ -12,6 +12,7 @@ of them is a capacity claim.
 | The original ten cloud experiments, status and remaining work | [ten-experiments.md](ten-experiments.md), results in [cloud-results/](cloud-results/README.md) |
 | Experiments 11–13 (storage, eBPF tracing, deployment UI), planned | [storage-observability-deployments.md](storage-observability-deployments.md) |
 | Experiments 2a–2d and 14–22, questions and prototypes | [next-experiments.md](next-experiments.md) |
+| Experiments 23–34, a swarm of agents that runs in Rooms, planned | [fleet-swarm-experiments.md](fleet-swarm-experiments.md) |
 | How to rerun a clone workload and what to retain | [cloud-lab.md](cloud-lab.md) |
 | Substrate bugs found while experimenting | [../follow-ups.md](../follow-ups.md) |
 
@@ -24,6 +25,7 @@ of them is a capacity claim.
 | 2d, 17 | What does it cost to ship a snapshot? | A cold snapshot is 89% zeros: 58 MB to send of 537 MB. Related snapshots share only 20–24 MB at 64 KiB chunks. A warmed base is up to six times larger to ship. | [chunkstore-results](chunkstore-results/real-snapshots/README.md) |
 | 15 | Can peers in separate Rooms coordinate? | Yes, through Redis on the host: 240 of 240 tasks accepted exactly once at 2, 4 and 6 clones, including with a clone killed and the store restarted mid-run. About 4 ms per claim. | [lease-plane-in-rooms-results](lease-plane-in-rooms-results/README.md) |
 | 15, 21 | File store or networked store? | On one machine a directory is fine. Across a VM boundary it fell to 41 tasks/s while Redis held about 530. A model check found that a fencing token alone does not prevent double acceptance. | [lease-plane-results](lease-plane-results/README.md) |
+| 23 (first pass) | Can a fleet of real agents work in Rooms? | Yes. Two `claude -p` seats in clones built `kvlab` 20/20 for $2.62 in 230 s. Six seats on `shoplab` scored 78/86 in 1,655 s for $25.65 against 85/86 in 465 s for $8.88 outside Rooms. Seat-seconds per turn were 14.9 s in Rooms and 13.1 s outside, so the substrate is not the gap; the Rooms run took 616 turns to the local 188, with nine wakes to none. One run each. | workbench `cmd/swarm/gym/TEAM.md`, runs 5 and 6 |
 
 ## Lessons
 
@@ -46,6 +48,13 @@ of them is a capacity claim.
   address. Identity has to be minted after restore.
 - **Clones share no filesystem.** Anything that coordinates them is a network
   service, or nothing.
+- **A seat can live in one room across many turns.** A clone kept alive by a
+  long command is re-entered over SSH as often as needed, and its checkout and
+  session state persist; a secret delivered with `--secret` lands in
+  `/run/rooms/secrets.env` for the seat to read and never in the snapshot.
+- **The substrate hop is not where agent time goes.** Per-turn cost in Rooms
+  was within two seconds of a local seat; a slower fleet run was slower because
+  it took more turns, which points at prompts and coordination, not at Rooms.
 
 **About measuring**
 
@@ -81,7 +90,10 @@ good and nothing retires it.
 3. **Needs cloud hosts:** timed cross-host transfer for 2d and 17; 18 work
    stealing and failover; 2a and 2b at 16, 32 and 64 rooms. Rehearse locally
    first so host-hours go to measuring.
-4. **Blocked on hardware:** bare-metal legs of 1 and 3; GPU Room (7) needs a host
+4. **The swarm in Rooms:** experiments 23–34 put the workbench `swarm` fleet's seats
+   inside Rooms and try to break it; start with the warm seat (24) and
+   memory-based admission (25).
+5. **Blocked on hardware:** bare-metal legs of 1 and 3; GPU Room (7) needs a host
    that exposes an IOMMU.
 
 ## Sharing
