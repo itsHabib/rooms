@@ -1,6 +1,6 @@
 # Experiments 23–34: a swarm of agents that runs in Rooms
 
-Added at Michael's request on 2026-09-17. All are planned; none is built or
+All are planned; none is built or
 measured. The workbench `swarm` tool coordinates a flat fleet of coding agents:
 seats are branches, and nobody manages. Code lives only in git: a landing is a
 branch tip a seat pushed to the shared remote, pinned by the head it names, and
@@ -74,7 +74,8 @@ a ruling and writes task rows, and admission picks the children up later. So thi
 is runner behaviour triggered by new rows. When a split lands, snapshot the
 splitting seat and start each child from a clone of it, so each child inherits the checkout, caches and whatever the parent
 already built. Compare child time to first edit and tokens spent re-reading.
-**Fails if** inherited state misleads children more often than it saves them.
+**Fails if** children spend more tokens re-reading than a cold start costs, or
+their landings go red more often than cold children's.
 
 ## Deciding by running
 
@@ -88,7 +89,8 @@ intent plus the paths its branch touched); `ask` and `rule` are the ledger. On a
 contended check, clone the room, apply each approach
 in its own clone, run the suite, and record the ruling from the result. Compare
 with `swarm ask` on minutes to ruling, tokens, and how often the ruling is later
-reversed. **Fails if** most contention is about intent, which no test can rule on.
+reversed.
+**Fails if** most contention is about intent, which no test can rule on.
 Expect that: in the swarm session's runs so far no seat used `swarm ask` at all,
 because an exact spec leaves nothing to rule on. Run this one last.
 
@@ -102,7 +104,8 @@ writes a receipt keyed by that head; red heads block consolidation. Where the
 command runs is the swappable part. Make the executor a new clone at the pinned
 head, several heads at once. Plant a landing that passes only with a stale
 artifact from an earlier build. Measure verifications per minute and whether the
-planted landing goes red. **Fails if** clean rooms find nothing a shared checkout
+planted landing goes red.
+**Fails if** clean rooms find nothing a shared checkout
 misses, at several times the cost.
 
 ### 29. Rewind a red landing (*local, agents*)
@@ -112,7 +115,8 @@ wrong?
 
 **Prototype:** snapshot a seat at every commit to the store. When verification
 goes red, restore the seat one step earlier and hand that room to a second agent
-with the failing output. Extends experiment 20. **Fails if** snapshot overhead
+with the failing output. Extends experiment 20.
+**Fails if** snapshot overhead
 slows seats more than the rewind saves, or the second agent does no better than
 one given only the diff.
 
@@ -132,7 +136,8 @@ judges the store; add a second check that joins store to git: every work unit
 committed done corresponds to exactly one commit reachable from the remote's
 main, and no seat whose lease was fenced has a commit there. The join needs
 `work done` to record the head it landed, which the swarm session is adding.
-Extends experiment 21. **Fails if** any seed leaves a done unit without its
+Extends experiment 21.
+**Fails if** any seed leaves a done unit without its
 commit, a commit from a fenced seat on main, or a held claim nobody wakes.
 
 ### 31. The hostile seat (*local*)
@@ -148,14 +153,16 @@ credentials scoped by key prefix cannot fix it because every seat legitimately
 writes the same kinds of key; it needs per-seat signing or a broker in front of
 the store. Epoch replay should be blocked, since the contract fences it.
 **Fails if** anything other than the declared gap is missed. This is also the honest test of the
-follow-up that a guest can reach services on the host's LAN address.
+[follow-up](../follow-ups.md) that a guest can reach services on the host's LAN
+address.
 
 ### 32. Two hosts, one store (*cloud*)
 
 **Question:** does the flat fleet survive losing half its machines?
 
 **Prototype:** seats in Rooms on two hosts against one store. Cut one host off
-with the egress controls, then delete it. Survivors should take over its leases
+with the egress controls, then delete that host's VM outright so its clones die
+without warning. Survivors should take over its leases
 and finish; no commit may be accepted twice. Merges experiment 18.
 **Fails if** work is lost, duplicated, or waits on a human.
 
