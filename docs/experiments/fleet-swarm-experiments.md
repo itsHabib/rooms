@@ -71,9 +71,14 @@ better than starting three cold ones?
 
 **Prototype:** `swarm split` spawns nothing: it validates the children, records
 a ruling and writes task rows, and admission picks the children up later. So this
-is runner behaviour triggered by new rows. When a split lands, snapshot the
-splitting seat and start each child from a clone of it, so each child inherits the checkout, caches and whatever the parent
-already built. Compare child time to first edit and tokens spent re-reading.
+is runner behaviour triggered by new rows. When a split lands, start each child
+from a fresh neutral-base clone checked out to the splitting seat's exact git
+head, rather than a snapshot of the live seat — `snapshot.rs::plan` refuses any
+base that isn't a sealed neutral base, and the design forbids capturing an
+already-started agent's plaintext guest RAM. Each child still inherits the
+checkout and toolstore through git and the shared rootfs cache, just not
+through a live-VM snapshot. Compare child time to first edit and tokens spent
+re-reading.
 **Fails if** children spend more tokens re-reading than a cold start costs, or
 their landings go red more often than cold children's.
 
@@ -113,10 +118,12 @@ misses, at several times the cost.
 **Question:** can a failed landing be debugged from the moment before it went
 wrong?
 
-**Prototype:** snapshot a seat at every commit to the store. When verification
-goes red, restore the seat one step earlier and hand that room to a second agent
-with the failing output. Extends experiment 20.
-**Fails if** snapshot overhead
+**Prototype:** checkpoint a seat's exact git head at every commit to the store
+(no VM snapshot of the live seat — see experiment 26's note on why). When
+verification goes red, start a fresh neutral-base clone checked out to the
+prior checkpointed head and hand that room to a second agent with the failing
+output. Extends experiment 20.
+**Fails if** checkpoint-and-reclone overhead
 slows seats more than the rewind saves, or the second agent does no better than
 one given only the diff.
 
