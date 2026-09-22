@@ -32,3 +32,25 @@ The plotting recipe takes `readout.json` and an output directory; it requires
 Matplotlib. The evidence exporter uses an explicit exclusion list and scans for
 private-key/signed-URL markers. Review that list for your own workload: it is not
 a general-purpose secret detector and cannot make arbitrary captures publishable.
+
+## Seats in Rooms (`rooms-seat.sh`, `run-kvlab.sh`)
+
+`rooms-seat.sh` is the Rooms substrate for the workbench `swarm gym team --seat-cmd`
+runner: `up` keeps N clones alive with a long `--command` and delivers the
+Claude token through `--secret`, `turn` copies the runner's prompt into the
+seat's clone and runs `swarm seat run` there over SSH into the clone's network
+namespace, and `down` ends the clones. A room re-entered this way keeps the
+seat's checkout and session state between turns, which is what resume needs.
+**`swarm gym team --seat-cmd` and `swarm seat run` are not on workbench
+`main`** — the merged `cmd/swarm` CLI's verb set (`state`, `board`, `decide`,
+`resource`, `admit`, `watch`, `inbox`, `stats`, `poc`; see `cmd/swarm/main.go`
+and `cmd/swarm/README.md`) has no `gym` or `seat` verb today. That runner
+lives only on workbench's unmerged `swarm/real` experiment branch. Treat this
+recipe as targeting that branch, not `main`, until it lands there.
+`run-kvlab.sh` is the first real-agent run as it was staged on a GCP box on
+2026-09-18 (flat, two seats, `kvlab`, `claude-sonnet-5`): it expects the box
+prepared by `box.sh provision`, an Alpine agent image, a Go toolstore, a 2 GiB
+two-vCPU snapshot at `~/lab/snap2g`, the `swarm` binary at `~/swarm`, and the
+operator's token in `~/.swarm-token` (0600), which nothing here creates. The
+plumbing was verified end to end with a placeholder token; the run itself has
+not happened yet.
