@@ -91,10 +91,11 @@ both approaches and let the tests rule than to ask a peer for a ruling?
 
 **Prototype:** `swarm check` reads contention from git (each seat's declared
 intent plus the paths its branch touched); `ask` and `rule` are the ledger. On a
-contended check, clone the room, apply each approach
-in its own clone, run the suite, and record the ruling from the result. Compare
-with `swarm ask` on minutes to ruling, tokens, and how often the ruling is later
-reversed.
+contended check, reconstruct each approach from its pinned git head in a
+fresh neutral-base clone (not a live snapshot of either contending seat — see
+experiment 26's note), run the suite in each, and record the ruling from the
+result. Compare with `swarm ask` on minutes to ruling, tokens, and how often
+the ruling is later reversed.
 **Fails if** most contention is about intent, which no test can rule on.
 Expect that: in the swarm session's runs so far no seat used `swarm ask` at all,
 because an exact spec leaves nothing to rule on. Run this one last.
