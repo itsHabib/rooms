@@ -41,6 +41,12 @@ Claude token through `--secret`, `turn` copies the runner's prompt into the
 seat's clone and runs `swarm seat run` there over SSH into the clone's network
 namespace, and `down` ends the clones. A room re-entered this way keeps the
 seat's checkout and session state between turns, which is what resume needs.
+**`swarm gym team --seat-cmd` and `swarm seat run` are not on workbench
+`main`** — the merged `cmd/swarm` CLI's verb set (`state`, `board`, `decide`,
+`resource`, `admit`, `watch`, `inbox`, `stats`, `poc`; see `cmd/swarm/main.go`
+and `cmd/swarm/README.md`) has no `gym` or `seat` verb today. That runner
+lives only on workbench's unmerged `swarm/real` experiment branch. Treat this
+recipe as targeting that branch, not `main`, until it lands there.
 `run-kvlab.sh` is the first real-agent run as it was staged on a GCP box on
 2026-09-18 (flat, two seats, `kvlab`, `claude-sonnet-5`): it expects the box
 prepared by `box.sh provision`, an Alpine agent image, a Go toolstore, a 2 GiB

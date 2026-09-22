@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Rooms substrate for `swarm gym team --seat-cmd`: one seat turn inside a kept-alive clone.
 #
+# `swarm gym team --seat-cmd` and the `swarm seat run` call below target
+# workbench's unmerged `swarm/real` experiment branch, not `cmd/swarm` on
+# `main` (which has no `gym` or `seat` verb as of this writing). Build the
+# `swarm` binary from that branch before running this against a real box.
+#
 # Setup once (as the box user, token already in ~/.swarm-token, 0600):
 #   rooms-seat.sh up  <n> <wall-seconds> <out-dir>     keep N clones alive, start git daemon + binary server
 #   rooms-seat.sh down                                  kill the clones
