@@ -92,9 +92,17 @@ turn() {
     put "$idx" "$PROMPT_FILE" "prompts/$SEAT.txt"
     # Every runner-supplied value is passed through printf %q so the guest shell
     # sees it as one word. The seat reads /run/rooms/secrets.env itself.
+    # BRANCH, RESUME, MODEL and TOOLS are omitted entirely when unset rather
+    # than passed as an explicit empty string: an unset TOOLS in particular
+    # must fall through to swarm seat run's own default allowlist, not risk
+    # being read as "no tools allowed" or "no allowlist" by its flag parser.
     local cmd
-    cmd=$(printf 'export PATH=/nix/var/rooms/env/bin:$PATH SWARM_STORE=%q SWARM_INCARNATION=$(cat /proc/sys/kernel/random/uuid); cd ~ && ~/swarm seat run --seat %q --prompt %q --dir %q --remote %q --branch %q --resume %q --model %q --turns %q --tools %q --skip-permissions' \
-        "$SWARM_STORE" "$SEAT" "prompts/$SEAT.txt" "work/$SEAT" "$remote" "${BRANCH:-}" "${RESUME:-}" "${MODEL:-}" "${TURNS:-0}" "${TOOLS:-}")
+    cmd=$(printf 'export PATH=/nix/var/rooms/env/bin:$PATH SWARM_STORE=%q SWARM_INCARNATION=$(cat /proc/sys/kernel/random/uuid); cd ~ && ~/swarm seat run --seat %q --prompt %q --dir %q --remote %q --turns %q --skip-permissions' \
+        "$SWARM_STORE" "$SEAT" "prompts/$SEAT.txt" "work/$SEAT" "$remote" "${TURNS:-0}")
+    [ -n "${BRANCH:-}" ] && cmd="$cmd $(printf -- '--branch %q' "$BRANCH")"
+    [ -n "${RESUME:-}" ] && cmd="$cmd $(printf -- '--resume %q' "$RESUME")"
+    [ -n "${MODEL:-}" ] && cmd="$cmd $(printf -- '--model %q' "$MODEL")"
+    [ -n "${TOOLS:-}" ] && cmd="$cmd $(printf -- '--tools %q' "$TOOLS")"
     guest "$idx" "$cmd"
 }
 
